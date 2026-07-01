@@ -14,11 +14,23 @@ Each workstream maintains a **Workstream Delivery Record**:
 
 The record is a lightweight synchronization surface. BMM artifacts remain the source of truth.
 
+## Scenario-Hardened Loops
+
+The plan has been reviewed against an X-Large Shopify-to-custom-site migration scenario. The module now explicitly models four closure loops:
+
+- Workstream closure: BMM artifacts sync into WDRs.
+- Meeting closure: internal meetings, business reviews, special discussions, and offline follow-ups become logs, decisions, actions, WDR updates, business decision packets, or explicit no-ops.
+- Decision closure: FDE decisions, business decisions, risk acceptance, and scope changes are classified and tracked.
+- Acceptance closure: each acceptance criterion traces to evidence, confirmer, status, and gaps.
+
+Migration/cutover projects can use L0 baselines for data definitions, interface contracts, cutover gates, rollback/fallback standards, monitoring, and evidence rules.
+
 ## Planned Skills
 
 - `adp-project-kickoff`
 - `adp-workstream-register`
 - `adp-bmm-checkpoint-sync`
+- `adp-meeting-sync`
 - `adp-status-sync`
 - `adp-acceptance-readiness-review`
 - `adp-risk-dependency-change-review`

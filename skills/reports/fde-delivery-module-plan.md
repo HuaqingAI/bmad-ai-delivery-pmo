@@ -7,10 +7,10 @@ module_description: '帮助多条 FDE 工作线用统一状态模型、交付节
 architecture: ''
 standalone: true
 expands_module: ''
-skills_planned: ['adp-agent-program-lead', 'adp-project-kickoff', 'adp-workstream-register', 'adp-bmm-checkpoint-sync', 'adp-status-sync', 'adp-l0-baseline-check', 'adp-risk-dependency-change-review', 'adp-acceptance-readiness-review']
+skills_planned: ['adp-agent-program-lead', 'adp-project-kickoff', 'adp-workstream-register', 'adp-bmm-checkpoint-sync', 'adp-status-sync', 'adp-meeting-sync', 'adp-l0-baseline-check', 'adp-risk-dependency-change-review', 'adp-acceptance-readiness-review']
 config_variables: []
 created: '2026-07-01T11:24:36.3400034+08:00'
-updated: '2026-07-01T14:15:47.2040121+08:00'
+updated: '2026-07-01T14:51:01.2728598+08:00'
 ---
 
 # Module Plan
@@ -45,6 +45,15 @@ AI Delivery PMO 采用混合型、状态优先的架构：一个项目级协调 
 - L0 的职责更像公共契约和门禁基线，先嵌入共享状态模型，比过早拆成独立 Agent 更稳。
 - 如果后续 L0 governance、evidence registry 或验收仲裁形成大量独立产出，再考虑拆出专门 Agent。
 
+场景化加固：真实 Shopify -> 自建站 X-Large 迁移场景验证了主架构，但要求 ADP 明确支持 4 个强制闭环：
+
+- **工作线闭环**：BMM 产物必须同步到 WDR，WDR 反映项目级状态。
+- **会议闭环**：每次 1/3/5 内会、双周业务会、专项沟通或线下补录，必须落为 daily log、decision、action、WDR 更新或显式 no-op。
+- **决策闭环**：区分 FDE 内部决策、业务决策、风险接受、范围变更和待澄清问题。
+- **验收闭环**：每条验收标准必须追到证据、确认人、当前状态和未闭合缺口。
+
+ADP 仍保持通用交付 PMO 模块定位，不做 Shopify 专用模块。迁移/切换/兜底能力作为项目类型 profile 和 L0/readiness 基线进入默认模板。
+
 ### Memory Architecture
 
 推荐使用**单一共享项目记忆**，而不是每个 workflow/agent 各自维护个人记忆。原因是本模块的核心价值来自跨线一致性：项目负责人视角、FDE 视角、验收视角、风险矩阵、依赖图都依赖同一个项目级状态事实。
@@ -60,6 +69,8 @@ _bmad/memory/adp/
     workstream-delivery-record.md
     readiness-scorecard.md
     status-taxonomy.md
+    meeting-sync.md
+    decision-taxonomy.md
   l0/
     contract-baseline.md
     gates.md
@@ -67,6 +78,15 @@ _bmad/memory/adp/
     registry.md
     evidence-rules.md
     arbitration-log.md
+    data-baseline.md
+    cutover-gates.md
+    rollback-standards.md
+    monitoring-baseline.md
+  meetings/
+    YYYY-MM-DD-{meeting-type}.md
+  decisions/
+    decision-log.md
+    business-decision-packets/
   workstreams/
     {workstream-id}/
       delivery-record.md
@@ -89,6 +109,8 @@ _bmad/memory/adp/
 - `delivery-record.md` 是每条工作线的项目级同步面。
 - BMM 产物仍留在各自原路径中，Record 只保存路径、baseline 状态、项目级摘要、缺口和影响关系。
 - `daily/YYYY-MM-DD.md` 保存原始同步记录、会议纪要式更新和 Agent 操作痕迹。
+- `meetings/` 保存结构化会议留档，会议内容必须归类为事实、决策、行动项、WDR 更新或 no-op。
+- `decisions/` 保存项目级决策索引和业务决策包；工作线级决策仍可落在对应 `workstreams/{id}/decisions.md`。
 - `views/` 下的文件是派生产物，可以由 Agent 或 workflow 重新生成。
 - L0 相关文件是跨线校验和 readiness 评分的重要输入。
 
@@ -102,7 +124,12 @@ _bmad/memory/adp/
 | `schemas/workstream-delivery-record.md` | Workstream Delivery Record 的字段定义和状态语义。 | 所有 ADP skills | setup、schema/change workflow | 字段、必填程度、草稿/缺口/ready 判定、示例。 |
 | `schemas/readiness-scorecard.md` | readiness 评分维度、评分方法、缺口分类。 | readiness/report workflows、program lead | setup、readiness workflow | 总分、维度分、权重、缺口类型、补齐动作模板。 |
 | `schemas/status-taxonomy.md` | 项目级状态、风险、依赖、变更、验收状态的枚举定义。 | 所有 ADP skills | setup、program lead | 状态值、含义、触发条件、禁止混用的口径。 |
-| `l0/*` | 公共契约、门禁、NFR、registry、证据规则和仲裁记录。 | program lead、readiness/risk workflows | L0 checkpoint workflow、program lead | 冻结版本、适用范围、门禁规则、违规项、仲裁结论。 |
+| `schemas/meeting-sync.md` | 会议同步输入类型、归类规则和闭环检查。 | meeting/status/report workflows、program lead | setup、meeting workflow | 会议类型、事实/决策/action/WDR 更新/no-op 分类、输出要求。 |
+| `schemas/decision-taxonomy.md` | 决策类型和业务决策包格式。 | meeting/risk/change workflows、program lead | setup、risk/change workflow | FDE 内部决策、业务决策、风险接受、范围变更、待澄清问题。 |
+| `l0/*` | 公共契约、门禁、NFR、registry、证据规则、迁移/切换/回滚/监控基线和仲裁记录。 | program lead、readiness/risk workflows | L0 checkpoint workflow、program lead | 冻结版本、适用范围、门禁规则、迁移口径、切换窗口、回滚标准、违规项、仲裁结论。 |
+| `meetings/*` | 结构化会议留档。 | program lead、status/risk/report workflows | meeting sync workflow | 会议类型、参与人、事实、决策、问题、行动项、WDR 回写、未闭环项。 |
+| `decisions/decision-log.md` | 项目级决策索引。 | program lead、risk/change/report workflows | meeting sync、risk/change workflow | 决策类型、日期、来源、影响工作线、确认人、状态。 |
+| `decisions/business-decision-packets/*` | 业务问题包/业务决策包。 | program lead、FDE、业务方 | risk/change workflow、meeting sync workflow | 背景、待决问题、选项、影响、推荐方案、截止时间、关联工作线。 |
 | `workstreams/{id}/delivery-record.md` | 每条线的最小项目级状态单元。 | 所有 ADP skills | workstream checkpoint workflows、program lead | 身份、BMM 产物索引、范围、验收、状态、风险、依赖、变更、下一步动作。 |
 | `workstreams/{id}/evidence.md` | 交付证据索引。 | readiness/report workflows、program lead | validation checkpoint workflow、FDE sync workflow | 证据类型、链接、关联验收标准、确认状态、缺口。 |
 | `workstreams/{id}/decisions.md` | 关键决策、业务确认、范围变更、风险接受记录。 | program lead、change/risk workflows | FDE sync workflow、change workflow | 决策、日期、参与人、影响范围、后续动作。 |
@@ -122,6 +149,8 @@ _bmad/memory/adp/
 4. **Program Lead Agent 派生全局判断**：`adp-agent-program-lead` 读取所有 Record、L0 基线和 readiness 结果，生成负责人视图、FDE 行动清单、验收 readiness report、风险矩阵、依赖图和周报。
 5. **L0 变更触发影响扫描**：当 L0 公共契约、门禁、NFR 或证据规则更新时，ADP 需要扫描所有受影响工作线，标记合规缺口和需要 FDE 处理的动作。
 6. **验收闭环**：validation checkpoint 和 readiness review 将证据、验收标准、验收人确认状态连接起来，避免“代码完成但不能交付”的状态误判。
+7. **会议闭环**：会议不是附属材料，而是项目状态的高频输入源。meeting sync 必须把会议内容归类并回写到 daily log、decision log、WDR、action list 或业务决策包。
+8. **业务决策闭环**：FDE 内部可决策事项直接进入 decision log；需要业务澄清/拍板的事项必须形成 Business Decision Packet，带背景、选项、影响、推荐和截止时间。
 
 如果未来拆出更多 Agent，必须满足一个条件：每个 Agent 都要有明确的独立产出。纯协调、纯规划、纯转述的角色应优先作为 `adp-agent-program-lead` 的能力或 workflow，而不是独立 Agent。
 
@@ -148,6 +177,7 @@ _bmad/memory/adp/
 | Weekly report generation | 从状态、日志和派生视图生成周报。 | daily logs、views、Records、决策与变更记录。 | 周报草稿、管理层摘要、FDE 后续行动。 |
 | Gap-driven coaching | 指导 FDE 如何补齐 Record 缺口，而不是泛泛要求“补文档”。 | 某条工作线 Record、BMM 产物路径、缺口清单。 | 具体补齐建议、应询问业务方的问题、应补证据的材料。 |
 | L0 impact sweep | 当 L0 公共契约/门禁/NFR/证据规则变化时识别影响。 | `l0/*` 文件、所有 workstream Records。 | 受影响工作线、违规项、需要 FDE 更新的动作、仲裁建议。 |
+| Decision closure review | 检查会议、业务问题包、决策日志和 WDR 是否闭环。 | `meetings/*`、`decisions/*`、WDRs、action list。 | 未归类会议项、未决业务问题、过期 action、WDR 未回写项。 |
 
 **Memory:** On activation read `_bmad/memory/adp/index.md`, `project-charter.md`, `cadence.md`, relevant schemas, `l0/*`, and only the workstream Records relevant to the user's request. Write generated views to `views/`, daily notes to `daily/YYYY-MM-DD.md`, and proposed updates to specific workstream files when the user confirms.
 
@@ -256,14 +286,41 @@ _bmad/memory/adp/
 | Capability | Outcome | Inputs | Outputs |
 | ---------- | ------- | ------ | ------- |
 | Single-line sync | Update current status for one workstream. | Workstream id, progress, blockers, risks, dependency changes, next actions. | Updated WDR status fields and daily log entry. |
-| Multi-line sync | Collect lightweight updates for multiple lines. | Batch status notes or meeting transcript. | Updated Records, consolidated change list, unresolved questions. |
+| Multi-line sync | Collect lightweight updates for multiple lines. | Batch status notes, owner updates, or meeting-sync outputs. | Updated Records, consolidated change list, unresolved questions. |
 | Staleness detection | Identify Records not updated recently. | Cadence config, last updated timestamps. | Stale workstream list and owner follow-ups. |
 | Delta summary | Summarize what changed since last sync. | Current Records and prior views/logs. | Change summary for Program Lead and weekly report. |
 | Action extraction | Convert status notes into owner-specific actions. | Status notes, blockers, risks, dependencies. | Updated FDE action list candidates. |
 
-**Design Notes:** This workflow should be fast and low-friction. It is the daily/weekly operating habit for FDEs.
+**Design Notes:** This workflow should be fast and low-friction. It is the daily/weekly operating habit for FDEs. It may consume meeting-sync outputs, but it should not own full meeting classification; that belongs to `adp-meeting-sync`.
 
 **Relationships:** Feeds Program Lead readouts and weekly report generation.
+
+---
+
+### adp-meeting-sync
+
+**Type:** workflow
+
+**Purpose:** Turn meetings and offline communications into closed-loop ADP state updates.
+
+**Core Outcome:** FDE internal meetings, business reviews, special discussions, and offline communications do not become scattered notes; each useful item lands as daily log, decision, action, WDR update, Business Decision Packet, or explicit no-op.
+
+**The Non-Negotiable:** Every captured meeting item must be classified and either written to a target artifact or explicitly marked no-op with rationale.
+
+**Capabilities:**
+
+| Capability | Outcome | Inputs | Outputs |
+| ---------- | ------- | ------ | ------- |
+| Meeting intake classification | Normalize meeting source and type. | Transcript, notes, chat excerpt, oral summary; meeting type such as FDE 1/3/5, biweekly business review, special discussion, offline follow-up. | Structured meeting record under `meetings/`, source type, participants, affected workstreams. |
+| Fact/decision/action extraction | Extract facts, decisions, open questions, risks, dependencies, and actions. | Meeting record and current ADP state. | Classified item list with owner, affected workstream, status, target file. |
+| Decision routing | Distinguish FDE internal decision, business decision, risk acceptance, scope change, or clarification needed. | Extracted decisions/questions and decision taxonomy. | Updates to `decisions/decision-log.md`, workstream `decisions.md`, or Business Decision Packet draft. |
+| WDR backwrite | Apply meeting outcomes to workstream Records. | Classified facts/actions/risks/dependencies/changes. | Updated WDR status, blockers, next actions, risks, dependencies, or readiness notes. |
+| Business meeting material capture | Preserve business feedback and confirmation for later acceptance/readiness. | Business review notes, business owner responses, approvals/rejections. | Decision log entries, acceptance confirmation updates, PRD/scope/criteria backwrite prompts. |
+| Closure audit | Check whether all meeting items landed somewhere. | Structured meeting record and generated updates. | Closure checklist: daily log, decisions, actions, WDR updates, packets, no-op items. |
+
+**Design Notes:** This is a separate workflow because meetings are a primary state input in X-Large delivery. Folding it into generic status sync would hide the strongest operational constraint.
+
+**Relationships:** Feeds `adp-status-sync`, `adp-risk-dependency-change-review`, `adp-acceptance-readiness-review`, and Program Lead weekly reports.
 
 ---
 
@@ -271,7 +328,7 @@ _bmad/memory/adp/
 
 **Type:** workflow
 
-**Purpose:** Maintain and apply L0 public contracts, gates, registry/evidence mechanisms, and horizontal NFR baseline.
+**Purpose:** Maintain and apply L0 public contracts, gates, registry/evidence mechanisms, migration/cutover/rollback/monitoring baselines, and horizontal NFR baseline.
 
 **Core Outcome:** Cross-line migration and delivery have a visible, checkable baseline that can be frozen, validated, arbitrated, and evidenced.
 
@@ -286,6 +343,9 @@ _bmad/memory/adp/
 | Compliance scan | Check workstream Records against L0 gates and evidence rules. | `l0/*`, all or selected WDRs. | Violations, impacted lines, required actions. |
 | Registry/evidence check | Validate whether evidence and registry references are present. | Evidence rules, WDR evidence indexes, registry links. | Evidence gaps, registry gaps, acceptance blockers. |
 | Arbitration log update | Record contract disputes, exceptions, and decisions. | Conflict description, affected lines, decision, approver. | Updated `l0/arbitration-log.md` and affected WDR decisions. |
+| Migration baseline capture | Record migration-specific horizontal baseline. | Data mapping notes, interface contracts, sync strategy, cutover assumptions, fallback strategy. | Updated `l0/data-baseline.md`, `contract-baseline.md`, `registry.md`. |
+| Cutover gate check | Check readiness for cutover-specific gates. | Cutover window, freeze period, rollback plan, monitoring plan, data validation evidence. | Cutover gate result, blockers, required proof, affected workstreams. |
+| Rollback and fallback review | Validate fallback readiness. | Rollback SOP, fallback owner, rehearsal evidence, operational monitoring notes. | Rollback/fallback readiness gaps and owner actions. |
 
 **Design Notes:** This workflow may become a separate Agent later if L0 governance becomes large and produces extensive independent outputs.
 
@@ -312,6 +372,8 @@ _bmad/memory/adp/
 | Change control | Capture scope, baseline, or acceptance changes. | Proposed change, affected BMM artifact links, business confirmation, impact. | Decision/change log updates, affected WDR updates, escalation recommendation. |
 | Blocker triage | Distinguish blocker vs. risk vs. open question. | Status notes, workstream context. | Clean blocker list, required action, owner, trigger/date. |
 | Escalation recommendation | Decide what needs project lead or business decision. | Risks, blockers, dependencies, change impact. | Escalation list and decision prompts. |
+| Business Decision Packet | Produce business-facing decision package for issues FDE cannot decide alone. | Background, unresolved question, options, impacts, recommendation, deadline, affected workstreams. | Business Decision Packet under `decisions/business-decision-packets/`; suitable for business meeting material. |
+| Scope drift detection | Surface divergence between WDR changes and baseline BMM artifacts/decisions. | WDR changes, PRD/architecture baseline links, decision log. | Drift warning, required business confirmation, suggested change record. |
 
 **Design Notes:** Risk, dependency, and change are coupled in this delivery model; combining them avoids three disconnected reports.
 
@@ -338,8 +400,10 @@ _bmad/memory/adp/
 | Evidence coverage review | Check whether every acceptance criterion has linked proof. | Acceptance criteria, evidence index, test/demo/deploy links. | Evidence coverage table and missing proof items. |
 | Confirmation review | Track customer/business acceptance status. | Acceptance owner, confirmation notes, decision records. | Pending confirmations and escalation prompts. |
 | Acceptance report | Generate acceptance readiness artifact. | Selected workstreams or all workstreams. | Markdown/HTML readiness report suitable for review meeting. |
+| Migration readiness scoring | Score migration/cutover-specific dimensions. | WDR, L0 migration baseline, data evidence, cutover/rollback/monitoring proof. | Dimension scores for function migration, data sync, business confirmation, cutover, rollback/fallback, monitoring/evidence, L0 compliance. |
+| Cutover readiness report | Determine whether a line or project is ready for cutover, not just acceptance. | Validation evidence, data reconciliation, cutover gates, rollback rehearsal, monitoring plan. | Cutover readiness report with blockers and go/no-go prompts; strong HTML candidate. |
 
-**Design Notes:** Readiness is a steering mechanism, not a punitive gate. Draft and gap states are valid if the gaps are explicit.
+**Design Notes:** Readiness is a steering mechanism, not a punitive gate. Draft and gap states are valid if the gaps are explicit. For migration projects, “acceptance ready” and “cutover ready” are related but not identical; the workflow must expose both when the L0/profile indicates migration/cutover risk.
 
 **Relationships:** Consumes WDRs, evidence, L0 baseline, decisions. Feeds Program Lead acceptance view and management summaries.
 
@@ -349,19 +413,26 @@ Reviewed decisions:
 
 - `adp-bmm-checkpoint-sync` remains a single workflow with PRD, architecture, epic/story, and implementation/validation modes. This keeps the FDE mental model simple: after each BMM stage, sync it to ADP.
 - `adp-l0-baseline-check` remains a workflow in v1, not a standalone Agent. L0 is currently best represented as public baseline/gates/NFR/evidence state plus validation routines. It can become an Agent later if L0 governance becomes a large independent workstream with its own outputs.
+- `adp-meeting-sync` is added as a separate workflow rather than being hidden inside `adp-status-sync`, because real X-Large delivery depends on meeting/offline communication closure.
+- Shopify/migration specificity is adopted as a migration/cutover profile in L0 and readiness, not as a Shopify-only module fork.
 
 Overlap review:
 
 - `adp-agent-program-lead` synthesizes and coaches; it should not duplicate workflow execution logic.
 - `adp-status-sync` handles lightweight volatile updates; `adp-bmm-checkpoint-sync` handles stage-level BMM artifact synchronization.
+- `adp-meeting-sync` classifies meeting/offline communication inputs and routes them to WDR, decisions, action lists, daily logs, or business packets; `adp-status-sync` may consume those outputs for lightweight state refresh.
 - `adp-risk-dependency-change-review` owns risk/dependency/change normalization; Program Lead uses its outputs for readouts and escalation.
 - `adp-acceptance-readiness-review` owns scoring and evidence coverage; Program Lead uses its outputs for acceptance views.
+- `adp-l0-baseline-check` owns migration/cutover/rollback/monitoring baseline checks when the project profile requires them; readiness review consumes its outputs.
 
 Structured output candidates:
 
 - HTML management summary from `adp-agent-program-lead`.
 - HTML/Markdown FDE action list from `adp-agent-program-lead` or `adp-status-sync`.
+- Markdown meeting closure report from `adp-meeting-sync`.
+- Markdown/HTML Business Decision Packet from `adp-risk-dependency-change-review`.
 - HTML acceptance readiness report from `adp-acceptance-readiness-review`.
+- HTML cutover readiness report from `adp-acceptance-readiness-review`.
 - HTML risk matrix and dependency map from `adp-risk-dependency-change-review`.
 - Markdown/HTML L0 compliance scan from `adp-l0-baseline-check`.
 
@@ -378,6 +449,7 @@ Structured output candidates:
 | `adp_default_cadence` | Default status cadence | `weekly` | Status sync and weekly reports assume `{adp_default_cadence}` unless overridden. | Yes |
 | `adp_readiness_mode` | Readiness scoring mode | `score-and-gaps` | Readiness reports include scores, dimension scores, gaps, owners, and actions. | No |
 | `adp_l0_mode` | L0 handling mode | `embedded-baseline` | L0 is represented as baseline/gates/NFR/evidence files, not a standalone agent. | No |
+| `adp_project_profile` | Project profile | `generic-delivery` | Optional profiles such as `migration-cutover` add cutover, rollback, data sync, and monitoring readiness dimensions. | Yes |
 
 Setup should not block if these are absent. Skills should use these defaults and create missing files on first run.
 
@@ -403,9 +475,11 @@ High-value report outputs:
 - **Project Lead View**: global status, readiness distribution, top risks, blocked workstreams, dependency concerns, escalation items, next actions.
 - **FDE Action List**: grouped by FDE/owner, showing readiness gaps, pending confirmations, evidence gaps, dependency actions, and due/trigger conditions.
 - **Acceptance Readiness Report**: per-workstream readiness score, dimension scores, missing evidence, unclosed acceptance criteria, customer/business confirmation status.
+- **Cutover Readiness Report**: migration/cutover-specific go/no-go view covering data sync, freeze window, rollback/fallback, monitoring, and evidence gaps.
 - **Risk Matrix**: risk severity, likelihood, owner, affected workstreams, mitigation, escalation status.
 - **Dependency Map**: cross-line dependencies, impacted lines, L0 dependencies, unresolved blockers. In v1 this can be a Markdown/HTML table; visual graph is optional.
 - **Weekly Report**: generated from current shared state and daily logs.
+- **Business Decision Packet**: background, open question, options, impacts, recommendation, deadline, and affected workstreams.
 
 HTML reports are strong candidates for readiness reviews, risk matrices, dependency maps, and management summaries because they are easier to scan and share with stakeholders.
 
@@ -418,6 +492,8 @@ The setup skill should scaffold the ADP memory and template structure:
    - `schemas/workstream-delivery-record.md`
    - `schemas/readiness-scorecard.md`
    - `schemas/status-taxonomy.md`
+   - `schemas/meeting-sync.md`
+   - `schemas/decision-taxonomy.md`
 3. Create default L0 baseline files:
    - `l0/contract-baseline.md`
    - `l0/gates.md`
@@ -425,9 +501,17 @@ The setup skill should scaffold the ADP memory and template structure:
    - `l0/registry.md`
    - `l0/evidence-rules.md`
    - `l0/arbitration-log.md`
-4. Create starter view files under `views/`.
-5. Create `project-charter.md`, `cadence.md`, and `index.md`.
-6. Optionally create an example workstream record to show expected structure.
+   - `l0/data-baseline.md`
+   - `l0/cutover-gates.md`
+   - `l0/rollback-standards.md`
+   - `l0/monitoring-baseline.md`
+4. Create meeting and decision folders:
+   - `meetings/`
+   - `decisions/decision-log.md`
+   - `decisions/business-decision-packets/`
+5. Create starter view files under `views/`.
+6. Create `project-charter.md`, `cadence.md`, and `index.md`.
+7. Optionally create an example workstream record to show expected structure.
 
 Setup should be idempotent: if a file exists, preserve user content and only report missing recommended files.
 
@@ -452,6 +536,8 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 - L0 impact sweep: when a public contract/gate/NFR baseline changes, scan all workstreams and produce affected-line actions.
 - Scope drift detector: compare current Record changes against baseline PRD/architecture links and decision logs to surface unapproved drift.
 - Evidence audit: verify that every acceptance criterion has linked proof, owner, and confirmation status.
+- Meeting closure audit: verify every meeting item became a decision, action, WDR update, business packet, daily log entry, or explicit no-op.
+- Cutover command center: generate a go/no-go view for migration windows, rollback readiness, monitoring coverage, and unresolved business confirmations.
 
 ## Ideas Captured
 
@@ -504,6 +590,14 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 - Readiness 需要带分数和缺口清单，而不只是红黄绿状态。
 - Readiness 输出应包含：总体分数、维度分数、缺口清单、每个缺口对应的补齐动作、责任人、建议截止时间或触发条件。
 - Readiness 候选维度：范围清晰度、验收清晰度、BMM 产物完整度、依赖清晰度、风险暴露度、证据完整度、L0 合规度、下一步可执行度。
+- 真实场景评审：Shopify 迁移到自建站 X-Large 项目验证 ADP 主架构适用，但必须增加场景化硬约束，否则容易退化为文档归档工具。
+- 评审采纳结论：保留 Program Lead + WDR + checkpoint workflows + shared memory 主架构；新增或强化会议同步、业务决策包、切换兜底 readiness、迁移型 L0 baseline。
+- 必须突出 4 个闭环：工作线闭环、会议闭环、决策闭环、验收闭环。
+- 会议闭环要求 1/3/5 FDE 内会、双周业务例会、非常规专项沟通、线下沟通补录都能落到结构化状态。每个会议项应成为 daily log、decision、action、WDR 更新、business decision packet 或 explicit no-op。
+- 业务决策包应包含：背景、待决问题、选项、影响、推荐方案、截止时间、关联工作线。适用于 FDE 无法独立拍板、需要业务澄清或业务决策的问题。
+- 迁移/切换项目的 L0 不只是公共契约，还要承载数据口径、接口契约、切换门禁、回滚标准、冻结期、灰度策略、监控基线和证据规则。
+- 迁移专项 readiness 维度候选：功能迁移 readiness、数据同步 readiness、业务确认 readiness、切换 readiness、回滚/兜底 readiness、监控与证据 readiness、L0 合规 readiness。
+- “验收 ready” 不等于“切换 ready”。对于迁移项目，readiness review 必须显式暴露 cutover readiness 和 go/no-go 风险。
 - 派生视图优先级：
   - 项目负责人视角：全局状态、跨线风险、依赖、升级项、下一步推进动作。
   - FDE 视角：我负责的工作线、readiness 缺口、下一步动作、待业务确认项、需要补证据的项。
@@ -517,17 +611,18 @@ Recommended build order:
 1. **`adp-project-kickoff`** - build first because it creates the shared memory structure, schemas, L0 baseline placeholders, starter views, and idempotent setup behavior that every other skill depends on.
 2. **`adp-workstream-register`** - build second because Workstream Delivery Record is the core project-level state unit. This validates the schema and gives the module a real operating surface.
 3. **`adp-bmm-checkpoint-sync`** - build third so BMM lifecycle outputs can be connected to Records at PRD, architecture, epic/story, and implementation/validation checkpoints.
-4. **`adp-status-sync`** - build fourth to support the recurring operating rhythm and keep Records current between major BMM checkpoints.
-5. **`adp-acceptance-readiness-review`** - build fifth because readiness scoring relies on WDR fields, evidence indexes, status taxonomy, and L0 rules. This should produce Markdown/HTML readiness reports.
-6. **`adp-risk-dependency-change-review`** - build sixth because it benefits from multiple Records and synced status. This should produce risk matrix, dependency map, and escalation recommendations.
-7. **`adp-l0-baseline-check`** - build seventh unless L0 governance becomes urgent earlier. It can then enrich readiness and risk/dependency review with gates, NFR, evidence, and compliance scans.
-8. **`adp-agent-program-lead`** - build after the core workflows are stable so the Agent can synthesize real workflow outputs rather than inventing behavior. It should orchestrate readouts, coaching, weekly reports, and stakeholder views.
+4. **`adp-meeting-sync`** - build fourth because meetings/offline communications are the main high-frequency input source in real X-Large delivery. This creates the meeting -> decision/action/WDR/business packet closure loop.
+5. **`adp-status-sync`** - build fifth to support the recurring operating rhythm and keep Records current between major BMM checkpoints, consuming meeting-sync outputs when available.
+6. **`adp-risk-dependency-change-review`** - build sixth because it owns risk/dependency/change normalization and must produce Business Decision Packets for issues FDE cannot decide alone.
+7. **`adp-l0-baseline-check`** - build seventh to encode migration/cutover/rollback/monitoring baselines, gates, NFR, evidence, and compliance scans.
+8. **`adp-acceptance-readiness-review`** - build eighth because readiness scoring relies on WDR fields, evidence indexes, status taxonomy, L0 rules, and migration/cutover baselines. This should produce Markdown/HTML acceptance and cutover readiness reports.
+9. **`adp-agent-program-lead`** - build after the core workflows are stable so the Agent can synthesize real workflow outputs rather than inventing behavior. It should orchestrate readouts, coaching, weekly reports, closure audits, and stakeholder views.
 
 Rationale:
 
 - Build the state substrate before reports.
 - Build low-level Record update workflows before high-level synthesis.
-- Keep the first usable loop small: kickoff -> register workstream -> sync BMM checkpoint -> produce readiness gaps.
+- Keep the first usable loop small: kickoff -> register workstream -> sync BMM checkpoint -> close meeting/action updates -> produce readiness gaps.
 - Defer the main Agent until the module has concrete artifacts and stable conventions.
 
 **Next steps:**
