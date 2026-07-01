@@ -2,7 +2,7 @@
 
 AI Delivery PMO is a planned BMad module for coordinating complex delivery programs across multiple FDE workstreams.
 
-The module does not replace BMM. Each workstream still uses the normal BMM lifecycle for brainstorming, PRD, architecture, epics, stories, implementation, and validation. AI Delivery PMO adds the project-level management layer around those artifacts: shared state, readiness scoring, dependency/risk visibility, evidence tracking, L0 baseline checks, and stakeholder-facing views.
+The module does not replace BMM. Each workstream still uses the normal BMM lifecycle for brainstorming, PRD, architecture, epics, stories, implementation, and validation. AI Delivery PMO adds the project-level management layer around those artifacts: shared state, readiness scoring, dependency/risk visibility, evidence tracking, L0 reference sync, and stakeholder-facing views.
 
 ## Core Concept
 
@@ -23,7 +23,7 @@ The plan has been reviewed against an X-Large Shopify-to-custom-site migration s
 - Decision closure: FDE decisions, business decisions, risk acceptance, and scope changes are classified and tracked.
 - Acceptance closure: each acceptance criterion traces to evidence, confirmer, status, and gaps.
 
-Migration/cutover projects can use L0 baselines for data definitions, interface contracts, cutover gates, rollback/fallback standards, monitoring, and evidence rules.
+Migration/cutover projects can reference L0 outputs for data definitions, interface contracts, cutover gates, rollback/fallback standards, monitoring, and evidence rules. ADP indexes and extracts cross-line implications; it does not own L0 delivery.
 
 ## Planned Skills
 
@@ -34,7 +34,7 @@ Migration/cutover projects can use L0 baselines for data definitions, interface 
 - `adp-status-sync`
 - `adp-acceptance-readiness-review`
 - `adp-risk-dependency-change-review`
-- `adp-l0-baseline-check`
+- `adp-l0-reference-sync`
 - `adp-agent-program-lead`
 
 ## Plan

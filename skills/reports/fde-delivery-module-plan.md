@@ -7,10 +7,10 @@ module_description: '帮助多条 FDE 工作线用统一状态模型、交付节
 architecture: ''
 standalone: true
 expands_module: ''
-skills_planned: ['adp-agent-program-lead', 'adp-project-kickoff', 'adp-workstream-register', 'adp-bmm-checkpoint-sync', 'adp-status-sync', 'adp-meeting-sync', 'adp-l0-baseline-check', 'adp-risk-dependency-change-review', 'adp-acceptance-readiness-review']
+skills_planned: ['adp-agent-program-lead', 'adp-project-kickoff', 'adp-workstream-register', 'adp-bmm-checkpoint-sync', 'adp-status-sync', 'adp-meeting-sync', 'adp-l0-reference-sync', 'adp-risk-dependency-change-review', 'adp-acceptance-readiness-review']
 config_variables: []
 created: '2026-07-01T11:24:36.3400034+08:00'
-updated: '2026-07-01T14:51:01.2728598+08:00'
+updated: '2026-07-01T14:59:32.7639609+08:00'
 ---
 
 # Module Plan
@@ -34,7 +34,7 @@ AI Delivery PMO 采用混合型、状态优先的架构：一个项目级协调 
 1. **项目级协调 Agent**：候选名 `adp-agent-program-lead`。它是项目负责人和 FDE 的主要对话入口，负责读取共享状态、发现跨线风险、识别依赖和缺口、推动升级、生成项目负责人/FDE/验收视图。它不直接替代各线的 BMM 交付工作。
 2. **固定 Workflow**：围绕 BMM 关键节点运行，例如项目启动、工作线登记、PRD checkpoint、architecture checkpoint、epic/story checkpoint、implementation/validation checkpoint、状态同步、风险依赖检查、变更控制、验收 readiness review、周报/摘要生成。
 3. **共享状态模型**：以 Workstream Delivery Record 为核心。每条线一个 Record，Record 只做 BMM 产物索引、项目级状态摘要和管理补充，不复制完整 PRD/架构/story/code 内容。
-4. **L0 公共契约层**：L0 不急于设计成独立 Agent，而是作为一条特殊工作线和共享基线存在，提供可冻结、可校验、可仲裁、可出证据的公共契约、门禁、CI/registry/evidence 机制和横向 NFR 基线。其他工作线通过 Record 显式引用 L0 影响项。
+4. **L0 参考基线层**：L0 不设计成独立 Agent，也不由 ADP 负责维护其 PRD/架构/实现。L0 仍是一条由 BMM 推进的工作线；ADP 只把 L0 产物作为参考基线，抽取项目级可同步的契约、门禁、NFR、证据要求和跨线影响。其他工作线通过 Record 显式引用 L0 影响项。
 5. **派生视图和报告**：项目负责人视角、FDE 视角、验收视角是第一优先级；L0 暂作为契约/门禁/NFR/证据过滤维度嵌入这些视图。
 
 选择该架构的原因：
@@ -42,8 +42,8 @@ AI Delivery PMO 采用混合型、状态优先的架构：一个项目级协调 
 - 单一项目级 Agent 能保持解释口径、状态模型和升级逻辑一致，避免多个 Agent 各自理解全局状态。
 - Workflow 适合约束重复动作和 checkpoint，不需要长期人格或独立记忆。
 - Workstream Delivery Record 让项目级 Agent 不必读完所有 BMM 产物就能判断全局状态。
-- L0 的职责更像公共契约和门禁基线，先嵌入共享状态模型，比过早拆成独立 Agent 更稳。
-- 如果后续 L0 governance、evidence registry 或验收仲裁形成大量独立产出，再考虑拆出专门 Agent。
+- L0 的职责更像公共契约和门禁参考源，ADP 应轻量引用它，而不是替 L0 产出或治理。
+- 如果后续 L0 governance、evidence registry 或验收仲裁形成大量独立产出，仍应优先由 L0 工作线自己的 BMM/专项能力承接；ADP 只消费其结果并做跨线同步。
 
 场景化加固：真实 Shopify -> 自建站 X-Large 迁移场景验证了主架构，但要求 ADP 明确支持 4 个强制闭环：
 
@@ -72,16 +72,12 @@ _bmad/memory/adp/
     meeting-sync.md
     decision-taxonomy.md
   l0/
-    contract-baseline.md
-    gates.md
-    nfr-baseline.md
-    registry.md
-    evidence-rules.md
-    arbitration-log.md
-    data-baseline.md
-    cutover-gates.md
-    rollback-standards.md
-    monitoring-baseline.md
+    reference-index.md
+    extracted-gates.md
+    extracted-nfr.md
+    extracted-evidence-rules.md
+    extracted-impacts.md
+    exceptions-and-open-questions.md
   meetings/
     YYYY-MM-DD-{meeting-type}.md
   decisions/
@@ -126,7 +122,7 @@ _bmad/memory/adp/
 | `schemas/status-taxonomy.md` | 项目级状态、风险、依赖、变更、验收状态的枚举定义。 | 所有 ADP skills | setup、program lead | 状态值、含义、触发条件、禁止混用的口径。 |
 | `schemas/meeting-sync.md` | 会议同步输入类型、归类规则和闭环检查。 | meeting/status/report workflows、program lead | setup、meeting workflow | 会议类型、事实/决策/action/WDR 更新/no-op 分类、输出要求。 |
 | `schemas/decision-taxonomy.md` | 决策类型和业务决策包格式。 | meeting/risk/change workflows、program lead | setup、risk/change workflow | FDE 内部决策、业务决策、风险接受、范围变更、待澄清问题。 |
-| `l0/*` | 公共契约、门禁、NFR、registry、证据规则、迁移/切换/回滚/监控基线和仲裁记录。 | program lead、readiness/risk workflows | L0 checkpoint workflow、program lead | 冻结版本、适用范围、门禁规则、迁移口径、切换窗口、回滚标准、违规项、仲裁结论。 |
+| `l0/*` | L0 产物的轻量索引和抽取摘要，而不是 L0 自身的事实来源。 | program lead、readiness/risk workflows | L0 reference sync workflow、program lead | L0 PRD/架构/规范路径、抽取的门禁/NFR/证据要求、影响工作线、例外和未决问题。 |
 | `meetings/*` | 结构化会议留档。 | program lead、status/risk/report workflows | meeting sync workflow | 会议类型、参与人、事实、决策、问题、行动项、WDR 回写、未闭环项。 |
 | `decisions/decision-log.md` | 项目级决策索引。 | program lead、risk/change/report workflows | meeting sync、risk/change workflow | 决策类型、日期、来源、影响工作线、确认人、状态。 |
 | `decisions/business-decision-packets/*` | 业务问题包/业务决策包。 | program lead、FDE、业务方 | risk/change workflow、meeting sync workflow | 背景、待决问题、选项、影响、推荐方案、截止时间、关联工作线。 |
@@ -146,8 +142,8 @@ _bmad/memory/adp/
 1. **FDE 是路由器和驾驶员**：FDE 使用 BMM 推进各线交付，在关键节点把产物路径、阶段结论和项目级同步信息交给 ADP workflow。
 2. **BMM 产物是事实来源**：PRD、架构、epic/story、代码、验证材料由 BMM 生命周期产出。ADP 不复制细节，只索引并抽取项目级状态。
 3. **ADP workflow 更新 Record**：每个 checkpoint workflow 负责把本阶段的范围、验收、依赖、风险、证据、变更和 readiness 缺口写回 Workstream Delivery Record。
-4. **Program Lead Agent 派生全局判断**：`adp-agent-program-lead` 读取所有 Record、L0 基线和 readiness 结果，生成负责人视图、FDE 行动清单、验收 readiness report、风险矩阵、依赖图和周报。
-5. **L0 变更触发影响扫描**：当 L0 公共契约、门禁、NFR 或证据规则更新时，ADP 需要扫描所有受影响工作线，标记合规缺口和需要 FDE 处理的动作。
+4. **Program Lead Agent 派生全局判断**：`adp-agent-program-lead` 读取所有 Record、L0 reference summary 和 readiness 结果，生成负责人视图、FDE 行动清单、验收 readiness report、风险矩阵、依赖图和周报。
+5. **L0 参考变更触发影响扫描**：当 L0 PRD/架构/规范更新时，ADP 只更新 L0 reference summary，并扫描所有受影响工作线，标记合规缺口和需要 FDE 处理的动作。
 6. **验收闭环**：validation checkpoint 和 readiness review 将证据、验收标准、验收人确认状态连接起来，避免“代码完成但不能交付”的状态误判。
 7. **会议闭环**：会议不是附属材料，而是项目状态的高频输入源。meeting sync 必须把会议内容归类并回写到 daily log、decision log、WDR、action list 或业务决策包。
 8. **业务决策闭环**：FDE 内部可决策事项直接进入 decision log；需要业务澄清/拍板的事项必须形成 Business Decision Packet，带背景、选项、影响、推荐和截止时间。
@@ -170,13 +166,13 @@ _bmad/memory/adp/
 
 | Capability | Outcome | Inputs | Outputs |
 | ---------- | ------- | ------ | ------- |
-| Global project readout | 读取所有 Workstream Delivery Records，形成项目负责人视角。 | `_bmad/memory/adp/`、工作线 Records、L0 baseline、readiness 文件。 | 全局状态摘要、风险/依赖/阻塞清单、升级项、下一步动作；适合生成 HTML management summary。 |
+| Global project readout | 读取所有 Workstream Delivery Records，形成项目负责人视角。 | `_bmad/memory/adp/`、工作线 Records、L0 reference summary、readiness 文件。 | 全局状态摘要、风险/依赖/阻塞清单、升级项、下一步动作；适合生成 HTML management summary。 |
 | FDE action list | 把项目状态转化为每个 FDE 的行动清单。 | 工作线 owner、readiness gaps、风险、依赖、待确认项、证据缺口。 | 按 FDE/owner 分组的行动项、补齐动作、建议优先级。 |
 | Acceptance readiness view | 汇总验收视角，判断哪些线 ready、哪些缺证据或确认。 | readiness scorecards、evidence、验收标准、验收人确认状态。 | 验收 readiness report；强烈适合 HTML report。 |
-| Risk and dependency synthesis | 汇总跨线风险、依赖、L0 影响和升级路径。 | Records、L0 baseline、decisions、risk/dependency review 输出。 | 风险矩阵、依赖图、受影响工作线、建议升级动作。 |
+| Risk and dependency synthesis | 汇总跨线风险、依赖、L0 影响和升级路径。 | Records、L0 reference summary、decisions、risk/dependency review 输出。 | 风险矩阵、依赖图、受影响工作线、建议升级动作。 |
 | Weekly report generation | 从状态、日志和派生视图生成周报。 | daily logs、views、Records、决策与变更记录。 | 周报草稿、管理层摘要、FDE 后续行动。 |
 | Gap-driven coaching | 指导 FDE 如何补齐 Record 缺口，而不是泛泛要求“补文档”。 | 某条工作线 Record、BMM 产物路径、缺口清单。 | 具体补齐建议、应询问业务方的问题、应补证据的材料。 |
-| L0 impact sweep | 当 L0 公共契约/门禁/NFR/证据规则变化时识别影响。 | `l0/*` 文件、所有 workstream Records。 | 受影响工作线、违规项、需要 FDE 更新的动作、仲裁建议。 |
+| L0 impact sweep | 当 L0 参考产物中的契约/门禁/NFR/证据规则变化时识别影响。 | L0 reference summary、所有 workstream Records。 | 受影响工作线、缺口、需要 FDE 更新的动作、需要回到 L0 工作线确认的问题。 |
 | Decision closure review | 检查会议、业务问题包、决策日志和 WDR 是否闭环。 | `meetings/*`、`decisions/*`、WDRs、action list。 | 未归类会议项、未决业务问题、过期 action、WDR 未回写项。 |
 
 **Memory:** On activation read `_bmad/memory/adp/index.md`, `project-charter.md`, `cadence.md`, relevant schemas, `l0/*`, and only the workstream Records relevant to the user's request. Write generated views to `views/`, daily notes to `daily/YYYY-MM-DD.md`, and proposed updates to specific workstream files when the user confirms.
@@ -197,7 +193,7 @@ _bmad/memory/adp/
 
 **Type:** workflow
 
-**Purpose:** Initialize an ADP-managed project with default memory structure, project charter, cadence, schemas, L0 baseline placeholders, and starter views.
+**Purpose:** Initialize an ADP-managed project with default memory structure, project charter, cadence, schemas, L0 reference placeholders, and starter views.
 
 **Core Outcome:** A project can start using ADP immediately with default templates and without a long setup interview.
 
@@ -210,7 +206,7 @@ _bmad/memory/adp/
 | Memory scaffold | Create the shared ADP memory folder and default files. | Project root, optional memory root override. | `_bmad/memory/adp/` structure, schema files, L0 files, view files. |
 | Project charter bootstrap | Capture initial project objective, stakeholders, cadence, and escalation path. | User-provided brief or existing project docs. | `project-charter.md`, `cadence.md`, updated `index.md`. |
 | Default schema install | Provide default WDR, readiness, and status taxonomy. | Built-in defaults. | `schemas/workstream-delivery-record.md`, `schemas/readiness-scorecard.md`, `schemas/status-taxonomy.md`. |
-| Starter L0 baseline | Create placeholders for public contracts, gates, NFR, registry, evidence rules, arbitration. | Optional L0 notes. | `l0/contract-baseline.md`, `gates.md`, `nfr-baseline.md`, `registry.md`, `evidence-rules.md`, `arbitration-log.md`. |
+| Starter L0 reference area | Create placeholders for L0 artifact references and extracted implications. | Optional L0 artifact paths or notes. | `l0/reference-index.md`, `extracted-gates.md`, `extracted-nfr.md`, `extracted-evidence-rules.md`, `extracted-impacts.md`, `exceptions-and-open-questions.md`. |
 | Starter views | Create empty report/view files that later workflows can update. | Built-in view templates. | `views/project-lead.md`, `fde-actions.md`, `acceptance-readiness.md`, `risk-matrix.md`, `dependency-map.md`, `weekly-report.md`. |
 
 **Design Notes:** Keep startup cheap. The workflow should not ask for readiness weights or full status taxonomy before the project can begin.
@@ -324,30 +320,27 @@ _bmad/memory/adp/
 
 ---
 
-### adp-l0-baseline-check
+### adp-l0-reference-sync
 
 **Type:** workflow
 
-**Purpose:** Maintain and apply L0 public contracts, gates, registry/evidence mechanisms, migration/cutover/rollback/monitoring baselines, and horizontal NFR baseline.
+**Purpose:** Sync L0 workstream artifacts into ADP as lightweight project-level references for gates, NFR, evidence requirements, migration/cutover concerns, and cross-line impacts.
 
-**Core Outcome:** Cross-line migration and delivery have a visible, checkable baseline that can be frozen, validated, arbitrated, and evidenced.
+**Core Outcome:** ADP can use L0 outputs to assess downstream workstreams without owning or duplicating L0 delivery work.
 
-**The Non-Negotiable:** L0 is a shared baseline and gate source, not a shadow implementation plan for every workstream.
+**The Non-Negotiable:** L0 PRD/architecture/specs remain the source of truth. ADP stores only references, extracted project-level implications, open questions, and impact summaries.
 
 **Capabilities:**
 
 | Capability | Outcome | Inputs | Outputs |
 | ---------- | ------- | ------ | ------- |
-| Baseline capture | Record or update L0 contract/gate/NFR/evidence baseline. | L0 docs, FDE notes, contract decisions, gate rules. | Updated `l0/*` files with version and freeze status. |
-| Freeze review | Determine whether an L0 baseline is ready to freeze. | Current L0 files, unresolved decisions, impacted workstreams. | Freeze recommendation, blockers, required confirmations. |
-| Compliance scan | Check workstream Records against L0 gates and evidence rules. | `l0/*`, all or selected WDRs. | Violations, impacted lines, required actions. |
-| Registry/evidence check | Validate whether evidence and registry references are present. | Evidence rules, WDR evidence indexes, registry links. | Evidence gaps, registry gaps, acceptance blockers. |
-| Arbitration log update | Record contract disputes, exceptions, and decisions. | Conflict description, affected lines, decision, approver. | Updated `l0/arbitration-log.md` and affected WDR decisions. |
-| Migration baseline capture | Record migration-specific horizontal baseline. | Data mapping notes, interface contracts, sync strategy, cutover assumptions, fallback strategy. | Updated `l0/data-baseline.md`, `contract-baseline.md`, `registry.md`. |
-| Cutover gate check | Check readiness for cutover-specific gates. | Cutover window, freeze period, rollback plan, monitoring plan, data validation evidence. | Cutover gate result, blockers, required proof, affected workstreams. |
-| Rollback and fallback review | Validate fallback readiness. | Rollback SOP, fallback owner, rehearsal evidence, operational monitoring notes. | Rollback/fallback readiness gaps and owner actions. |
+| L0 artifact indexing | Register L0 PRD, architecture, specs, registry/evidence docs, and relevant versions. | L0 artifact paths/links and brief notes. | `l0/reference-index.md` with source paths, owner, version/baseline status. |
+| Project implication extraction | Extract only project-level implications from L0 artifacts. | L0 PRD/spec text or summary. | `extracted-gates.md`, `extracted-nfr.md`, `extracted-evidence-rules.md`, `extracted-impacts.md`. |
+| Impact scan | Identify workstreams affected by L0 references. | L0 extracted impacts and WDR dependencies. | Affected workstream list, WDR update suggestions, unresolved questions. |
+| Gap check | Check whether WDRs acknowledge required L0 gates, NFR, evidence, or interfaces. | Extracted L0 references and selected WDRs. | Missing references, compliance gaps, owner actions. |
+| Exception/open-question capture | Capture questions or exceptions that must go back to the L0 workstream or business decision process. | Gap scan results, FDE notes, meeting outputs. | `exceptions-and-open-questions.md`, optional Business Decision Packet or L0 workstream action. |
 
-**Design Notes:** This workflow may become a separate Agent later if L0 governance becomes large and produces extensive independent outputs.
+**Design Notes:** This workflow is intentionally lightweight. It should not judge whether L0 itself is good, complete, or implementation-ready. It only asks: what did L0 establish, which lines are affected, what must be reflected in WDR/readiness, and what questions need routing back?
 
 **Relationships:** Feeds readiness scoring, risk/dependency review, Program Lead impact sweeps, and acceptance reports.
 
@@ -405,14 +398,14 @@ _bmad/memory/adp/
 
 **Design Notes:** Readiness is a steering mechanism, not a punitive gate. Draft and gap states are valid if the gaps are explicit. For migration projects, “acceptance ready” and “cutover ready” are related but not identical; the workflow must expose both when the L0/profile indicates migration/cutover risk.
 
-**Relationships:** Consumes WDRs, evidence, L0 baseline, decisions. Feeds Program Lead acceptance view and management summaries.
+**Relationships:** Consumes WDRs, evidence, L0 reference summary, decisions. Feeds Program Lead acceptance view and management summaries.
 
 ## Capability Review
 
 Reviewed decisions:
 
 - `adp-bmm-checkpoint-sync` remains a single workflow with PRD, architecture, epic/story, and implementation/validation modes. This keeps the FDE mental model simple: after each BMM stage, sync it to ADP.
-- `adp-l0-baseline-check` remains a workflow in v1, not a standalone Agent. L0 is currently best represented as public baseline/gates/NFR/evidence state plus validation routines. It can become an Agent later if L0 governance becomes a large independent workstream with its own outputs.
+- L0 handling is scoped as `adp-l0-reference-sync`. L0 remains a BMM-managed workstream; ADP only indexes and extracts cross-line implications.
 - `adp-meeting-sync` is added as a separate workflow rather than being hidden inside `adp-status-sync`, because real X-Large delivery depends on meeting/offline communication closure.
 - Shopify/migration specificity is adopted as a migration/cutover profile in L0 and readiness, not as a Shopify-only module fork.
 
@@ -423,7 +416,7 @@ Overlap review:
 - `adp-meeting-sync` classifies meeting/offline communication inputs and routes them to WDR, decisions, action lists, daily logs, or business packets; `adp-status-sync` may consume those outputs for lightweight state refresh.
 - `adp-risk-dependency-change-review` owns risk/dependency/change normalization; Program Lead uses its outputs for readouts and escalation.
 - `adp-acceptance-readiness-review` owns scoring and evidence coverage; Program Lead uses its outputs for acceptance views.
-- `adp-l0-baseline-check` owns migration/cutover/rollback/monitoring baseline checks when the project profile requires them; readiness review consumes its outputs.
+- `adp-l0-reference-sync` owns L0 reference indexing, implication extraction, gap checks, and routing questions back to L0/business decision processes; readiness review consumes its outputs.
 
 Structured output candidates:
 
@@ -434,11 +427,11 @@ Structured output candidates:
 - HTML acceptance readiness report from `adp-acceptance-readiness-review`.
 - HTML cutover readiness report from `adp-acceptance-readiness-review`.
 - HTML risk matrix and dependency map from `adp-risk-dependency-change-review`.
-- Markdown/HTML L0 compliance scan from `adp-l0-baseline-check`.
+- Markdown/HTML L0 reference impact scan from `adp-l0-reference-sync`.
 
 ## Configuration
 
-默认策略：setup 不要求用户先回答复杂问卷。模块应以默认模板直接可用，优先降低启动成本。项目级差异通过后续编辑 `_bmad/memory/adp/` 下的 schema、cadence、L0 baseline 和 project charter 来调整。
+默认策略：setup 不要求用户先回答复杂问卷。模块应以默认模板直接可用，优先降低启动成本。项目级差异通过后续编辑 `_bmad/memory/adp/` 下的 schema、cadence、L0 reference summary 和 project charter 来调整。
 
 建议默认配置：
 
@@ -448,7 +441,7 @@ Structured output candidates:
 | `adp_workstream_root` | Workstream records root | `_bmad/memory/adp/workstreams` | Workstream records are stored under `{adp_workstream_root}/{workstream-id}/`. | No |
 | `adp_default_cadence` | Default status cadence | `weekly` | Status sync and weekly reports assume `{adp_default_cadence}` unless overridden. | Yes |
 | `adp_readiness_mode` | Readiness scoring mode | `score-and-gaps` | Readiness reports include scores, dimension scores, gaps, owners, and actions. | No |
-| `adp_l0_mode` | L0 handling mode | `embedded-baseline` | L0 is represented as baseline/gates/NFR/evidence files, not a standalone agent. | No |
+| `adp_l0_mode` | L0 handling mode | `reference-sync` | L0 is represented as source artifact references plus extracted project-level implications, not as ADP-owned baseline files. | No |
 | `adp_project_profile` | Project profile | `generic-delivery` | Optional profiles such as `migration-cutover` add cutover, rollback, data sync, and monitoring readiness dimensions. | Yes |
 
 Setup should not block if these are absent. Skills should use these defaults and create missing files on first run.
@@ -494,17 +487,13 @@ The setup skill should scaffold the ADP memory and template structure:
    - `schemas/status-taxonomy.md`
    - `schemas/meeting-sync.md`
    - `schemas/decision-taxonomy.md`
-3. Create default L0 baseline files:
-   - `l0/contract-baseline.md`
-   - `l0/gates.md`
-   - `l0/nfr-baseline.md`
-   - `l0/registry.md`
-   - `l0/evidence-rules.md`
-   - `l0/arbitration-log.md`
-   - `l0/data-baseline.md`
-   - `l0/cutover-gates.md`
-   - `l0/rollback-standards.md`
-   - `l0/monitoring-baseline.md`
+3. Create default L0 reference files:
+   - `l0/reference-index.md`
+   - `l0/extracted-gates.md`
+   - `l0/extracted-nfr.md`
+   - `l0/extracted-evidence-rules.md`
+   - `l0/extracted-impacts.md`
+   - `l0/exceptions-and-open-questions.md`
 4. Create meeting and decision folders:
    - `meetings/`
    - `decisions/decision-log.md`
@@ -523,7 +512,7 @@ Integration model:
 
 - BMM remains responsible for domain lifecycle artifacts: brainstorming, PRD, architecture, epics/stories, implementation, validation.
 - ADP workflows consume BMM artifact paths and checkpoint summaries, then update Workstream Delivery Records.
-- ADP views and reports derive from Workstream Delivery Records, L0 baseline files, readiness scorecards, decisions, evidence, risks, and dependencies.
+- ADP views and reports derive from Workstream Delivery Records, L0 reference summaries, readiness scorecards, decisions, evidence, risks, and dependencies.
 - ADP should not require BMM internals to be modified. It should work as a coordination layer on top of BMM outputs.
 
 Independent value if BMM is absent: ADP can still manage workstream status, readiness, risks, dependencies, evidence, and project-level views. With BMM present, its artifact index becomes much richer and less manual.
@@ -533,7 +522,7 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 - Pre-meeting brief: generate a project lead briefing before status sync, showing only what needs attention.
 - FDE handoff packet: produce a concise handoff when one FDE transfers a workstream to another.
 - Acceptance war room: produce a live checklist of evidence gaps, missing confirmations, and readiness blockers before customer review.
-- L0 impact sweep: when a public contract/gate/NFR baseline changes, scan all workstreams and produce affected-line actions.
+- L0 impact sweep: when L0 reference artifacts change, scan all workstreams and produce affected-line actions.
 - Scope drift detector: compare current Record changes against baseline PRD/architecture links and decision logs to surface unapproved drift.
 - Evidence audit: verify that every acceptance criterion has linked proof, owner, and confirmation status.
 - Meeting closure audit: verify every meeting item became a decision, action, WDR update, business packet, daily log entry, or explicit no-op.
@@ -583,7 +572,7 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 - 设计原则：避免让 FDE 双写太多内容。BMM 产物是事实来源；Workstream Delivery Record 是项目级摘要和索引。
 - Record 不复制完整需求细节，只记录 PRD 在哪里、当前是否 baseline、哪些需求影响其他线、哪些验收标准需要项目级关注、还有什么未确认。
 - 模块强制产出不是“再写一份交付文档”，而是每条线必须维护一个轻量但结构化的项目级同步面。这是多 FDE 协作中真正缺失的部分。
-- L0 缝合线的定位：为各线并行迁移提供可冻结、可校验、可仲裁、可出证据的公共契约、门禁、CI/registry/evidence 机制和横向 NFR 基线。
+- L0 缝合线的定位：为各线并行迁移提供公共契约、门禁、CI/registry/evidence 机制和横向 NFR 基线；这些内容由 L0 工作线自身负责产出，ADP 只同步引用和跨线影响。
 - L0 可能沉淀的内容：全局术语、公共契约、接口规范、验收口径、状态字段定义、跨线依赖规则、交付证据标准、质量门禁、横向 NFR 基线、CI/registry/evidence 机制。
 - Workstream Delivery Record 不应强制一开始字段齐全。它应支持草稿态、缺口态和 ready 态，用 readiness 评分暴露缺口。
 - Readiness 模型不是为了阻止推进，而是为了让缺口可见、可讨论、可升级、可闭环。
@@ -591,11 +580,11 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 - Readiness 输出应包含：总体分数、维度分数、缺口清单、每个缺口对应的补齐动作、责任人、建议截止时间或触发条件。
 - Readiness 候选维度：范围清晰度、验收清晰度、BMM 产物完整度、依赖清晰度、风险暴露度、证据完整度、L0 合规度、下一步可执行度。
 - 真实场景评审：Shopify 迁移到自建站 X-Large 项目验证 ADP 主架构适用，但必须增加场景化硬约束，否则容易退化为文档归档工具。
-- 评审采纳结论：保留 Program Lead + WDR + checkpoint workflows + shared memory 主架构；新增或强化会议同步、业务决策包、切换兜底 readiness、迁移型 L0 baseline。
+- 评审采纳结论：保留 Program Lead + WDR + checkpoint workflows + shared memory 主架构；新增或强化会议同步、业务决策包、切换兜底 readiness、迁移型 L0 reference sync。
 - 必须突出 4 个闭环：工作线闭环、会议闭环、决策闭环、验收闭环。
 - 会议闭环要求 1/3/5 FDE 内会、双周业务例会、非常规专项沟通、线下沟通补录都能落到结构化状态。每个会议项应成为 daily log、decision、action、WDR 更新、business decision packet 或 explicit no-op。
 - 业务决策包应包含：背景、待决问题、选项、影响、推荐方案、截止时间、关联工作线。适用于 FDE 无法独立拍板、需要业务澄清或业务决策的问题。
-- 迁移/切换项目的 L0 不只是公共契约，还要承载数据口径、接口契约、切换门禁、回滚标准、冻结期、灰度策略、监控基线和证据规则。
+- 迁移/切换项目的 L0 不只是公共契约，还要承载数据口径、接口契约、切换门禁、回滚标准、冻结期、灰度策略、监控基线和证据规则；ADP 不维护这些规则本身，只抽取对各工作线的约束和缺口。
 - 迁移专项 readiness 维度候选：功能迁移 readiness、数据同步 readiness、业务确认 readiness、切换 readiness、回滚/兜底 readiness、监控与证据 readiness、L0 合规 readiness。
 - “验收 ready” 不等于“切换 ready”。对于迁移项目，readiness review 必须显式暴露 cutover readiness 和 go/no-go 风险。
 - 派生视图优先级：
@@ -608,13 +597,13 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 
 Recommended build order:
 
-1. **`adp-project-kickoff`** - build first because it creates the shared memory structure, schemas, L0 baseline placeholders, starter views, and idempotent setup behavior that every other skill depends on.
+1. **`adp-project-kickoff`** - build first because it creates the shared memory structure, schemas, L0 reference placeholders, starter views, and idempotent setup behavior that every other skill depends on.
 2. **`adp-workstream-register`** - build second because Workstream Delivery Record is the core project-level state unit. This validates the schema and gives the module a real operating surface.
 3. **`adp-bmm-checkpoint-sync`** - build third so BMM lifecycle outputs can be connected to Records at PRD, architecture, epic/story, and implementation/validation checkpoints.
 4. **`adp-meeting-sync`** - build fourth because meetings/offline communications are the main high-frequency input source in real X-Large delivery. This creates the meeting -> decision/action/WDR/business packet closure loop.
 5. **`adp-status-sync`** - build fifth to support the recurring operating rhythm and keep Records current between major BMM checkpoints, consuming meeting-sync outputs when available.
 6. **`adp-risk-dependency-change-review`** - build sixth because it owns risk/dependency/change normalization and must produce Business Decision Packets for issues FDE cannot decide alone.
-7. **`adp-l0-baseline-check`** - build seventh to encode migration/cutover/rollback/monitoring baselines, gates, NFR, evidence, and compliance scans.
+7. **`adp-l0-reference-sync`** - build seventh to index L0 artifacts, extract cross-line implications, and route gaps/questions back to L0 or business decision processes.
 8. **`adp-acceptance-readiness-review`** - build eighth because readiness scoring relies on WDR fields, evidence indexes, status taxonomy, L0 rules, and migration/cutover baselines. This should produce Markdown/HTML acceptance and cutover readiness reports.
 9. **`adp-agent-program-lead`** - build after the core workflows are stable so the Agent can synthesize real workflow outputs rather than inventing behavior. It should orchestrate readouts, coaching, weekly reports, closure audits, and stakeholder views.
 
