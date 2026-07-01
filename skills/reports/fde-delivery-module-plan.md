@@ -10,7 +10,7 @@ expands_module: ''
 skills_planned: ['adp-agent-program-lead', 'adp-project-kickoff', 'adp-workstream-register', 'adp-bmm-checkpoint-sync', 'adp-status-sync', 'adp-meeting-sync', 'adp-l0-reference-sync', 'adp-risk-dependency-change-review', 'adp-acceptance-readiness-review']
 config_variables: []
 created: '2026-07-01T11:24:36.3400034+08:00'
-updated: '2026-07-01T14:59:32.7639609+08:00'
+updated: '2026-07-01T15:28:16.1267756+08:00'
 ---
 
 # Module Plan
@@ -73,10 +73,13 @@ _bmad/memory/adp/
     decision-taxonomy.md
   l0/
     reference-index.md
+    extracted-freeze-model.md
+    extracted-contract-inventory.md
     extracted-gates.md
     extracted-nfr.md
     extracted-evidence-rules.md
     extracted-impacts.md
+    extracted-decision-gates.md
     exceptions-and-open-questions.md
   meetings/
     YYYY-MM-DD-{meeting-type}.md
@@ -122,7 +125,7 @@ _bmad/memory/adp/
 | `schemas/status-taxonomy.md` | 项目级状态、风险、依赖、变更、验收状态的枚举定义。 | 所有 ADP skills | setup、program lead | 状态值、含义、触发条件、禁止混用的口径。 |
 | `schemas/meeting-sync.md` | 会议同步输入类型、归类规则和闭环检查。 | meeting/status/report workflows、program lead | setup、meeting workflow | 会议类型、事实/决策/action/WDR 更新/no-op 分类、输出要求。 |
 | `schemas/decision-taxonomy.md` | 决策类型和业务决策包格式。 | meeting/risk/change workflows、program lead | setup、risk/change workflow | FDE 内部决策、业务决策、风险接受、范围变更、待澄清问题。 |
-| `l0/*` | L0 产物的轻量索引和抽取摘要，而不是 L0 自身的事实来源。 | program lead、readiness/risk workflows | L0 reference sync workflow、program lead | L0 PRD/架构/规范路径、抽取的门禁/NFR/证据要求、影响工作线、例外和未决问题。 |
+| `l0/*` | L0 产物的轻量索引和抽取摘要，而不是 L0 自身的事实来源。 | program lead、readiness/risk workflows | L0 reference sync workflow、program lead | L0 PRD/架构/规范路径、freeze model、contract inventory、G19/G06 gates、NFR owner/evidence matrix、D/E 决策与证据项、影响工作线、例外和未决问题。 |
 | `meetings/*` | 结构化会议留档。 | program lead、status/risk/report workflows | meeting sync workflow | 会议类型、参与人、事实、决策、问题、行动项、WDR 回写、未闭环项。 |
 | `decisions/decision-log.md` | 项目级决策索引。 | program lead、risk/change/report workflows | meeting sync、risk/change workflow | 决策类型、日期、来源、影响工作线、确认人、状态。 |
 | `decisions/business-decision-packets/*` | 业务问题包/业务决策包。 | program lead、FDE、业务方 | risk/change workflow、meeting sync workflow | 背景、待决问题、选项、影响、推荐方案、截止时间、关联工作线。 |
@@ -335,12 +338,16 @@ _bmad/memory/adp/
 | Capability | Outcome | Inputs | Outputs |
 | ---------- | ------- | ------ | ------- |
 | L0 artifact indexing | Register L0 PRD, architecture, specs, registry/evidence docs, and relevant versions. | L0 artifact paths/links and brief notes. | `l0/reference-index.md` with source paths, owner, version/baseline status. |
-| Project implication extraction | Extract only project-level implications from L0 artifacts. | L0 PRD/spec text or summary. | `extracted-gates.md`, `extracted-nfr.md`, `extracted-evidence-rules.md`, `extracted-impacts.md`. |
+| Freeze model extraction | Extract L0 freeze levels and their downstream effects. | L0 PRD sections for Boundary Freeze, Contract v0 Freeze, Gate Freeze, allowed/prohibited states. | `extracted-freeze-model.md` with freeze level, timing, allowed work, prohibited work, WDR/readiness implications. |
+| Contract inventory extraction | Extract contract entries that matter for downstream workstream readiness. | L0 Contract Inventory with level, provider, consumers, canonical artifacts, required checks/evidence, failure consequence. | `extracted-contract-inventory.md` keyed by contract id/name, level P0/P1/P2, provider, consumers, evidence, affected lines. |
+| Gate model extraction | Extract G19-A, G19-B, G06 and related gate evidence requirements. | L0 gate sections and cutover gate tables. | `extracted-gates.md` and `extracted-evidence-rules.md` with gate, threshold, evidence artifact, producing line, accountable owner, stale threshold, failure consequence. |
+| NFR matrix extraction | Extract NFR accountable owner, contributing lines, evidence owner, gate impact, and required evidence. | L0 NFR承接矩阵. | `extracted-nfr.md` with NFR id, threshold, primary accountable owner, evidence owner, gate impact, affected workstreams. |
+| Decision/evidence gate extraction | Extract D-series decision gates and E-series evidence dependencies that affect cross-line readiness. | L0 open items, D gates, E evidence tables. | `extracted-decision-gates.md` plus open questions/actions for D01/D17/D21/D22/D23/E-series as applicable. |
 | Impact scan | Identify workstreams affected by L0 references. | L0 extracted impacts and WDR dependencies. | Affected workstream list, WDR update suggestions, unresolved questions. |
-| Gap check | Check whether WDRs acknowledge required L0 gates, NFR, evidence, or interfaces. | Extracted L0 references and selected WDRs. | Missing references, compliance gaps, owner actions. |
+| Gap check | Check whether WDRs acknowledge required L0 contracts, gates, NFR, evidence, or interfaces. | Extracted L0 references and selected WDRs. | Missing references, compliance gaps, owner actions; do not judge L0 implementation completeness. |
 | Exception/open-question capture | Capture questions or exceptions that must go back to the L0 workstream or business decision process. | Gap scan results, FDE notes, meeting outputs. | `exceptions-and-open-questions.md`, optional Business Decision Packet or L0 workstream action. |
 
-**Design Notes:** This workflow is intentionally lightweight. It should not judge whether L0 itself is good, complete, or implementation-ready. It only asks: what did L0 establish, which lines are affected, what must be reflected in WDR/readiness, and what questions need routing back?
+**Design Notes:** This workflow is intentionally lightweight but schema-aware. It should not judge whether L0 itself is good, complete, or implementation-ready. It only asks: what did L0 establish, which lines are affected, what must be reflected in WDR/readiness, and what questions need routing back? Actual L0 PRDs may be rich governance artifacts with Contract Inventory, freeze levels, G19/G06 gates, NFR matrices, D-series decision gates, and E-series evidence dependencies; ADP should extract those structures without becoming their owner.
 
 **Relationships:** Feeds readiness scoring, risk/dependency review, Program Lead impact sweeps, and acceptance reports.
 
@@ -489,10 +496,13 @@ The setup skill should scaffold the ADP memory and template structure:
    - `schemas/decision-taxonomy.md`
 3. Create default L0 reference files:
    - `l0/reference-index.md`
+   - `l0/extracted-freeze-model.md`
+   - `l0/extracted-contract-inventory.md`
    - `l0/extracted-gates.md`
    - `l0/extracted-nfr.md`
    - `l0/extracted-evidence-rules.md`
    - `l0/extracted-impacts.md`
+   - `l0/extracted-decision-gates.md`
    - `l0/exceptions-and-open-questions.md`
 4. Create meeting and decision folders:
    - `meetings/`
@@ -587,6 +597,9 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 - 迁移/切换项目的 L0 不只是公共契约，还要承载数据口径、接口契约、切换门禁、回滚标准、冻结期、灰度策略、监控基线和证据规则；ADP 不维护这些规则本身，只抽取对各工作线的约束和缺口。
 - 迁移专项 readiness 维度候选：功能迁移 readiness、数据同步 readiness、业务确认 readiness、切换 readiness、回滚/兜底 readiness、监控与证据 readiness、L0 合规 readiness。
 - “验收 ready” 不等于“切换 ready”。对于迁移项目，readiness review 必须显式暴露 cutover readiness 和 go/no-go 风险。
+- 实际 L0 PRD 校验：`prd-L0-foundation-platform-2026-06-07/prd.md` 证明 L0 不是普通“基线文档”，而是一个 BMM 管理的 governance / mechanism owner 工作线，包含薄边界、Contract Inventory、G19-A/G19-B/G06 Gate、NFR 承接矩阵、D-series 决策门、E-series 证据依赖和 cutover 口径。
+- 对 ADP 的设计修正：`adp-l0-reference-sync` 保持轻量，不恢复为 L0 治理 workflow；但必须 schema-aware，能抽取 freeze model、contract inventory、gate model、NFR matrix、decision/evidence gates，并把影响映射到 WDR/readiness。
+- ADP 对 L0 的正确问题不是“L0 是否做得好”，而是“L0 已经建立了哪些可引用约束，哪些工作线受影响，哪些 WDR/readiness 缺失引用或证据，哪些问题要回到 L0 工作线或业务决策包”。
 - 派生视图优先级：
   - 项目负责人视角：全局状态、跨线风险、依赖、升级项、下一步推进动作。
   - FDE 视角：我负责的工作线、readiness 缺口、下一步动作、待业务确认项、需要补证据的项。
