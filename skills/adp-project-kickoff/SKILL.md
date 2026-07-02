@@ -15,11 +15,28 @@ The consumer is the FDE team, project lead, and later ADP workflows. They need f
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
 
+## Configuration and Language
+
+Resolve the target `{project-root}` before any user-facing output. This is the project where ADP is installed or being run, not the module build repository.
+
+Load BMad configuration from the target project in this order:
+
+1. `{project-root}/_bmad/adp/config.yaml` (primary ADP install-time config)
+2. `{project-root}/_bmad/config.user.yaml` and `{project-root}/_bmad/config.yaml` when present
+3. `{project-root}/_bmad/core/config.yaml`
+4. `{project-root}/_bmad/bmm/config.yaml` or `{project-root}/_bmad/bmb/config.yaml` as compatibility fallbacks
+
+Use `communication_language` for all conversation and status output. Use `document_output_language` for generated project documents and report text. If no config file exists, say that explicitly and fall back to English.
+
 ## Activation
 
 Infer the project root from the current workspace unless the user gives a path. If `{project-root}/_bmad/memory/adp/` already exists, treat the run as an idempotent refresh: preserve content, report what already exists, and create only missing recommended files.
 
-Accept a brief when the user provides one, but do not block setup for missing details. Capture only reliable facts into `project-charter.md`; leave unknown objectives, stakeholders, cadence exceptions, L0 references, and escalation paths as explicit placeholders.
+Before writing anything, discover existing BMad project artifacts in the target project. Look for planning outputs such as PRD, architecture, epics, UX/design, product brief, and research files under configured `planning_artifacts`, `{project-root}/_bmad-output/planning-artifacts`, and common docs folders. Look for implementation outputs such as stories, sprint status, validation notes, and project context under configured `implementation_artifacts`, `{project-root}/_bmad-output/implementation-artifacts`, and common docs folders.
+
+If existing BMad artifacts are found and the user did not pass `--headless`, `--yes`, or `--dry-run`, summarize the discovered context and ask for confirmation before initializing or refreshing ADP memory. Explain that kickoff will create an ADP coordination layer from the existing project state and will not overwrite or duplicate the BMM source artifacts. If the user declines, stop without writing files.
+
+Accept a brief when the user provides one, but do not block setup for missing details. Combine the brief with discovered artifact paths as kickoff source context. Capture only reliable facts into `project-charter.md`; leave unknown objectives, stakeholders, cadence exceptions, L0 references, and escalation paths as explicit placeholders.
 
 ## Build
 
@@ -36,6 +53,7 @@ Use optional flags only when the user gives the facts:
 - `--cadence weekly|biweekly|custom` for the default rhythm.
 - `--memory-root <path>` when ADP memory should live outside `{project-root}/_bmad/memory/adp`.
 - `--source "<brief or path summary>"` to record the kickoff source.
+- `--yes` or `--headless` only when the user explicitly wants non-interactive kickoff after discovery.
 - `--dry-run` to preview without writing.
 
 If the script cannot run, create the same folders and files from `assets/adp-memory-templates/` manually. Never overwrite an existing file during fallback; report it as existing instead.

@@ -17,6 +17,19 @@ The consumer is the FDE owner, project lead, and later ADP reports. They need to
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
 
+## Configuration and Language
+
+Resolve the target `{project-root}` before any user-facing output. This is the project where ADP is installed or being run, not the module build repository.
+
+Load BMad configuration from the target project in this order:
+
+1. `{project-root}/_bmad/adp/config.yaml` (primary ADP install-time config)
+2. `{project-root}/_bmad/config.user.yaml` and `{project-root}/_bmad/config.yaml` when present
+3. `{project-root}/_bmad/core/config.yaml`
+4. `{project-root}/_bmad/bmm/config.yaml` or `{project-root}/_bmad/bmb/config.yaml` as compatibility fallbacks
+
+Use `communication_language` for all conversation and status output. Use `document_output_language` for generated project documents and report text. If no config file exists, say that explicitly and fall back to English.
+
 ## On Activation
 
 Use `{project-root}/_bmad/memory/adp` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow status sync when the user provides `--memory-root`.

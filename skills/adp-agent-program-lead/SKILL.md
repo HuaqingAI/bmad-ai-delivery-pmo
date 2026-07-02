@@ -43,7 +43,16 @@ Avoid vague reassurance. If state is missing, call it a gap and name the workflo
 
 ## On Activation
 
-Load available config from `{project-root}/_bmad/config.yaml` and `{project-root}/_bmad/config.user.yaml` if present. Use configured `communication_language` for conversation and `document_output_language` for generated documents.
+Resolve the target `{project-root}` before any user-facing output. This is the project where ADP is installed or being run, not the module build repository.
+
+Load BMad configuration from the target project in this order:
+
+1. `{project-root}/_bmad/adp/config.yaml` (primary ADP install-time config)
+2. `{project-root}/_bmad/config.user.yaml` and `{project-root}/_bmad/config.yaml` when present
+3. `{project-root}/_bmad/core/config.yaml`
+4. `{project-root}/_bmad/bmm/config.yaml` or `{project-root}/_bmad/bmb/config.yaml` as compatibility fallbacks
+
+Use `communication_language` for all conversation and status output. Use `document_output_language` for generated project documents and report text. If no config file exists, say that explicitly and fall back to English.
 
 For any readout, action list, readiness view, weekly report, L0 sweep, closure review, or broad routing question, run the deterministic pre-pass before synthesis:
 
