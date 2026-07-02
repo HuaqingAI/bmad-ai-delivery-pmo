@@ -1,0 +1,124 @@
+---
+name: adp-meeting-sync
+description: Closes ADP meeting sync loops. Use when the user says "adp-meeting-sync" or "sync meeting".
+---
+
+# adp-meeting-sync
+
+## Overview
+
+This workflow turns meeting notes, offline updates, and stakeholder conversations into closed ADP project memory updates. Act as a delivery-state facilitator: classify each meeting item, preserve the source as a structured archive, and route the item to the smallest durable destination that keeps the project synchronized.
+
+The consumers are FDE owners, the project lead, status-sync, risk/change review, readiness review, and the program lead agent. They need every meeting item to become a daily log entry, decision, action, Workstream Delivery Record update, Business Decision Packet, or explicit no-op with rationale. A meeting sync is incomplete when an item stays unclassified or cannot be traced to a destination or named gap.
+
+## Resolution rules
+
+- Bare paths and `{skill-root}` (e.g. `scripts/sync_meeting.py`) resolve from this skill's installed directory.
+- `{project-root}` -> the project working directory.
+- `{skill-name}` -> the skill directory's basename.
+
+## On Activation
+
+Use `{project-root}/_bmad/memory/adp` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow sync when the user provides `--memory-root`.
+
+Load these schema files when present, because they define local terminology and valid destinations:
+
+- `{project-root}/_bmad/memory/adp/schemas/meeting-sync.md`
+- `{project-root}/_bmad/memory/adp/schemas/decision-taxonomy.md`
+- `{project-root}/_bmad/memory/adp/schemas/workstream-delivery-record.md`
+- `{project-root}/_bmad/memory/adp/schemas/status-taxonomy.md`
+
+## Classify
+
+Treat the raw meeting notes as source evidence, not as the final artifact. Separate each item into exactly one classification:
+
+- `fact`: project state or context that belongs in the daily log and may update a WDR.
+- `decision`: an FDE internal decision, scope change, risk acceptance, or other confirmed project decision.
+- `action`: a follow-up with an owner and due date or trigger.
+- `wdr_update`: a direct project-level update to affected Workstream Delivery Records.
+- `business_decision_needed`: a question FDEs cannot decide alone; it needs a Business Decision Packet and an accountable confirmer.
+- `no_op`: a discussed item that should not change project memory; the rationale is mandatory.
+
+If an item is ambiguous, choose the safest classification that exposes the gap. A pending business answer is not a no-op. A decision without an accountable confirmer is open, not confirmed. A WDR update against an unknown workstream becomes an unresolved gap and should prompt `adp-workstream-register` or an id correction.
+
+## Sync Plan
+
+Before writing files, produce a compact JSON plan and inspect it for closure. The script executes the plan; it does not infer business meaning.
+
+Required shape:
+
+```json
+{
+  "meeting": {
+    "date": "YYYY-MM-DD",
+    "type": "FDE internal sync",
+    "title": "Short title",
+    "source": "pasted notes, transcript, or file path",
+    "participants": ["Name"],
+    "summary": "One paragraph"
+  },
+  "items": [
+    {
+      "id": "M-001",
+      "classification": "action",
+      "text": "What was said or decided",
+      "affected_workstreams": ["workstream-id"],
+      "owner": "Name",
+      "due": "date or trigger",
+      "decision_type": "FDE internal decision",
+      "confirmer": "Name",
+      "status": "open",
+      "wdr_update": "Project-level WDR text when applicable",
+      "no_op_reason": "Required for no_op",
+      "packet": {
+        "background": "Why this needs business decision",
+        "decision_needed": "Question to decide",
+        "options": ["Option A", "Option B"],
+        "recommendation": "Recommended answer, if any",
+        "risks_tradeoffs": "Impact of the choice",
+        "deadline": "date or trigger",
+        "confirming_owner": "Business owner"
+      }
+    }
+  ]
+}
+```
+
+Keep unknown fields as `TBD` or omit them, but do not omit `id`, `classification`, or `text`.
+
+## Write
+
+Run the deterministic writer after the plan is ready:
+
+```bash
+uv run scripts/sync_meeting.py {project-root} --plan <plan.json>
+```
+
+Useful flags:
+
+- `--memory-root <path>` for non-default ADP memory.
+- `--dry-run` to preview target files without writing.
+- `-o <path>` to write the JSON execution report.
+
+The script writes a structured meeting archive, appends the daily log, appends decision indexes and workstream decision files where applicable, appends WDR meeting-sync updates when the workstream exists, and creates Business Decision Packets for `business_decision_needed` items. Existing files are preserved; WDRs are appended, not replaced.
+
+If the script cannot run, manually create the same outputs from `assets/meeting-sync-templates/`. Preserve existing user content and report any item that could not be closed.
+
+## Output Contract
+
+After syncing, report:
+
+- the meeting archive path
+- daily log, decision log, WDRs, workstream decision files, and Business Decision Packets touched
+- unresolved gaps, especially missing workstreams, missing owners, missing confirmers, or no-op items without rationale
+- next useful workflow: usually `adp-status-sync` for cadence updates, `adp-risk-dependency-change-review` for open risk/change/business decisions, or `adp-workstream-register` for unknown workstreams
+
+Do not call a meeting closed because a note exists. It is closed when every item has a classification, destination, owner where needed, and either a durable write or a visible gap.
+
+## Guardrails
+
+- ADP records project-level coordination state; do not copy full PRD, architecture, story, code, or validation detail out of BMM artifacts.
+- Business decisions need an accountable business confirmer. FDE-only calls belong to FDE/internal decision records.
+- Risk acceptance and scope change are decisions with consequences, not generic actions.
+- Offline follow-ups and chat corrections count as meetings when they change project state.
+- No-op is a traceable closure state, not a way to skip hard items.

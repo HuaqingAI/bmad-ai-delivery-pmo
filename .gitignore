@@ -6,6 +6,10 @@ _bmad-output/
 .env
 .env.*
 *.log
+*.py[cod]
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 
 node_modules/
 dist/
@@ -13,6 +17,10 @@ build/
 .cache/
 .tmp/
 tmp/
+
+skills/**/.analysis/
+skills/**/.memlog.md
+skills/reports/analysis-archive/
 
 .DS_Store
 Thumbs.db

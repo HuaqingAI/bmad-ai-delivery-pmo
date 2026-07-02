@@ -10,7 +10,7 @@ expands_module: ''
 skills_planned: ['adp-agent-program-lead', 'adp-project-kickoff', 'adp-workstream-register', 'adp-bmm-checkpoint-sync', 'adp-status-sync', 'adp-meeting-sync', 'adp-l0-reference-sync', 'adp-risk-dependency-change-review', 'adp-acceptance-readiness-review']
 config_variables: []
 created: '2026-07-01T11:24:36.3400034+08:00'
-updated: '2026-07-01T15:28:16.1267756+08:00'
+updated: '2026-07-02T11:33:24.4815541+08:00'
 ---
 
 # Module Plan
@@ -608,27 +608,31 @@ Independent value if BMM is absent: ADP can still manage workstream status, read
 
 ## Build Roadmap
 
-Recommended build order:
+Build status:
 
-1. **`adp-project-kickoff`** - build first because it creates the shared memory structure, schemas, L0 reference placeholders, starter views, and idempotent setup behavior that every other skill depends on.
-2. **`adp-workstream-register`** - build second because Workstream Delivery Record is the core project-level state unit. This validates the schema and gives the module a real operating surface.
-3. **`adp-bmm-checkpoint-sync`** - build third so BMM lifecycle outputs can be connected to Records at PRD, architecture, epic/story, and implementation/validation checkpoints.
-4. **`adp-meeting-sync`** - build fourth because meetings/offline communications are the main high-frequency input source in real X-Large delivery. This creates the meeting -> decision/action/WDR/business packet closure loop.
-5. **`adp-status-sync`** - build fifth to support the recurring operating rhythm and keep Records current between major BMM checkpoints, consuming meeting-sync outputs when available.
-6. **`adp-risk-dependency-change-review`** - build sixth because it owns risk/dependency/change normalization and must produce Business Decision Packets for issues FDE cannot decide alone.
-7. **`adp-l0-reference-sync`** - build seventh to index L0 artifacts, extract cross-line implications, and route gaps/questions back to L0 or business decision processes.
-8. **`adp-acceptance-readiness-review`** - build eighth because readiness scoring relies on WDR fields, evidence indexes, status taxonomy, L0 rules, and migration/cutover baselines. This should produce Markdown/HTML acceptance and cutover readiness reports.
-9. **`adp-agent-program-lead`** - build after the core workflows are stable so the Agent can synthesize real workflow outputs rather than inventing behavior. It should orchestrate readouts, coaching, weekly reports, closure audits, and stakeholder views.
+1. **`adp-project-kickoff`** - completed. Creates the shared memory structure, schemas, L0 reference placeholders, starter views, and idempotent setup behavior that every other skill depends on.
+2. **`adp-workstream-register`** - completed. Creates or normalizes Workstream Delivery Records and starter evidence, decision, and readiness files.
+3. **`adp-bmm-checkpoint-sync`** - completed. Syncs BMM lifecycle outputs into Records at PRD, architecture, epic/story, implementation, validation, and baseline checkpoints.
+4. **`adp-meeting-sync`** - completed. Closes meeting/offline communication loops into daily logs, decisions, actions, WDR updates, business decision packets, or explicit no-op records.
+5. **`adp-status-sync`** - completed. Applies lightweight owner status deltas, daily log updates, and staleness checks between major checkpoints.
+6. **`adp-risk-dependency-change-review`** - completed. Reviews cross-workstream risks, dependencies, blockers, and changes, and produces derived views or Business Decision Packets.
+7. **`adp-l0-reference-sync`** - completed. Indexes L0 artifacts, extracts project-level gates/contracts/NFR/evidence implications, and surfaces WDR/readiness gaps.
+8. **`adp-acceptance-readiness-review`** - completed. Scores acceptance and cutover readiness from WDRs, evidence, decisions, readiness schema, and L0 references, with Markdown/HTML report output.
+9. **`adp-agent-program-lead`** - completed. Synthesizes ADP state into project readouts, FDE actions, readiness gaps, risk/dependency judgment, weekly reports, and workflow routing.
+10. **`adp-setup`** - completed through Create Module (CM). Generated the installable module setup skill with `assets/module.yaml`, `assets/module-help.csv`, config merge scripts, help CSV merge script, and legacy cleanup script.
 
-Rationale:
+Packaging result:
 
-- Build the state substrate before reports.
-- Build low-level Record update workflows before high-level synthesis.
-- Keep the first usable loop small: kickoff -> register workstream -> sync BMM checkpoint -> close meeting/action updates -> produce readiness gaps.
-- Defer the main Agent until the module has concrete artifacts and stable conventions.
+- Module approach: multi-skill module with dedicated setup skill.
+- Setup skill: `skills/adp-setup`.
+- Registered capabilities: setup plus all 9 ADP skills.
+- Agent roster: `adp-agent-program-lead` registered from its `customize.toml`.
+- Custom installation configuration: none beyond core BMad settings.
+- External setup dependencies: none at module setup time. Individual runtime workflows use their own local scripts and `uv` commands.
+- Structural validation: passed with 0 findings using `bmad-module-builder/scripts/validate-module.py`.
 
 **Next steps:**
 
-1. Start with **Build a Workflow (BW)** for `adp-project-kickoff`, passing this plan document as context.
-2. Build each remaining skill in roadmap order using **Build an Agent (BA)** or **Build a Workflow (BW)**.
-3. When all skills are built, return to **Create Module (CM)** to scaffold the module infrastructure.
+1. Run **Validate Module (VM)** for a quality review beyond structural validation, checking capability descriptions, ordering, and agent roster drift.
+2. Install or update ADP in a target project by running `adp-setup`.
+3. Start operational use with `adp-project-kickoff`, then `adp-workstream-register`, then the checkpoint/status/meeting/readiness workflows as delivery progresses.

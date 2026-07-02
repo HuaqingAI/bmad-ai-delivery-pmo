@@ -1,0 +1,17 @@
+# DO NOT EDIT -- overwritten on every update.
+#
+# Agent customization surface for adp-agent-program-lead.
+# Team overrides:     {project-root}/_bmad/custom/adp-agent-program-lead.toml
+# Personal overrides: {project-root}/_bmad/custom/adp-agent-program-lead.user.toml
+
+[agent]
+
+# --- Metadata (install-time roster contract) ---
+# Consumed by module.yaml:agents[] and `[agents.<code>]` in central config.
+
+code = "adp-agent-program-lead"
+name = "ADP Program Lead"
+title = "AI Delivery PMO Program Lead"
+icon = "📊"
+description = "Synthesizes ADP workstream state into project readouts, FDE actions, readiness gaps, risk/dependency judgment, and workflow routing."
+agent_type = "stateless"

@@ -1,0 +1,10 @@
+code: adp
+name: "AI Delivery PMO"
+description: "帮助多条 FDE 工作线用统一状态模型、交付节奏和 AI 协作方式推进复杂交付项目。"
+module_version: 1.0.0
+default_selected: false
+module_greeting: >
+  AI Delivery PMO 已安装。建议先运行 adp-project-kickoff 初始化共享项目记忆，
+  然后登记工作线，并随着交付推进同步 BMM checkpoint、会议、状态、风险依赖和验收 readiness。
+agents:
+  - {code: adp-agent-program-lead, name: "ADP Program Lead", title: "AI Delivery PMO Program Lead", icon: "📊", description: "Synthesizes ADP workstream state into project readouts, FDE actions, readiness gaps, risk/dependency judgment, and workflow routing."}

@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# ///
+"""Generate ADP risk matrix, dependency map, and optional decision packet."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+PLACEHOLDERS = {
+    "",
+    "-",
+    "tbd",
+    "todo",
+    "none",
+    "n/a",
+    "na",
+    "unknown",
+    "see cross-workstream links",
+    "待定",
+    "无",
+    "暂无",
+    "未知",
+}
+
+MISSING_WORKSTREAM_GAP = "no workstream records found under ADP memory root"
+
+
+@dataclass
+class Workstream:
+    path: Path
+    workstream_id: str
+    name: str = "TBD"
+    owner: str = "TBD"
+    business_owner: str = "TBD"
+    phase: str = "TBD"
+    status: str = "TBD"
+    risks: str = "TBD"
+    blockers: str = "TBD"
+    dependencies_note: str = "TBD"
+    change_notes: str = "TBD"
+    next_actions: str = "TBD"
+    depends_on: list[str] = field(default_factory=list)
+    impacts: list[str] = field(default_factory=list)
+    l0_references: list[str] = field(default_factory=list)
+    decision_rows: list[dict[str, str]] = field(default_factory=list)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Review ADP workstream records for risks, dependencies, blockers, and changes.",
+    )
+    parser.add_argument("project_root", help="Project root containing ADP memory.")
+    parser.add_argument(
+        "--memory-root",
+        default="_bmad/memory/adp",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad/memory/adp.",
+    )
+    parser.add_argument("--workstream", action="append", default=[], help="Workstream id to include. Repeatable.")
+    parser.add_argument("--dry-run", action="store_true", help="Report findings without writing derived files.")
+    parser.add_argument("--packet-title", default="", help="Business Decision Packet title.")
+    parser.add_argument("--packet-background", default="", help="Business Decision Packet background.")
+    parser.add_argument("--packet-question", default="", help="Unresolved business question.")
+    parser.add_argument("--packet-option", action="append", default=[], help="Decision option. Repeatable.")
+    parser.add_argument("--packet-impact", action="append", default=[], help="Impact statement. Repeatable.")
+    parser.add_argument("--packet-recommendation", default="", help="Recommended decision.")
+    parser.add_argument("--packet-deadline", default="", help="Deadline or trigger.")
+    parser.add_argument("--packet-owner", default="", help="Requested decision owner.")
+    parser.add_argument("--packet-workstream", action="append", default=[], help="Affected workstream id. Repeatable.")
+    parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    return parser.parse_args()
+
+
+def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
+    memory_root = Path(raw_memory_root)
+    if not memory_root.is_absolute():
+        memory_root = project_root / memory_root
+    return memory_root.resolve()
+
+
+def normalize_id(raw: str) -> str:
+    value = raw.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-")
+
+
+def slugify(raw: str) -> str:
+    value = raw.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    value = value.strip("-")
+    return value or "business-decision"
+
+
+def is_meaningful(value: str) -> bool:
+    clean = value.strip().strip("`").strip()
+    return clean.lower() not in PLACEHOLDERS
+
+
+def first_meaningful(*values: str) -> str:
+    for value in values:
+        if is_meaningful(value):
+            return value.strip()
+    return "TBD"
+
+
+def clean_bullet(line: str) -> str:
+    value = line.strip()
+    value = re.sub(r"^[-*]\s+", "", value)
+    return value.strip()
+
+
+def parse_identity(lines: list[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("- ") or ":" not in stripped:
+            continue
+        key, value = stripped[2:].split(":", 1)
+        fields[key.strip().lower()] = value.strip()
+    return fields
+
+
+def section(lines: list[str], heading: str) -> list[str]:
+    start = None
+    marker = f"## {heading}".lower()
+    for index, line in enumerate(lines):
+        if line.strip().lower() == marker:
+            start = index + 1
+            break
+    if start is None:
+        return []
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+    return lines[start:end]
+
+
+def parse_key_bullets(lines: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("- ") or ":" not in stripped:
+            continue
+        key, value = stripped[2:].split(":", 1)
+        result[key.strip().lower()] = value.strip()
+    return result
+
+
+def parse_cross_links(lines: list[str], label: str) -> list[str]:
+    out: list[str] = []
+    active = False
+    label_marker = f"{label}:".lower()
+    section_labels = {"depends on:", "impacts:", "l0 references:"}
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.lower()
+        if lower == label_marker:
+            active = True
+            continue
+        if active and lower in section_labels:
+            break
+        if active and stripped.startswith(("- ", "* ")):
+            item = clean_bullet(stripped)
+            if is_meaningful(item):
+                out.append(item)
+    return out
+
+
+def parse_markdown_table(lines: list[str]) -> list[dict[str, str]]:
+    table_lines = [line.strip() for line in lines if line.strip().startswith("|")]
+    if len(table_lines) < 2:
+        return []
+    headers = [cell.strip().lower() for cell in table_lines[0].strip("|").split("|")]
+    rows: list[dict[str, str]] = []
+    for line in table_lines[1:]:
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in cells):
+            continue
+        if len(cells) != len(headers):
+            continue
+        row = dict(zip(headers, cells, strict=True))
+        if any(is_meaningful(value) for value in row.values()):
+            rows.append(row)
+    return rows
+
+
+def extract_inline_field(text: str, labels: list[str]) -> str:
+    for label in labels:
+        pattern = re.compile(rf"(?:^|[;|,])\s*{re.escape(label)}\s*[:=]\s*([^;|,\n]+)", re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            value = match.group(1).strip()
+            if is_meaningful(value):
+                return value
+    return "TBD"
+
+
+def strip_inline_fields(text: str, labels: list[str]) -> str:
+    cleaned = text
+    for label in labels:
+        cleaned = re.sub(
+            rf"(?:^|[;|,])\s*{re.escape(label)}\s*[:=]\s*[^;|,\n]+",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    cleaned = cleaned.strip(" ;,|")
+    return cleaned if is_meaningful(cleaned) else text
+
+
+def parse_workstream(record_path: Path) -> Workstream:
+    lines = record_path.read_text(encoding="utf-8").splitlines()
+    identity = parse_identity(section(lines, "Identity"))
+    status = parse_key_bullets(section(lines, "Project Status"))
+    cross = section(lines, "Cross-Workstream Links")
+    workstream_id = identity.get("workstream id") or record_path.parent.name
+    workstream = Workstream(
+        path=record_path,
+        workstream_id=normalize_id(workstream_id) or record_path.parent.name,
+        name=identity.get("name", "TBD"),
+        owner=identity.get("fde owner", "TBD"),
+        business_owner=identity.get("business owner", "TBD"),
+        phase=identity.get("current bmm phase", "TBD"),
+        status=identity.get("current adp status", "TBD"),
+        risks=status.get("risks", "TBD"),
+        blockers=status.get("blockers", "TBD"),
+        dependencies_note=status.get("dependencies", "TBD"),
+        change_notes=status.get("scope or change notes", "TBD"),
+        next_actions=status.get("next actions", "TBD"),
+        depends_on=parse_cross_links(cross, "Depends on"),
+        impacts=parse_cross_links(cross, "Impacts"),
+        l0_references=parse_cross_links(cross, "L0 references"),
+    )
+    decision_file = record_path.parent / "decisions.md"
+    if decision_file.exists():
+        workstream.decision_rows = parse_markdown_table(decision_file.read_text(encoding="utf-8").splitlines())
+    return workstream
+
+
+def discover_records(memory_root: Path, selected: list[str]) -> tuple[list[Path], list[str]]:
+    workstreams_root = memory_root / "workstreams"
+    selected_ids = {normalize_id(item) for item in selected}
+    missing: list[str] = []
+    records: list[Path] = []
+
+    if selected_ids:
+        for workstream_id in sorted(selected_ids):
+            path = workstreams_root / workstream_id / "delivery-record.md"
+            if path.exists():
+                records.append(path)
+            else:
+                missing.append(workstream_id)
+        return records, missing
+
+    if not workstreams_root.exists():
+        return [], []
+    return sorted(workstreams_root.glob("*/delivery-record.md")), []
+
+
+def risk_entries(workstreams: list[Workstream]) -> tuple[list[dict[str, str]], list[str]]:
+    entries: list[dict[str, str]] = []
+    gaps: list[str] = []
+    if not workstreams:
+        return [], [MISSING_WORKSTREAM_GAP]
+
+    for ws in workstreams:
+        affected = ", ".join([*ws.impacts, ws.workstream_id]) if ws.impacts else ws.workstream_id
+        if is_meaningful(ws.blockers):
+            entries.append(make_risk(ws, "blocker", ws.blockers, affected))
+        else:
+            gaps.append(f"{ws.workstream_id}: blocker status is missing or TBD")
+
+        if is_meaningful(ws.risks):
+            entries.append(make_risk(ws, "risk", ws.risks, affected))
+        else:
+            gaps.append(f"{ws.workstream_id}: risk exposure is missing or TBD")
+
+        if is_meaningful(ws.change_notes):
+            entries.append(make_risk(ws, "change", ws.change_notes, affected))
+
+        if not ws.depends_on and not ws.l0_references and not is_meaningful(ws.dependencies_note):
+            gaps.append(f"{ws.workstream_id}: dependencies are missing or TBD")
+
+        for row in ws.decision_rows:
+            row_type = row.get("type", "").lower()
+            decision = row.get("decision / question", "")
+            if not is_meaningful(decision):
+                continue
+            if any(token in row_type for token in ["change", "scope", "risk acceptance", "business decision"]):
+                impact = row.get("impact", "TBD")
+                owner = row.get("owner", ws.owner)
+                entries.append(
+                    {
+                        "type": "decision/change",
+                        "workstream": ws.workstream_id,
+                        "description": decision,
+                        "severity": first_meaningful(row.get("severity", ""), extract_inline_field(decision, ["severity", "严重度"])),
+                        "likelihood": first_meaningful(row.get("likelihood", ""), extract_inline_field(decision, ["likelihood", "可能性"])),
+                        "owner": owner or ws.owner,
+                        "affected": impact if is_meaningful(impact) else ws.workstream_id,
+                        "next_action": f"Close decision row with status {row.get('status', 'TBD')}",
+                        "escalation": first_meaningful(
+                            row.get("escalation", ""),
+                            extract_inline_field(decision, ["escalation", "upgrade", "升级"]),
+                        ),
+                    },
+                )
+    gaps.extend(risk_detail_gaps(entries))
+    return entries, gaps
+
+
+def make_risk(
+    ws: Workstream,
+    entry_type: str,
+    description: str,
+    affected: str,
+) -> dict[str, str]:
+    labels = ["severity", "likelihood", "escalation", "严重度", "可能性", "升级"]
+    next_action = ws.next_actions if is_meaningful(ws.next_actions) else "Assign concrete next action"
+    return {
+        "type": entry_type,
+        "workstream": ws.workstream_id,
+        "description": strip_inline_fields(description, labels),
+        "severity": extract_inline_field(description, ["severity", "严重度"]),
+        "likelihood": extract_inline_field(description, ["likelihood", "可能性"]),
+        "owner": ws.owner,
+        "affected": affected,
+        "next_action": next_action,
+        "escalation": extract_inline_field(description, ["escalation", "upgrade", "升级"]),
+    }
+
+
+def risk_detail_gaps(entries: list[dict[str, str]]) -> list[str]:
+    gaps: list[str] = []
+    for entry in entries:
+        prefix = f"{entry['workstream']}: {entry['type']}"
+        if not is_meaningful(entry.get("severity", "")):
+            gaps.append(f"{prefix} severity is missing")
+        if not is_meaningful(entry.get("likelihood", "")):
+            gaps.append(f"{prefix} likelihood is missing")
+        if not is_meaningful(entry.get("escalation", "")):
+            gaps.append(f"{prefix} escalation path is missing")
+    return gaps
+
+
+def dependency_entries(workstreams: list[Workstream]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for ws in workstreams:
+        if is_meaningful(ws.dependencies_note):
+            entries.append(make_dependency(ws, "dependency note", ws.dependencies_note))
+        for target in ws.depends_on:
+            entries.append(make_dependency(ws, "depends on", target))
+        for target in ws.impacts:
+            entries.append(make_dependency(ws, "impacts", target))
+        for target in ws.l0_references:
+            entries.append(make_dependency(ws, "l0 reference", target))
+    return entries
+
+
+def make_dependency(ws: Workstream, relationship: str, target: str) -> dict[str, str]:
+    return {
+        "source": ws.workstream_id,
+        "relationship": relationship,
+        "target": target,
+        "owner": ws.owner,
+        "status": "open",
+        "next_action": ws.next_actions if is_meaningful(ws.next_actions) else "Confirm dependency owner and closure condition",
+    }
+
+
+def render_risk_matrix(entries: list[dict[str, str]], gaps: list[str], generated_at: str) -> str:
+    rows = [
+        "# ADP Risk Matrix",
+        "",
+        f"Generated: {generated_at}",
+        "",
+        "| ID | Workstream | Type | Description | Severity | Likelihood | Owner | Affected | Next Action | Escalation |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    if entries:
+        for index, entry in enumerate(entries, start=1):
+            rows.append(
+                "| "
+                + " | ".join(
+                    [
+                        f"R-{index:03d}",
+                        md(entry["workstream"]),
+                        md(entry["type"]),
+                        md(entry["description"]),
+                        md(entry["severity"]),
+                        md(entry["likelihood"]),
+                        md(entry["owner"]),
+                        md(entry["affected"]),
+                        md(entry["next_action"]),
+                        md(entry["escalation"]),
+                    ],
+                )
+                + " |",
+            )
+    else:
+        rows.append("| TBD | TBD | gap | No explicit risk entries found | TBD | TBD | TBD | TBD | Review WDR risk fields | TBD |")
+
+    rows.extend(["", "## Review Gaps", ""])
+    if gaps:
+        rows.extend(f"- {gap}" for gap in gaps)
+    else:
+        rows.append("- No structural review gaps found.")
+    return "\n".join(rows) + "\n"
+
+
+def render_dependency_map(entries: list[dict[str, str]], generated_at: str) -> str:
+    rows = [
+        "# ADP Dependency Map",
+        "",
+        f"Generated: {generated_at}",
+        "",
+        "| Source Workstream | Relationship | Target / Reference | Owner | Status | Next Action |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    if entries:
+        for entry in entries:
+            rows.append(
+                "| "
+                + " | ".join(
+                    [
+                        md(entry["source"]),
+                        md(entry["relationship"]),
+                        md(entry["target"]),
+                        md(entry["owner"]),
+                        md(entry["status"]),
+                        md(entry["next_action"]),
+                    ],
+                )
+                + " |",
+            )
+    else:
+        rows.append("| TBD | gap | No explicit dependencies found | TBD | open | Confirm dependency fields in WDRs |")
+    return "\n".join(rows) + "\n"
+
+
+def render_packet(args: argparse.Namespace, generated_at: str) -> str:
+    title = args.packet_title or args.packet_question or "Business Decision"
+    options = args.packet_option or ["TBD"]
+    impacts = args.packet_impact or ["TBD"]
+    workstreams = args.packet_workstream or ["TBD"]
+    return "\n".join(
+        [
+            f"# {title}",
+            "",
+            f"Generated: {generated_at}",
+            "",
+            "## Background",
+            "",
+            args.packet_background or "TBD",
+            "",
+            "## Decision Needed",
+            "",
+            args.packet_question or "TBD",
+            "",
+            "## Options",
+            "",
+            *[f"- {item}" for item in options],
+            "",
+            "## Impacts",
+            "",
+            *[f"- {item}" for item in impacts],
+            "",
+            "## Recommendation",
+            "",
+            args.packet_recommendation or "TBD",
+            "",
+            "## Deadline or Trigger",
+            "",
+            args.packet_deadline or "TBD",
+            "",
+            "## Affected Workstreams",
+            "",
+            *[f"- {item}" for item in workstreams],
+            "",
+            "## Requested Decision Owner",
+            "",
+            args.packet_owner or "TBD",
+            "",
+            "## Closure Rule",
+            "",
+            "Record the final decision in the project decision log and update affected WDR change or risk fields.",
+            "",
+        ],
+    )
+
+
+def md(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def write_text(path: Path, text: str, dry_run: bool) -> None:
+    if dry_run:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{stem}-{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"could not find available filename for {path}")
+
+
+def main() -> int:
+    args = parse_args()
+    project_root = Path(args.project_root).resolve()
+    if not project_root.exists() or not project_root.is_dir():
+        emit({"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}, args.output)
+        return 2
+
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    if not memory_root.exists():
+        emit({"ok": False, "error": "ADP memory root does not exist", "memory_root": str(memory_root)}, args.output)
+        return 2
+
+    records, missing = discover_records(memory_root, args.workstream)
+    workstreams = [parse_workstream(path) for path in records]
+    risks, gaps = risk_entries(workstreams)
+    dependencies = dependency_entries(workstreams)
+    generated_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+    risk_path = memory_root / "views" / "risk-matrix.md"
+    dependency_path = memory_root / "views" / "dependency-map.md"
+    write_text(risk_path, render_risk_matrix(risks, gaps, generated_at), args.dry_run)
+    write_text(dependency_path, render_dependency_map(dependencies, generated_at), args.dry_run)
+
+    packet_path = None
+    if args.packet_title or args.packet_question:
+        title = args.packet_title or args.packet_question
+        packet_name = f"{generated_at[:10]}-{slugify(title)}.md"
+        packet = unique_path(memory_root / "decisions" / "business-decision-packets" / packet_name)
+        write_text(packet, render_packet(args, generated_at), args.dry_run)
+        packet_path = str(packet)
+
+    result = {
+        "ok": True,
+        "dry_run": args.dry_run,
+        "project_root": str(project_root),
+        "memory_root": str(memory_root),
+        "workstreams_scanned": [ws.workstream_id for ws in workstreams],
+        "missing_workstreams": missing,
+        "risk_matrix_path": str(risk_path),
+        "dependency_map_path": str(dependency_path),
+        "business_decision_packet_path": packet_path,
+        "counts": {
+            "risk_entries": len(risks),
+            "dependency_entries": len(dependencies),
+            "review_gaps": len(gaps),
+        },
+        "review_gaps": gaps,
+        "next_actions": [
+            "Review risk matrix entries for missing owner, impact, mitigation, and escalation.",
+            "Review dependency map for unresolved cross-line or L0 closure conditions.",
+            "Create Business Decision Packets for issues FDE cannot decide alone.",
+        ],
+    }
+    emit(result, args.output)
+    return 0
+
+
+def emit(result: dict, output: str | None) -> None:
+    payload = json.dumps(result, ensure_ascii=False, indent=2)
+    if output:
+        Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
+    else:
+        print(payload)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
