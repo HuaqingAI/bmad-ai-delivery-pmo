@@ -16,6 +16,8 @@ from typing import Iterable
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "assets" / "adp-memory-templates"
+DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
+LEGACY_MEMORY_ROOT = "_bmad/memory/adp"
 
 CONFIG_PATHS = [
     "_bmad/adp/config.yaml",
@@ -87,13 +89,13 @@ TEMPLATE_FILES = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Idempotently create _bmad/memory/adp project memory files.",
+        description="Idempotently create _bmad-output/adp/memory project memory files.",
     )
     parser.add_argument("project_root", help="Project root where ADP memory should be created.")
     parser.add_argument(
         "--memory-root",
-        default="_bmad/memory/adp",
-        help="Memory root, relative to project root unless absolute. Default: _bmad/memory/adp.",
+        default=DEFAULT_MEMORY_ROOT,
+        help=f"Memory root, relative to project root unless absolute. Default: {DEFAULT_MEMORY_ROOT}.",
     )
     parser.add_argument("--project-name", default="", help="Project name for generated headings.")
     parser.add_argument(
@@ -122,6 +124,25 @@ def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
     if not memory_root.is_absolute():
         memory_root = project_root / memory_root
     return memory_root.resolve()
+
+
+def legacy_memory_status(project_root: Path, memory_root: Path) -> dict[str, str | bool]:
+    legacy_root = resolve_memory_root(project_root, LEGACY_MEMORY_ROOT)
+    legacy_exists = legacy_root.exists()
+    using_legacy = legacy_root == memory_root
+    migration_note = ""
+    if legacy_exists and not using_legacy:
+        migration_note = (
+            "Legacy ADP memory exists under _bmad/memory/adp. Migrate it to "
+            "_bmad-output/adp/memory, or rerun with --memory-root _bmad/memory/adp "
+            "to continue using the existing memory."
+        )
+    return {
+        "legacy_memory_root": str(legacy_root),
+        "legacy_memory_exists": legacy_exists,
+        "using_legacy_memory_root": using_legacy,
+        "migration_note": migration_note,
+    }
 
 
 def render_template(text: str, values: dict[str, str]) -> str:
@@ -322,9 +343,54 @@ def main() -> int:
         return 2
 
     memory_root = resolve_memory_root(project_root, args.memory_root)
+    legacy_status = legacy_memory_status(project_root, memory_root)
     config_values, config_sources = load_bmad_config(project_root)
     discovered_artifacts = discover_bmad_artifacts(project_root, config_values)
     project_name = args.project_name or project_root.name
+
+    if (
+        legacy_status["legacy_memory_exists"]
+        and not legacy_status["using_legacy_memory_root"]
+        and args.memory_root == DEFAULT_MEMORY_ROOT
+        and not args.dry_run
+        and not args.yes
+        and not args.headless
+    ):
+        result = {
+            "ok": False,
+            "confirmation_required": True,
+            "legacy_memory_confirmation_required": True,
+            "dry_run": False,
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "legacy_memory": legacy_status,
+            "project_name": project_name,
+            "profile": args.profile,
+            "cadence": args.cadence,
+            "non_interactive": False,
+            "config_sources": config_sources,
+            "language": {
+                "communication_language": config_values.get("communication_language", "English"),
+                "document_output_language": config_values.get("document_output_language", "English"),
+            },
+            "discovered_bmad_artifacts": discovered_artifacts,
+            "directories_created": [],
+            "directories_existing": [],
+            "files_created": [],
+            "files_existing": [],
+            "errors": [
+                {
+                    "path": str(project_root),
+                    "error": "legacy ADP memory found; confirm migration target or pass --memory-root _bmad/memory/adp",
+                }
+            ],
+            "next_actions": [
+                str(legacy_status["migration_note"]),
+                "Rerun with --yes or --headless after confirming that new ADP memory should be created under _bmad-output/adp/memory.",
+            ],
+        }
+        emit(result, args.output)
+        return 4
 
     if (
         discovered_artifacts["counts"]["total"] > 0
@@ -338,6 +404,7 @@ def main() -> int:
             "dry_run": False,
             "project_root": str(project_root),
             "memory_root": str(memory_root),
+            "legacy_memory": legacy_status,
             "project_name": project_name,
             "profile": args.profile,
             "cadence": args.cadence,
@@ -360,6 +427,7 @@ def main() -> int:
             ],
             "next_actions": [
                 "Summarize discovered BMad artifacts to the user and confirm ADP kickoff should initialize a coordination layer.",
+                *([] if not legacy_status["migration_note"] else [str(legacy_status["migration_note"])]),
                 "Rerun with --yes or --headless after confirmation.",
             ],
         }
@@ -389,6 +457,7 @@ def main() -> int:
         "dry_run": args.dry_run,
         "project_root": str(project_root),
         "memory_root": str(memory_root),
+        "legacy_memory": legacy_status,
         "project_name": project_name,
         "profile": args.profile,
         "cadence": args.cadence,
@@ -406,6 +475,7 @@ def main() -> int:
         "errors": errors,
         "next_actions": [
             "Fill project-charter.md with objective, stakeholders, scope boundaries, and escalation path.",
+            *([] if not legacy_status["migration_note"] else [str(legacy_status["migration_note"])]),
             "Run adp-workstream-register for each active FDE workstream.",
             "Run adp-l0-reference-sync when L0 source artifacts exist.",
         ],

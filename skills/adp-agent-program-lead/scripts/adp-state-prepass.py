@@ -107,8 +107,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workstream", action="append", default=[], help="Workstream id to include. Repeatable.")
     parser.add_argument(
         "--memory-root",
-        default="_bmad/memory/adp",
-        help="ADP state root, relative to project root unless absolute. Default: _bmad/memory/adp.",
+        default="_bmad-output/adp/memory",
+        help="ADP state root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
     )
     parser.add_argument("--max-age-days", type=int, default=7, help="Staleness threshold for WDR syncs. Default: 7.")
     parser.add_argument("--as-of", help="Date for staleness checks, YYYY-MM-DD. Default: today.")

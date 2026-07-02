@@ -23,7 +23,7 @@ class SyncMeetingTests(unittest.TestCase):
         return json.loads(completed.stdout)
 
     def make_memory(self, project_root: Path) -> Path:
-        memory_root = project_root / "_bmad" / "memory" / "adp"
+        memory_root = project_root / "_bmad-output" / "adp" / "memory"
         for rel in [
             "meetings",
             "daily",

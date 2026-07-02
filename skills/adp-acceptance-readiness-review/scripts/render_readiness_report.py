@@ -37,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory-root",
-        default="_bmad/memory/adp",
-        help="ADP memory root, relative to project root unless absolute.",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
     )
     parser.add_argument(
         "--output-dir",

@@ -63,7 +63,7 @@ class SyncL0ReferencesTests(unittest.TestCase):
     def test_plan_only_updates_provided_sections(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            l0_root = project_root / "_bmad" / "memory" / "adp" / "l0"
+            l0_root = project_root / "_bmad-output" / "adp" / "memory" / "l0"
             l0_root.mkdir(parents=True)
             gates = l0_root / "extracted-gates.md"
             gates.write_text("custom gates\n", encoding="utf-8")
@@ -78,7 +78,7 @@ class SyncL0ReferencesTests(unittest.TestCase):
     def test_scans_workstream_l0_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            workstream = project_root / "_bmad" / "memory" / "adp" / "workstreams" / "checkout"
+            workstream = project_root / "_bmad-output" / "adp" / "memory" / "workstreams" / "checkout"
             workstream.mkdir(parents=True)
             (workstream / "delivery-record.md").write_text(
                 "# Workstream Delivery Record\n\nL0 references:\n\n- TBD\n",

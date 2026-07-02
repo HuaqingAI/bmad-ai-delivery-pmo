@@ -98,12 +98,32 @@ class BootstrapAdpTests(unittest.TestCase):
 
             self.assertFalse(blocked["ok"])
             self.assertTrue(blocked["confirmation_required"])
-            self.assertFalse((project_root / "_bmad" / "memory" / "adp" / "project-charter.md").exists())
+            self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "project-charter.md").exists())
 
             confirmed = self.run_script(project_root, "--yes")
 
             self.assertTrue(confirmed["ok"])
-            self.assertTrue((project_root / "_bmad" / "memory" / "adp" / "project-charter.md").exists())
+            self.assertTrue((project_root / "_bmad-output" / "adp" / "memory" / "project-charter.md").exists())
+
+    def test_legacy_memory_requires_confirmation_before_new_default_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            legacy = project_root / "_bmad" / "memory" / "adp"
+            legacy.mkdir(parents=True)
+            (legacy / "project-charter.md").write_text("legacy memory\n", encoding="utf-8")
+
+            blocked = self.run_script(project_root, check=False)
+
+            self.assertFalse(blocked["ok"])
+            self.assertTrue(blocked["legacy_memory_confirmation_required"])
+            self.assertTrue(blocked["legacy_memory"]["legacy_memory_exists"])
+            self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "project-charter.md").exists())
+
+            keep_legacy = self.run_script(project_root, "--memory-root", "_bmad/memory/adp")
+
+            self.assertTrue(keep_legacy["ok"])
+            self.assertTrue(keep_legacy["legacy_memory"]["using_legacy_memory_root"])
+            self.assertEqual((legacy / "project-charter.md").read_text(encoding="utf-8"), "legacy memory\n")
 
 
 if __name__ == "__main__":

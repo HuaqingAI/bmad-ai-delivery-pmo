@@ -32,9 +32,9 @@ Use `communication_language` for all conversation and status output. Use `docume
 
 ## On Activation
 
-Use `{project-root}/_bmad/memory/adp` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow sync when the user provides `--memory-root` or asks to create the missing path.
+Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow sync when the user provides `--memory-root` or asks to create the missing path.
 
-Read only the L0 source artifacts the user gives, existing `l0/*` summaries, and WDRs needed for the requested impact scan. The structured working state is `{project-root}/_bmad/memory/adp/l0/*`; do not create a separate runtime memlog for this workflow.
+Read only the L0 source artifacts the user gives, existing `l0/*` summaries, and WDRs needed for the requested impact scan. The structured working state is `{project-root}/_bmad-output/adp/memory/l0/*`; do not create a separate runtime memlog for this workflow.
 
 ## Sync
 
@@ -50,7 +50,7 @@ uv run scripts/sync_l0_references.py {project-root} --plan <sync-plan.json>
 
 Useful flags:
 
-- `--memory-root <path>` when ADP memory is not at `{project-root}/_bmad/memory/adp`.
+- `--memory-root <path>` when ADP memory is not at `{project-root}/_bmad-output/adp/memory`.
 - `--workstream <id>` to restrict the WDR gap scan; repeat as needed.
 - `--source-artifact "L0 PRD=path/or/url"` for a source-only registration when no plan file is needed.
 - `--dry-run` to preview writes.

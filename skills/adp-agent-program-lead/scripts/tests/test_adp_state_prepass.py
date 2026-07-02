@@ -57,7 +57,7 @@ class AdpStatePrepassTests(unittest.TestCase):
         )
 
     def scaffold(self, project_root: Path) -> Path:
-        memory_root = project_root / "_bmad" / "memory" / "adp"
+        memory_root = project_root / "_bmad-output" / "adp" / "memory"
         for rel in ["daily", "decisions", "l0", "views", "workstreams/l1-checkout"]:
             (memory_root / rel).mkdir(parents=True, exist_ok=True)
         for rel in ["index.md", "project-charter.md", "cadence.md"]:

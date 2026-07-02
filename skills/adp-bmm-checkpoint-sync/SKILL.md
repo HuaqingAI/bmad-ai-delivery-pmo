@@ -32,7 +32,7 @@ Use `communication_language` for all conversation and status output. Use `docume
 
 ## On Activation
 
-Use `{project-root}/_bmad/memory/adp` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; if the target workstream record is missing, tell the user to run `adp-workstream-register` first. Continue only when a workstream id and checkpoint are known.
+Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; if the target workstream record is missing, tell the user to run `adp-workstream-register` first. Continue only when a workstream id and checkpoint are known.
 
 Infer the checkpoint from the user's artifact or wording when it is obvious: `prd`, `architecture`, `epic-story`, `implementation`, `validation`, or `baseline`. If several apply, ask which BMM stage they finished before writing.
 

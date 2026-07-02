@@ -11,7 +11,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "register_workstream.py"
 
 class RegisterWorkstreamTests(unittest.TestCase):
     def seed_memory(self, project_root: Path) -> None:
-        memory = project_root / "_bmad" / "memory" / "adp"
+        memory = project_root / "_bmad-output" / "adp" / "memory"
         (memory / "schemas").mkdir(parents=True)
         for rel in [
             "index.md",

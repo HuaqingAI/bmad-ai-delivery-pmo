@@ -49,8 +49,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory-root",
-        default="_bmad/memory/adp",
-        help="ADP memory root, relative to project root unless absolute.",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report writes without modifying files.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")

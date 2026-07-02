@@ -32,7 +32,7 @@ Use `communication_language` for all conversation and status output. Use `docume
 
 ## On Activation
 
-Use `{project-root}/_bmad/memory/adp` as the default ADP memory root. If it is missing or lacks kickoff core files, tell the user to run `adp-project-kickoff`; allow partial creation only when the user explicitly accepts an incomplete ADP memory substrate.
+Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing or lacks kickoff core files, tell the user to run `adp-project-kickoff`; allow partial creation only when the user explicitly accepts an incomplete ADP memory substrate.
 
 Infer create vs update from whether `workstreams/{workstream-id}/delivery-record.md` exists. Existing files are user state: preserve them, write a reviewable `registration-patch-plan*.md` with supplied normalization facts, and report which starter files already exist.
 

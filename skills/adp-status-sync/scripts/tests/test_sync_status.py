@@ -49,7 +49,7 @@ class SyncStatusTests(unittest.TestCase):
         return json.loads(completed.stdout)
 
     def create_record(self, project_root: Path, workstream_id: str = "l1-checkout", text: str = RECORD) -> Path:
-        record = project_root / "_bmad" / "memory" / "adp" / "workstreams" / workstream_id / "delivery-record.md"
+        record = project_root / "_bmad-output" / "adp" / "memory" / "workstreams" / workstream_id / "delivery-record.md"
         record.parent.mkdir(parents=True)
         record.write_text(text, encoding="utf-8")
         return record
@@ -159,7 +159,7 @@ class SyncStatusTests(unittest.TestCase):
             self.assertEqual(len(result["updates"]), 2)
             self.assertIn(
                 "- Current ADP status: blocked",
-                (project_root / "_bmad" / "memory" / "adp" / "workstreams" / "l2-search" / "delivery-record.md").read_text(
+                (project_root / "_bmad-output" / "adp" / "memory" / "workstreams" / "l2-search" / "delivery-record.md").read_text(
                     encoding="utf-8"
                 ),
             )

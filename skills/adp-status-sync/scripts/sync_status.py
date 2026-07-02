@@ -76,8 +76,8 @@ def parse_args() -> argparse.Namespace:
     update.add_argument("--updates-file", help="JSON file containing a list or {'updates': [...]} batch payload.")
     update.add_argument(
         "--memory-root",
-        default="_bmad/memory/adp",
-        help="ADP memory root, relative to project root unless absolute. Default: _bmad/memory/adp.",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
     )
     update.add_argument("--dry-run", action="store_true", help="Report planned writes without changing files.")
     update.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
@@ -89,8 +89,8 @@ def parse_args() -> argparse.Namespace:
     stale.add_argument("--as-of", help="Date for age calculation, YYYY-MM-DD. Default: today.")
     stale.add_argument(
         "--memory-root",
-        default="_bmad/memory/adp",
-        help="ADP memory root, relative to project root unless absolute. Default: _bmad/memory/adp.",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
     )
     stale.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     stale.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")

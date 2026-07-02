@@ -90,9 +90,9 @@ class RenderReadinessReportTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             paths = [Path(item["path"]) for item in result["reports"]]
-            self.assertIn(root / "_bmad" / "memory" / "adp" / "views" / "acceptance-readiness.md", paths)
-            self.assertIn(root / "_bmad" / "memory" / "adp" / "views" / "cutover-readiness.html", paths)
-            acceptance = root / "_bmad" / "memory" / "adp" / "views" / "acceptance-readiness.md"
+            self.assertIn(root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md", paths)
+            self.assertIn(root / "_bmad-output" / "adp" / "memory" / "views" / "cutover-readiness.html", paths)
+            acceptance = root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md"
             self.assertIn("Payment proof missing", acceptance.read_text(encoding="utf-8"))
 
     def test_second_run_reports_unchanged(self) -> None:
@@ -121,7 +121,7 @@ class RenderReadinessReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             packet_path = self.write_packet(root)
-            readiness = root / "_bmad" / "memory" / "adp" / "workstreams" / "l1-checkout" / "readiness.md"
+            readiness = root / "_bmad-output" / "adp" / "memory" / "workstreams" / "l1-checkout" / "readiness.md"
             readiness.parent.mkdir(parents=True)
             readiness.write_text("# Readiness\n\nManual note stays.\n", encoding="utf-8")
 

@@ -30,7 +30,9 @@ Use `communication_language` for all conversation and status output. Use `docume
 
 ## Activation
 
-Infer the project root from the current workspace unless the user gives a path. If `{project-root}/_bmad/memory/adp/` already exists, treat the run as an idempotent refresh: preserve content, report what already exists, and create only missing recommended files.
+Infer the project root from the current workspace unless the user gives a path. If `{project-root}/_bmad-output/adp/memory/` already exists, treat the run as an idempotent refresh: preserve content, report what already exists, and create only missing recommended files.
+
+If legacy ADP memory exists at `{project-root}/_bmad/memory/adp/` and the new default root does not intentionally use it, do not silently create a second empty state tree. Tell the user to migrate the legacy folder to `{project-root}/_bmad-output/adp/memory/` or rerun with `--memory-root _bmad/memory/adp` to keep using the legacy location.
 
 Before writing anything, discover existing BMad project artifacts in the target project. Look for planning outputs such as PRD, architecture, epics, UX/design, product brief, and research files under configured `planning_artifacts`, `{project-root}/_bmad-output/planning-artifacts`, and common docs folders. Look for implementation outputs such as stories, sprint status, validation notes, and project context under configured `implementation_artifacts`, `{project-root}/_bmad-output/implementation-artifacts`, and common docs folders.
 
@@ -51,7 +53,7 @@ Use optional flags only when the user gives the facts:
 - `--project-name "<name>"` for the charter/index heading.
 - `--profile generic-delivery|migration-cutover` for the project profile.
 - `--cadence weekly|biweekly|custom` for the default rhythm.
-- `--memory-root <path>` when ADP memory should live outside `{project-root}/_bmad/memory/adp`.
+- `--memory-root <path>` when ADP memory should live outside `{project-root}/_bmad-output/adp/memory`.
 - `--source "<brief or path summary>"` to record the kickoff source.
 - `--yes` or `--headless` only when the user explicitly wants non-interactive kickoff after discovery.
 - `--dry-run` to preview without writing.

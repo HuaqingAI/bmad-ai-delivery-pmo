@@ -63,7 +63,7 @@ class ArtifactUpdate:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Sync a BMM checkpoint packet into _bmad/memory/adp/workstreams/{id}.",
+        description="Sync a BMM checkpoint packet into _bmad-output/adp/memory/workstreams/{id}.",
     )
     parser.add_argument("project_root", help="Project root containing ADP memory.")
     parser.add_argument("--workstream-id", required=True, help="Workstream id. Normalized to lowercase hyphen-case.")
@@ -119,8 +119,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-status", choices=["draft", "gap", "ready"], help="Intentional ADP status update.")
     parser.add_argument(
         "--memory-root",
-        default="_bmad/memory/adp",
-        help="ADP memory root, relative to project root unless absolute. Default: _bmad/memory/adp.",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report planned writes without changing files.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")

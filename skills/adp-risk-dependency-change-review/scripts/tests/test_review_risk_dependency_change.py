@@ -122,7 +122,7 @@ def run_script(project: Path, *extra: str) -> dict:
 
 
 def make_memory(project: Path) -> Path:
-    memory = project / "_bmad" / "memory" / "adp"
+    memory = project / "_bmad-output" / "adp" / "memory"
     (memory / "workstreams").mkdir(parents=True)
     (memory / "views").mkdir()
     (memory / "decisions" / "business-decision-packets").mkdir(parents=True)

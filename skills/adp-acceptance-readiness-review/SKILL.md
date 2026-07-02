@@ -32,7 +32,7 @@ Use `communication_language` for all conversation and status output. Use `docume
 
 ## On Activation
 
-Use `{project-root}/_bmad/memory/adp` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still continue when the user provides `--memory-root` or points to a prepared ADP memory folder.
+Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still continue when the user provides `--memory-root` or points to a prepared ADP memory folder.
 
 Review all workstreams by default. If the user names workstream IDs, review only those and call out omitted cross-line dependencies when they affect readiness judgment.
 
@@ -80,7 +80,7 @@ Create a scorecard JSON file with the reviewed facts and run the deterministic r
 uv run scripts/render_readiness_report.py {project-root} --input <scorecard-json> --mode acceptance|cutover|both
 ```
 
-Add `--write-workstream-readiness` when the same scorecard should update `workstreams/{id}/readiness.md` generated blocks. Use `--memory-root <path>` for a non-default ADP memory root and `--output-dir <path>` when reports should go outside `{project-root}/_bmad/memory/adp/views`. The script only formats already-judged data into Markdown/HTML and readiness blocks; it must not decide scores, severity, or go/no-go status. If the script cannot run, write the same generated sections manually and keep existing user notes outside the generated block.
+Add `--write-workstream-readiness` when the same scorecard should update `workstreams/{id}/readiness.md` generated blocks. Use `--memory-root <path>` for a non-default ADP memory root and `--output-dir <path>` when reports should go outside `{project-root}/_bmad-output/adp/memory/views`. The script only formats already-judged data into Markdown/HTML and readiness blocks; it must not decide scores, severity, or go/no-go status. If the script cannot run, write the same generated sections manually and keep existing user notes outside the generated block.
 
 ## Scorecard JSON Contract
 

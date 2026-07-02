@@ -32,7 +32,7 @@ Use `communication_language` for all conversation and status output. Use `docume
 
 ## On Activation
 
-Use `{project-root}/_bmad/memory/adp` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow status sync when the user provides `--memory-root`.
+Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow status sync when the user provides `--memory-root`.
 
 Read only the records needed for the requested sync. Do not scan every PRD, architecture, story, code branch, or validation artifact to answer a lightweight status question.
 
