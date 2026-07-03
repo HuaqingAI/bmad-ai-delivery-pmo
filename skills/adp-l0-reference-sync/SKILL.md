@@ -16,6 +16,7 @@ The consumer is the FDE owner, project lead, readiness reviewer, and later ADP w
 - Bare paths and `{skill-root}` (e.g. `scripts/sync_l0_references.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
 
@@ -45,7 +46,7 @@ Prepare a compact sync plan from the L0 artifacts and user notes. Keep detailed 
 Apply the deterministic writer:
 
 ```bash
-uv run scripts/sync_l0_references.py {project-root} --plan <sync-plan.json>
+uv run "{skill-root}/scripts/sync_l0_references.py" "{project-root}" --plan <sync-plan.json>
 ```
 
 Useful flags:

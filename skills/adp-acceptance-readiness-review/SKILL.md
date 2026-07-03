@@ -16,6 +16,7 @@ The consumer is the FDE owner, project lead, acceptance owner, and later `adp-ag
 - Bare paths and `{skill-root}` (e.g. `scripts/render_readiness_report.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
 
@@ -77,7 +78,7 @@ Check acceptance criteria against linked proof. A criterion is not covered just 
 Create a scorecard JSON file with the reviewed facts and run the deterministic renderer:
 
 ```bash
-uv run scripts/render_readiness_report.py {project-root} --input <scorecard-json> --mode acceptance|cutover|both
+uv run "{skill-root}/scripts/render_readiness_report.py" "{project-root}" --input <scorecard-json> --mode acceptance|cutover|both
 ```
 
 Add `--write-workstream-readiness` when the same scorecard should update `workstreams/{id}/readiness.md` generated blocks. Use `--memory-root <path>` for a non-default ADP memory root and `--output-dir <path>` when reports should go outside `{project-root}/_bmad-output/adp/memory/views`. The script only formats already-judged data into Markdown/HTML and readiness blocks; it must not decide scores, severity, or go/no-go status. If the script cannot run, write the same generated sections manually and keep existing user notes outside the generated block.

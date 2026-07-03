@@ -16,6 +16,7 @@ The consumers are FDE owners, the project lead, status-sync, risk/change review,
 - Bare paths and `{skill-root}` (e.g. `scripts/sync_meeting.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
 
@@ -41,6 +42,8 @@ Load these schema files when present, because they define local terminology and 
 - `{project-root}/_bmad-output/adp/memory/schemas/workstream-delivery-record.md`
 - `{project-root}/_bmad-output/adp/memory/schemas/status-taxonomy.md`
 
+Load member hints when present from the project charter, workstream records, registration intake, and team/member/roster files. Speech recognition corrupts names; correct obvious names against project members and DingTalk metadata. If uncertain, keep the transcript label and mark it as a gap.
+
 ## Intake
 
 Use raw meeting evidence as the source of truth: transcript text, chat excerpts, offline notes, or a file path containing that raw content. Third-party AI summaries, including DingTalk AI Minutes summaries, may help identify the meeting and display candidate metadata, but they are not reliable enough for ADP classification because they may omit project context. Do not build the sync plan from a summary alone; ask for raw content when raw evidence is missing.
@@ -49,12 +52,12 @@ When the user has not provided raw content and DingTalk access is available thro
 
 - Use only `dws minutes` commands and always include `--format json`.
 - Discover candidates with `dws minutes list all --max 10 --format json`; add `--query`, `--start`, or `--end` only when the user supplied useful project, workstream, date, or topic hints.
-- Treat a candidate as already processed when its `taskUuid`, AI Minutes URL, or same-date same-title source already appears under the ADP memory root.
+- Treat a candidate as already processed when its `taskUuid`, AI Minutes URL, or same-date same-title source appears under the ADP memory root. Show time, title, taskUuid, keywords, and the processed/unprocessed reason.
 - Show only likely unprocessed candidates and ask the user to confirm the target meeting before fetching content.
 - For the confirmed meeting, fetch `dws minutes get info --id <taskUuid> --format json` and `dws minutes get transcription --id <taskUuid> --format json`; paginate transcription until complete when a next token is returned.
 - Fetch `summary` only as a navigation aid. If `transcription` is unavailable or incomplete, report the gap and ask the user for raw meeting content instead of classifying from the summary.
 
-Record DingTalk sources in the plan source field with the task id and evidence type, such as `DingTalk AI Minutes taskUuid=<id>; evidence=transcription`.
+Save fetched transcript or pasted raw notes under ADP memory, not only `.tmp`. Record DingTalk sources in the plan source field with the task id and evidence type, such as `DingTalk AI Minutes taskUuid=<id>; evidence=transcription`.
 
 ## Classify
 
@@ -69,6 +72,8 @@ Treat the raw meeting notes as source evidence, not as the final artifact. Separ
 
 If an item is ambiguous, choose the safest classification that exposes the gap. A pending business answer is not a no-op. A decision without an accountable confirmer is open, not confirmed. A WDR update against an unknown workstream becomes an unresolved gap and should prompt `adp-workstream-register` or an id correction.
 
+An action is not closed when owner or due trigger is generic, missing, or still a raw speaker label. Use the best corrected project member name; otherwise keep the label and let the writer report the gap.
+
 ## Sync Plan
 
 Before writing files, produce a compact JSON plan and inspect it for closure. The script executes the plan; it does not infer business meaning.
@@ -82,6 +87,8 @@ Required shape:
     "type": "FDE internal sync",
     "title": "Short title",
     "source": "pasted notes, transcript, or file path",
+    "raw_evidence_path": "path to raw transcript or notes, when available",
+    "raw_evidence_label": "transcription",
     "participants": ["Name"],
     "summary": "One paragraph"
   },
@@ -112,14 +119,14 @@ Required shape:
 }
 ```
 
-Keep unknown fields as `TBD` or omit them, but do not omit `id`, `classification`, or `text`.
+Keep unknown fields as `TBD` only when the gap is real and should be visible. Do not omit `id`, `classification`, or `text`.
 
 ## Write
 
 Run the deterministic writer after the plan is ready:
 
 ```bash
-uv run scripts/sync_meeting.py {project-root} --plan <plan.json>
+uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json>
 ```
 
 Useful flags:
@@ -137,8 +144,9 @@ If the script cannot run, manually create the same outputs from `assets/meeting-
 After syncing, report:
 
 - the meeting archive path
+- the durable raw evidence path, when raw evidence was available
 - daily log, decision log, WDRs, workstream decision files, and Business Decision Packets touched
-- unresolved gaps, especially missing workstreams, missing owners, missing confirmers, or no-op items without rationale
+- unresolved gaps, especially missing workstreams, missing owners, missing due triggers, unresolved speaker labels, missing confirmers, or no-op items without rationale
 - next useful workflow: usually `adp-status-sync` for cadence updates, `adp-risk-dependency-change-review` for open risk/change/business decisions, or `adp-workstream-register` for unknown workstreams
 
 Do not call a meeting closed because a note exists. It is closed when every item has a classification, destination, owner where needed, and either a durable write or a visible gap.

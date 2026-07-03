@@ -40,3 +40,5 @@ Migration/cutover projects can reference L0 outputs for data definitions, interf
 ## Plan
 
 The current module plan is in [`skills/reports/fde-delivery-module-plan.md`](skills/reports/fde-delivery-module-plan.md).
+
+For a concise module overview and the skill-labeled delivery flow, see [`docs/adp-module-overview.md`](docs/adp-module-overview.md).

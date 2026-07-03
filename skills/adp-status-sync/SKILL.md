@@ -16,6 +16,7 @@ The consumer is the FDE owner, project lead, and later ADP reports. They need to
 - Bare paths and `{skill-root}` (e.g. `scripts/sync_status.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
 
@@ -43,7 +44,7 @@ Accept concise owner notes, batch updates, or outputs from `adp-meeting-sync`. I
 Run the deterministic writer after the status delta is clear:
 
 ```bash
-uv run scripts/sync_status.py update {project-root} --id <workstream-id>
+uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --id <workstream-id>
 ```
 
 Add only fields that are reliable:
@@ -63,7 +64,7 @@ Add only fields that are reliable:
 For multiple workstreams, prefer a JSON updates file and run:
 
 ```bash
-uv run scripts/sync_status.py update {project-root} --updates-file <path>
+uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --updates-file <path>
 ```
 
 The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, and returns JSON with changed fields, unresolved gaps, and action candidates.
@@ -73,7 +74,7 @@ The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM
 To find records that need an owner follow-up, run:
 
 ```bash
-uv run scripts/sync_status.py stale {project-root} --max-age-days 7
+uv run "{skill-root}/scripts/sync_status.py" stale "{project-root}" --max-age-days 7
 ```
 
 Treat missing `Last status sync` as stale unless the user is still registering the workstream. Staleness creates follow-up candidates; it does not prove delivery risk by itself.

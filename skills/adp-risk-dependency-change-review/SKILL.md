@@ -16,6 +16,7 @@ The consumer is the FDE owner, project lead, readiness reviewer, and business de
 - Bare paths and `{skill-root}` (e.g. `scripts/review_risk_dependency_change.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
 
@@ -41,7 +42,7 @@ Read project-level context only as needed: `project-charter.md`, `cadence.md`, `
 Run the deterministic scanner:
 
 ```bash
-uv run scripts/review_risk_dependency_change.py {project-root}
+uv run "{skill-root}/scripts/review_risk_dependency_change.py" "{project-root}"
 ```
 
 Add optional flags only when the user gives the facts:

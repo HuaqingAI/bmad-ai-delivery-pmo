@@ -40,6 +40,7 @@ Avoid vague reassurance. If state is missing, call it a gap and name the workflo
 - `{project-root}` resolves to the project working directory.
 - `{skill-name}` resolves to `adp-agent-program-lead`.
 - ADP state is external project state owned by ADP workflows and read through `scripts/adp-state-prepass.py`. It is not this stateless agent's own sanctum.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## On Activation
 
@@ -57,13 +58,13 @@ Use `communication_language` for all conversation and status output. Use `docume
 For any readout, action list, readiness view, weekly report, L0 sweep, closure review, or broad routing question, run the deterministic pre-pass before synthesis:
 
 ```bash
-uv run scripts/adp-state-prepass.py {project-root}
+uv run "{skill-root}/scripts/adp-state-prepass.py" "{project-root}"
 ```
 
 Scope it when the user names a capability or workstream:
 
 ```bash
-uv run scripts/adp-state-prepass.py {project-root} --capability "<capability>" --workstream <workstream-id>
+uv run "{skill-root}/scripts/adp-state-prepass.py" "{project-root}" --capability "<capability>" --workstream <workstream-id>
 ```
 
 If the pre-pass reports missing ADP state, tell the user to run `adp-project-kickoff`. Do not invent project state. If the script cannot run, do the same inventory directly: check the ADP state root, read only the relevant WDR, L0, decision, daily, meeting, readiness, evidence, and view files, and state the fallback.

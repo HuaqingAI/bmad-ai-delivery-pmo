@@ -33,6 +33,22 @@ DECISION_TYPE_DEFAULTS = {
     "business_decision_needed": "Business decision",
 }
 
+SPEAKER_LABEL_RE = re.compile(r"(发言人\s*\d+|说话人\s*\d+|speaker\s*\d+)", re.IGNORECASE)
+GENERIC_PERSON_TERMS = {
+    "owner",
+    "fde",
+    "pm",
+    "负责人",
+    "接口人",
+    "参会人员",
+    "项目组",
+    "管理层",
+    "各条线",
+    "相关条线",
+    "对应",
+    "团队",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -106,7 +122,7 @@ def main() -> int:
     if args.verbose:
         print(f"Using memory root: {memory_root}", file=sys.stderr)
 
-    result = apply_plan(memory_root, normalized, args.dry_run)
+    result = apply_plan(project_root, memory_root, normalized, args.dry_run)
     emit(result, args.output)
     return 0 if result["ok"] else 1
 
@@ -171,6 +187,8 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "type": string_value(meeting.get("type")) or "meeting",
             "title": string_value(meeting.get("title")) or "ADP meeting sync",
             "source": string_value(meeting.get("source")) or "TBD",
+            "raw_evidence_path": string_value(meeting.get("raw_evidence_path")),
+            "raw_evidence_label": string_value(meeting.get("raw_evidence_label")) or "raw-evidence",
             "participants": normalize_people(meeting.get("participants")),
             "summary": string_value(meeting.get("summary")) or "TBD",
         },
@@ -204,7 +222,7 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
     return errors
 
 
-def apply_plan(memory_root: Path, plan: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_run: bool) -> dict[str, Any]:
     meeting = plan["meeting"]
     items = plan["items"]
     now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -214,6 +232,7 @@ def apply_plan(memory_root: Path, plan: dict[str, Any], dry_run: bool) -> dict[s
         "meeting_archives": [],
         "daily_logs": [],
         "decision_logs": [],
+        "raw_evidence_files": [],
         "business_decision_packets": [],
         "workstream_records": [],
         "workstream_decisions": [],
@@ -225,6 +244,17 @@ def apply_plan(memory_root: Path, plan: dict[str, Any], dry_run: bool) -> dict[s
         f"{meeting['date']}-{slugify(meeting['type'])}-{slugify(meeting['title'])}.md",
         dry_run,
     )
+    raw_evidence_path, raw_evidence_gap = copy_raw_evidence(project_root, memory_root, meeting, dry_run)
+    if raw_evidence_path:
+        meeting["raw_evidence"] = rel_to_memory(memory_root, raw_evidence_path)
+        touched["raw_evidence_files"].append(str(raw_evidence_path))
+    if raw_evidence_gap:
+        unresolved_gaps.append(f"meeting: {raw_evidence_gap}")
+
+    for participant in meeting["participants"]:
+        if is_unresolved_speaker_label(participant):
+            unresolved_gaps.append(f"meeting: participant uses unresolved speaker label {participant}")
+
     for item in items:
         if item["classification"] == "business_decision_needed":
             item["packet_path"] = business_packet_path(memory_root, meeting, item, dry_run)
@@ -243,6 +273,7 @@ def apply_plan(memory_root: Path, plan: dict[str, Any], dry_run: bool) -> dict[s
             "MEETING_DATE": meeting["date"],
             "MEETING_TYPE": meeting["type"],
             "SOURCE": meeting["source"],
+            "RAW_EVIDENCE": meeting.get("raw_evidence", "TBD"),
             "PARTICIPANTS": ", ".join(meeting["participants"]) or "TBD",
             "GENERATED_AT": now,
             "SUMMARY": meeting["summary"],
@@ -317,6 +348,7 @@ def apply_plan(memory_root: Path, plan: dict[str, Any], dry_run: bool) -> dict[s
 def ensure_directories(memory_root: Path, dry_run: bool) -> None:
     for rel in [
         "meetings",
+        "meetings/raw",
         "daily",
         "decisions",
         "decisions/business-decision-packets",
@@ -325,6 +357,33 @@ def ensure_directories(memory_root: Path, dry_run: bool) -> None:
         target = memory_root / rel
         if not dry_run:
             target.mkdir(parents=True, exist_ok=True)
+
+
+def copy_raw_evidence(
+    project_root: Path,
+    memory_root: Path,
+    meeting: dict[str, Any],
+    dry_run: bool,
+) -> tuple[Path | None, str]:
+    raw_path = string_value(meeting.get("raw_evidence_path"))
+    if not raw_path:
+        return None, ""
+
+    source = Path(raw_path)
+    if not source.is_absolute():
+        source = project_root / source
+    source = source.resolve()
+    if not source.exists() or not source.is_file():
+        return None, f"raw evidence file not found: {raw_path}"
+
+    target_name = (
+        f"{meeting['date']}-{slugify(meeting['type'])}-{slugify(meeting['title'])}-"
+        f"{slugify(meeting['raw_evidence_label'])}{source.suffix or '.txt'}"
+    )
+    target = unique_path(memory_root / "meetings" / "raw", target_name, dry_run)
+    if not dry_run:
+        target.write_bytes(source.read_bytes())
+    return target, ""
 
 
 def render_item_outputs(
@@ -390,15 +449,25 @@ def planned_destinations(
 
 
 def item_gap(item: dict[str, Any]) -> str:
+    gaps: list[str] = []
     if item["classification"] in {"action", "wdr_update"} and not item["affected_workstreams"]:
-        return "affected workstream is missing"
-    if item["classification"] == "action" and item["owner"] == "TBD":
-        return "action owner is missing"
+        gaps.append("affected workstream is missing")
+    if item["classification"] == "action":
+        if is_generic_person(item["owner"]):
+            gaps.append("action owner is missing or generic")
+        if is_missing_due(item["due"]):
+            gaps.append("action due trigger is missing")
+    if is_unresolved_speaker_label(item["owner"]):
+        gaps.append("owner uses unresolved speaker label")
     if item["classification"] in {"decision", "business_decision_needed"} and item["confirmer"] == "TBD":
-        return "confirmer is missing"
+        gaps.append("confirmer is missing")
+    if item["classification"] in {"decision", "business_decision_needed"} and is_unresolved_speaker_label(
+        item["confirmer"],
+    ):
+        gaps.append("confirmer uses unresolved speaker label")
     if item["classification"] == "wdr_update" and not item["wdr_update"]:
-        return "wdr_update text is missing"
-    return ""
+        gaps.append("wdr_update text is missing")
+    return "; ".join(gaps)
 
 
 def render_item_detail(item: dict[str, Any], destinations: list[str], gap: str) -> str:
@@ -448,6 +517,7 @@ def render_daily_block(
             "",
             f"- Type: {meeting['type']}",
             f"- Source: {meeting['source']}",
+            f"- Raw evidence: {meeting.get('raw_evidence', 'TBD')}",
             f"- Archive: `{rel_to_memory(memory_root, meeting_path)}`",
             f"- Participants: {', '.join(meeting['participants']) or 'TBD'}",
             "",
@@ -491,6 +561,7 @@ def upsert_decision_rows(path: Path, rows: list[str], dry_run: bool) -> None:
         path.write_text(default_decision_log() + "\n", encoding="utf-8", newline="\n")
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
+    lines = [line for line in lines if not is_placeholder_decision_row(line)]
     insert_at = find_decision_table_insert_index(lines)
     for row in reversed(rows):
         lines.insert(insert_at, row)
@@ -508,6 +579,13 @@ def find_decision_table_insert_index(lines: list[str]) -> int:
     while index < len(lines) and lines[index].startswith("|"):
         index += 1
     return index
+
+
+def is_placeholder_decision_row(line: str) -> bool:
+    if not line.startswith("|"):
+        return False
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return len(cells) >= 8 and all(cell == "TBD" for cell in cells[:5]) and cells[6] == "open"
 
 
 def default_decision_log() -> str:
@@ -712,6 +790,30 @@ def normalize_people(raw: Any) -> list[str]:
     return [part for part in parts if part]
 
 
+def is_unresolved_speaker_label(value: str) -> bool:
+    return bool(SPEAKER_LABEL_RE.search(string_value(value)))
+
+
+def is_missing_due(value: str) -> bool:
+    due = string_value(value)
+    return not due or due == "TBD"
+
+
+def is_generic_person(value: str) -> bool:
+    person = string_value(value)
+    if not person or person == "TBD":
+        return True
+    if is_unresolved_speaker_label(person):
+        return True
+    normalized = re.sub(r"[\s/、,，;；]+", " ", person.lower()).strip()
+    if not normalized:
+        return True
+    tokens = [token for token in normalized.split(" ") if token]
+    if not tokens:
+        return True
+    return all(any(term.lower() in token for term in GENERIC_PERSON_TERMS) for token in tokens)
+
+
 def string_value(value: Any) -> str:
     if value is None:
         return ""
@@ -759,7 +861,7 @@ def emit(result: dict[str, Any], output: str | None) -> None:
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
     else:
-        print(payload)
+        sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

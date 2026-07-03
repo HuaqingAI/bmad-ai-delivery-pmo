@@ -16,6 +16,7 @@ The consumers are the FDE owner, project lead, readiness reviewer, risk/dependen
 - Bare paths and `{skill-root}` (e.g. `scripts/sync_bmm_checkpoint.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
 
@@ -49,7 +50,7 @@ Get the smallest reliable checkpoint packet:
 Run the deterministic writer:
 
 ```bash
-uv run scripts/sync_bmm_checkpoint.py {project-root} --workstream-id <workstream-id> --checkpoint <checkpoint> --summary "<project-level summary>"
+uv run "{skill-root}/scripts/sync_bmm_checkpoint.py" "{project-root}" --workstream-id <workstream-id> --checkpoint <checkpoint> --summary "<project-level summary>"
 ```
 
 Add optional flags only for reliable facts:

@@ -3,6 +3,7 @@
 Date: {{MEETING_DATE}}
 Type: {{MEETING_TYPE}}
 Source: {{SOURCE}}
+Raw evidence: {{RAW_EVIDENCE}}
 Participants: {{PARTICIPANTS}}
 Generated: {{GENERATED_AT}}
 

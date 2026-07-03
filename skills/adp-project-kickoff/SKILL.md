@@ -14,6 +14,7 @@ The consumer is the FDE team, project lead, and later ADP workflows. They need f
 - Bare paths and `{skill-root}` (e.g. `scripts/bootstrap_adp.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
+- When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
 
@@ -49,7 +50,7 @@ Accept a brief when the user provides one, but do not block setup for missing de
 Run the scaffold script:
 
 ```bash
-uv run scripts/bootstrap_adp.py {project-root}
+uv run "{skill-root}/scripts/bootstrap_adp.py" "{project-root}"
 ```
 
 Use optional flags only when the user gives the facts:

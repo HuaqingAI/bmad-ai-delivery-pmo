@@ -105,6 +105,59 @@ class SyncMeetingTests(unittest.TestCase):
             )
             self.assertIn("Meeting Sync Update", record)
 
+    def test_sync_preserves_raw_evidence_reports_gaps_and_cleans_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            raw = project_root / ".tmp" / "meeting.txt"
+            raw.parent.mkdir(parents=True)
+            raw.write_text("raw transcript", encoding="utf-8")
+            with (memory_root / "decisions" / "decision-log.md").open("a", encoding="utf-8") as handle:
+                handle.write("| TBD | TBD | TBD | TBD | TBD | TBD | open | TBD |\n")
+
+            plan = {
+                "meeting": {
+                    "date": "2026-07-02",
+                    "type": "FDE internal sync",
+                    "title": "Generic owner check",
+                    "source": "DingTalk taskUuid=abc; evidence=transcription",
+                    "raw_evidence_path": str(raw),
+                    "raw_evidence_label": "transcription",
+                    "participants": ["发言人 1"],
+                    "summary": "Needs cleanup.",
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "action",
+                        "text": "Someone needs to follow up.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "owner": "各条线 FDE owner",
+                    },
+                    {
+                        "id": "M-002",
+                        "classification": "decision",
+                        "text": "Accepted generic rule.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "confirmer": "Biz-A",
+                    },
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["touched"]["raw_evidence_files"])
+            raw_copy = Path(result["touched"]["raw_evidence_files"][0])
+            self.assertTrue(raw_copy.exists())
+            self.assertEqual("raw transcript", raw_copy.read_text(encoding="utf-8"))
+            gaps = "\n".join(result["unresolved_gaps"])
+            self.assertIn("participant uses unresolved speaker label", gaps)
+            self.assertIn("action owner is missing or generic", gaps)
+            self.assertIn("action due trigger is missing", gaps)
+            decision_log = (memory_root / "decisions" / "decision-log.md").read_text(encoding="utf-8")
+            self.assertNotIn("| TBD | TBD | TBD | TBD | TBD | TBD | open | TBD |", decision_log)
+
     def test_invalid_plan_fails_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
