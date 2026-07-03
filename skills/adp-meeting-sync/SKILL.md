@@ -41,6 +41,21 @@ Load these schema files when present, because they define local terminology and 
 - `{project-root}/_bmad-output/adp/memory/schemas/workstream-delivery-record.md`
 - `{project-root}/_bmad-output/adp/memory/schemas/status-taxonomy.md`
 
+## Intake
+
+Use raw meeting evidence as the source of truth: transcript text, chat excerpts, offline notes, or a file path containing that raw content. Third-party AI summaries, including DingTalk AI Minutes summaries, may help identify the meeting and display candidate metadata, but they are not reliable enough for ADP classification because they may omit project context. Do not build the sync plan from a summary alone; ask for raw content when raw evidence is missing.
+
+When the user has not provided raw content and DingTalk access is available through `/dws` or the `dws` CLI, attempt DingTalk intake before asking for pasted content:
+
+- Use only `dws minutes` commands and always include `--format json`.
+- Discover candidates with `dws minutes list all --max 10 --format json`; add `--query`, `--start`, or `--end` only when the user supplied useful project, workstream, date, or topic hints.
+- Treat a candidate as already processed when its `taskUuid`, AI Minutes URL, or same-date same-title source already appears under the ADP memory root.
+- Show only likely unprocessed candidates and ask the user to confirm the target meeting before fetching content.
+- For the confirmed meeting, fetch `dws minutes get info --id <taskUuid> --format json` and `dws minutes get transcription --id <taskUuid> --format json`; paginate transcription until complete when a next token is returned.
+- Fetch `summary` only as a navigation aid. If `transcription` is unavailable or incomplete, report the gap and ask the user for raw meeting content instead of classifying from the summary.
+
+Record DingTalk sources in the plan source field with the task id and evidence type, such as `DingTalk AI Minutes taskUuid=<id>; evidence=transcription`.
+
 ## Classify
 
 Treat the raw meeting notes as source evidence, not as the final artifact. Separate each item into exactly one classification:
