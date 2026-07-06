@@ -25,6 +25,8 @@ The plan root is a JSON object with `meeting` and `items`. The script validates 
       "affected_workstreams": ["workstream-id"],
       "owner": "Name",
       "due": "date or trigger",
+      "closure_criteria": "Observable deliverable or condition that closes an action",
+      "status_confirmation": "Evidence that a past-due action is still open, done, or cancelled",
       "decision_type": "FDE internal decision",
       "confirmer": "Name",
       "status": "open",
@@ -53,4 +55,6 @@ Rules:
 - Every item needs `id`, `classification`, and `text`.
 - `no_op` needs `no_op_reason`.
 - `business_decision_needed` needs `packet.decision_needed`.
+- `action` needs a specific owner, affected workstream route, due trigger, and observable `closure_criteria`; generic owners such as `TBD`, `各条线 FDE owner`, or `参会人员` stay as gaps and do not become open ledger actions.
+- Past-due action backfills need `status_confirmation`; otherwise the writer calibrates them to `blocked` with a status-confirmation gap instead of defaulting to `open`.
 - Use `TBD` only for a real unresolved gap, and pair it with the narrowest gap field the script can surface.

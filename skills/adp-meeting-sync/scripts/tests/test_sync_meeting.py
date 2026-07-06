@@ -59,6 +59,7 @@ class SyncMeetingTests(unittest.TestCase):
             "daily",
             "decisions/business-decision-packets",
             "workstreams/l1-checkout",
+            "workstreams/l2-search",
         ]:
             (memory_root / rel).mkdir(parents=True, exist_ok=True)
         (memory_root / "decisions" / "decision-log.md").write_text(
@@ -81,6 +82,10 @@ class SyncMeetingTests(unittest.TestCase):
         )
         (memory_root / "workstreams" / "l1-checkout" / "decisions.md").write_text(
             "# Decisions\n",
+            encoding="utf-8",
+        )
+        (memory_root / "workstreams" / "l2-search" / "delivery-record.md").write_text(
+            "# Workstream Delivery Record\n",
             encoding="utf-8",
         )
         return memory_root
@@ -194,8 +199,54 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertIn("participant uses unresolved speaker label", gaps)
             self.assertIn("action owner is generic", gaps)
             self.assertIn("action due trigger is missing", gaps)
+            self.assertEqual(result["touched"]["status_sync_intake_files"], [])
+            self.assertEqual(result["action_quality_audit"]["owner_gap_count"], 1)
+            self.assertEqual(result["action_quality_audit"]["due_gap_count"], 1)
             decision_log = (memory_root / "decisions" / "decision-log.md").read_text(encoding="utf-8")
             self.assertNotIn("| TBD | TBD | TBD | TBD | TBD | TBD | open | TBD |", decision_log)
+
+    def test_multi_workstream_action_is_canonical_program_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-05",
+                    "type": "FDE internal sync",
+                    "title": "ADP trial rollout",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "Program action affects multiple workstreams.",
+                },
+                "items": [
+                    {
+                        "id": "M-007",
+                        "classification": "action",
+                        "text": "Start ADP trial and return rollout feedback.",
+                        "affected_workstreams": ["l1-checkout", "l2-search"],
+                        "owner": "PMO-A",
+                        "due": "2099-07-15",
+                        "closure_criteria": "Rollout feedback summary is linked and reviewed by PMO-A.",
+                    }
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+
+            self.assertTrue(result["ok"])
+            audit = result["action_quality_audit"]
+            self.assertEqual(audit["actions_seen"], 1)
+            self.assertEqual(audit["canonical_actions"], 1)
+            self.assertEqual(audit["ledger_ready_actions"], 1)
+            self.assertEqual(audit["fanout_suppressed"], 1)
+            intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(len(intake["updates"]), 1)
+            self.assertEqual(intake["updates"][0]["id"], "program")
+            self.assertEqual(intake["updates"][0]["next_actions"], [])
+            action = intake["updates"][0]["actions"][0]
+            self.assertEqual(action["workstream"], "program")
+            self.assertEqual(action["affected_workstreams"], ["l1-checkout", "l2-search"])
+            self.assertIn("Affected workstreams: l1-checkout, l2-search", action["reason"])
 
     def test_invalid_plan_fails_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -270,6 +270,7 @@ def parse_action_ledger(memory_root: Path) -> list[dict[str, str]]:
             "status": raw.get("status", ""),
             "owner": raw.get("owner", "TBD"),
             "workstream": normalize_id(raw.get("workstream", "")) or raw.get("workstream", "TBD"),
+            "affected_workstreams": raw.get("affected workstreams", ""),
             "action": raw.get("action", ""),
             "source": raw.get("source", rel_to_memory(memory_root, path)),
             "reason": raw.get("reason", ""),
@@ -538,7 +539,8 @@ def action_cross_check_evidence(
     evidence: list[dict[str, Any]] = []
     actions_by_workstream: dict[str, list[dict[str, str]]] = {}
     for action in ledger_actions:
-        actions_by_workstream.setdefault(normalize_id(action.get("workstream", "")), []).append(action)
+        for workstream_id in action_workstream_targets(action):
+            actions_by_workstream.setdefault(workstream_id, []).append(action)
 
     for ws in workstreams:
         ledger_for_workstream = actions_by_workstream.get(ws.workstream_id, [])
@@ -558,6 +560,7 @@ def action_cross_check_evidence(
                 "normalized_action": normalize_match_text(action.get("action", "")),
                 "source": action.get("source", ACTION_LEDGER_REL.as_posix()),
                 "due_or_trigger": action.get("due_or_trigger", "TBD"),
+                "affected_workstreams": action.get("affected_workstreams", ""),
             }
             for action in ledger_for_workstream
         ]
@@ -576,6 +579,30 @@ def action_cross_check_evidence(
             }
         )
     return evidence
+
+
+def action_workstream_targets(action: dict[str, str]) -> list[str]:
+    targets = split_workstream_list(action.get("affected_workstreams", ""))
+    workstream = normalize_id(action.get("workstream", ""))
+    if workstream and workstream not in {"program", "project", "adp-program", "tbd"}:
+        targets.append(workstream)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for target in targets:
+        if target in seen:
+            continue
+        seen.add(target)
+        unique.append(target)
+    return unique or ([workstream] if workstream else [])
+
+
+def split_workstream_list(value: str) -> list[str]:
+    targets: list[str] = []
+    for raw in re.split(r"\s*[,;]\s*", value or ""):
+        normalized = normalize_id(raw)
+        if normalized and normalized != "tbd":
+            targets.append(normalized)
+    return targets
 
 
 def extract_action_ids(text: str) -> list[str]:

@@ -257,6 +257,58 @@ class SyncStatusTests(unittest.TestCase):
             self.assertIn("Add checkout validation evidence", updated)
             self.assertIn("due: Friday", updated)
 
+    def test_program_action_registers_without_workstream_record_fanout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "_bmad-output" / "adp" / "memory"
+            memory_root.mkdir(parents=True)
+            updates_file = project_root / "program-actions.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "program",
+                                "source": "adp-meeting-sync",
+                                "actions": [
+                                    {
+                                        "owner": "PMO-A",
+                                        "workstream": "program",
+                                        "affected_workstreams": ["l1-checkout", "l2-search"],
+                                        "action": "Start ADP trial and return rollout feedback.",
+                                        "source": "meetings/2026-07-05-sync.md#M-007",
+                                        "reason": "Meeting action; Affected workstreams: l1-checkout, l2-search",
+                                        "due": "2099-07-15",
+                                        "closure_criteria": "Rollout feedback summary is linked and reviewed by PMO-A.",
+                                        "owning_workflow": "adp-meeting-sync",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(result["actions_registered"]), 1)
+            self.assertFalse(result["updates"][0]["wdr_missing"])
+            self.assertTrue(result["updates"][0]["project_action_scope"])
+            self.assertNotIn("delivery-record.md not found", "\n".join(result["unresolved_gaps"]))
+            ledger = memory_root / "actions" / "action-ledger.md"
+            ledger_text = ledger.read_text(encoding="utf-8")
+            self.assertIn("Affected Workstreams", ledger_text)
+            self.assertIn("l1-checkout; l2-search", ledger_text)
+
     def test_done_action_is_removed_from_wdr_summary_but_kept_in_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)

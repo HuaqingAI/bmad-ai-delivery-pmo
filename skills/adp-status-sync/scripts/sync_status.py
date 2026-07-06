@@ -31,11 +31,13 @@ VOLATILE_FIELDS = {
 ACTION_LEDGER_REL = Path("actions") / "action-ledger.md"
 ACTION_STATUSES = {"open", "in-progress", "blocked", "done", "cancelled"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
+PROJECT_ACTION_IDS = {"program", "project", "adp-program"}
 ACTION_FIELDS = [
     "Action ID",
     "Status",
     "Owner",
     "Workstream",
+    "Affected Workstreams",
     "Action",
     "Source",
     "Reason",
@@ -52,6 +54,7 @@ class ActionUpdate:
     status: str = "open"
     owner: str = "TBD"
     workstream: str = "TBD"
+    affected_workstreams: list[str] = field(default_factory=list)
     action: str = ""
     source: str = ""
     reason: str = ""
@@ -239,14 +242,27 @@ def actions_from_mapping(
         action_text = clean_optional(raw_action.get("action") or raw_action.get("text") or raw_action.get("next_action")) or ""
         if not action_text and not action_id:
             raise ValueError("action update is missing action/text or action_id")
+        affected_workstreams = normalize_workstream_list(
+            raw_action.get("affected_workstreams")
+            or raw_action.get("affectedWorkstreams")
+            or raw_action.get("impacts")
+        )
         raw_workstream = clean_optional(raw_action.get("workstream") or raw_action.get("workstream_id"))
-        workstream = normalize_id(raw_workstream) if raw_workstream and raw_workstream.upper() != "TBD" else default_workstream
+        if raw_workstream and raw_workstream.upper() != "TBD":
+            workstream = normalize_id(raw_workstream)
+        elif len(affected_workstreams) > 1:
+            workstream = "program"
+        elif affected_workstreams:
+            workstream = affected_workstreams[0]
+        else:
+            workstream = default_workstream
         actions.append(
             ActionUpdate(
                 action_id=action_id,
                 status=status,
                 owner=clean_optional(raw_action.get("owner")) or "TBD",
                 workstream=workstream or "TBD",
+                affected_workstreams=affected_workstreams,
                 action=action_text,
                 source=clean_optional(raw_action.get("source")) or clean_optional(item.get("source")) or default_source,
                 reason=clean_optional(raw_action.get("reason")) or "TBD",
@@ -292,6 +308,29 @@ def clean_list(value: Any) -> list[str]:
     else:
         raw_items = [value]
     return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def normalize_workstream_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"\s*[,;]\s*", value)
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = [value]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item).strip()
+        if not text or text.upper() == "TBD":
+            continue
+        normalized_id = normalize_id(text)
+        if normalized_id in seen:
+            continue
+        seen.add(normalized_id)
+        normalized.append(normalized_id)
+    return normalized
 
 
 def ensure_action_ledger(memory_root: Path, dry_run: bool) -> Path:
@@ -446,6 +485,18 @@ def find_action_row(rows: list[dict[str, str]], action_update: ActionUpdate) -> 
         for row in rows:
             if action_key(row.get("Owner", ""), row.get("Workstream", ""), row.get("Action", ""), row.get("Source", "")) == strong_key:
                 return row
+        for row in rows:
+            if row.get("Status", "").lower() not in ACTIVE_ACTION_STATUSES:
+                continue
+            if normalize_text_key(row.get("Action", "")) != normalize_text_key(action_update.action):
+                continue
+            if normalize_text_key(row.get("Source", "")) != normalize_text_key(action_update.source):
+                continue
+            if normalize_text_key(row.get("Owner", "")) != normalize_text_key(action_update.owner):
+                continue
+            if normalize_text_key(row.get("Due / Trigger", "")) != normalize_text_key(action_update.due_or_trigger):
+                continue
+            return row
     weak_key = action_key(action_update.owner, action_update.workstream, action_update.action, "")
     if action_update.action:
         for row in rows:
@@ -473,6 +524,7 @@ def new_action_row(rows: list[dict[str, str]], action_update: ActionUpdate, time
         "Status": action_update.status,
         "Owner": action_update.owner or "TBD",
         "Workstream": action_update.workstream or "TBD",
+        "Affected Workstreams": action_workstreams_cell(action_update),
         "Action": action_update.action,
         "Source": action_update.source or "TBD",
         "Reason": action_update.reason or "TBD",
@@ -487,6 +539,11 @@ def merge_action_row(row: dict[str, str], action_update: ActionUpdate, timestamp
     row["Status"] = action_update.status
     assign_if_meaningful(row, "Owner", action_update.owner)
     assign_if_meaningful(row, "Workstream", action_update.workstream)
+    row["Affected Workstreams"] = merge_action_workstreams(
+        row.get("Affected Workstreams", ""),
+        action_update.affected_workstreams,
+        action_update.workstream,
+    )
     assign_if_present(row, "Action", action_update.action)
     assign_if_meaningful(row, "Source", action_update.source)
     assign_if_meaningful(row, "Reason", action_update.reason)
@@ -506,6 +563,30 @@ def assign_if_present(row: dict[str, str], field_name: str, value: str) -> None:
     text = str(value or "").strip()
     if text:
         row[field_name] = text
+
+
+def action_workstreams_cell(action_update: ActionUpdate) -> str:
+    workstreams = action_update.affected_workstreams
+    if not workstreams and action_update.workstream.upper() not in {"", "TBD"}:
+        workstreams = [action_update.workstream]
+    return "; ".join(workstreams) if workstreams else "TBD"
+
+
+def parse_workstream_cell(value: str) -> list[str]:
+    return normalize_workstream_list(value)
+
+
+def merge_action_workstreams(existing: str, new: list[str], fallback: str) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for candidate in [*parse_workstream_cell(existing), *new]:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        merged.append(candidate)
+    if not merged and fallback.upper() not in {"", "TBD"} and fallback not in PROJECT_ACTION_IDS:
+        merged.append(fallback)
+    return "; ".join(merged) if merged else "TBD"
 
 
 def next_action_id(rows: list[dict[str, str]], timestamp: str) -> str:
@@ -530,11 +611,62 @@ def action_gaps(row: dict[str, str]) -> list[str]:
         return []
     action_id = row.get("Action ID", "(missing id)")
     gaps: list[str] = []
-    for field_name in ["Owner", "Workstream", "Due / Trigger", "Closure Criteria"]:
-        value = row.get(field_name, "")
-        if not value or value.upper() == "TBD":
-            gaps.append(f"{action_id}: {field_name} is missing")
+    if is_generic_owner(row.get("Owner", "")):
+        gaps.append(f"{action_id}: Owner is missing or generic")
+    if is_missing_workstream(row.get("Workstream", "")) and not parse_workstream_cell(row.get("Affected Workstreams", "")):
+        gaps.append(f"{action_id}: Workstream is missing")
+    if is_missing_action_value(row.get("Due / Trigger", "")):
+        gaps.append(f"{action_id}: Due / Trigger is missing")
+    if is_generic_closure_criteria(row.get("Closure Criteria", "")):
+        gaps.append(f"{action_id}: Closure Criteria is missing or not verifiable")
     return gaps
+
+
+def is_missing_action_value(value: str) -> bool:
+    text = str(value or "").strip()
+    return not text or text.upper() == "TBD"
+
+
+def is_missing_workstream(value: str) -> bool:
+    text = str(value or "").strip()
+    return not text or text.upper() == "TBD"
+
+
+def is_generic_owner(value: str) -> bool:
+    text = normalize_text_key(value)
+    if not text or text in {"tbd", "owner", "participants", "meeting participants", "all participants"}:
+        return True
+    generic_phrases = [
+        "each workstream",
+        "fde owner",
+        "workstream fde owner",
+        "all fdes",
+        "attendees",
+        "各条线",
+        "各线",
+        "参会人员",
+        "负责人",
+        "待定",
+    ]
+    return any(phrase in text for phrase in generic_phrases)
+
+
+def is_generic_closure_criteria(value: str) -> bool:
+    text = normalize_text_key(value)
+    if not text or text == "tbd":
+        return True
+    generic_phrases = [
+        "update completion status",
+        "updates completion status",
+        "wdr daily log or status sync",
+        "wdr daily log status sync",
+        "status sync update",
+        "更新完成状态",
+        "后续 status sync",
+        "对应 wdr",
+        "daily log",
+    ]
+    return any(phrase in text for phrase in generic_phrases)
 
 
 def split_next_actions(value: str) -> list[str]:
@@ -562,7 +694,9 @@ def active_action_summaries(rows: list[dict[str, str]], workstream_id: str) -> l
     for row in rows:
         if row.get("Status", "").lower() not in ACTIVE_ACTION_STATUSES:
             continue
-        if normalize_id(row.get("Workstream", "")) != normalized_workstream:
+        row_workstream = safe_normalize_id(row.get("Workstream", ""))
+        affected_workstreams = parse_workstream_cell(row.get("Affected Workstreams", ""))
+        if row_workstream != normalized_workstream and normalized_workstream not in affected_workstreams:
             continue
         action = row.get("Action", "").strip()
         if not action:
@@ -576,6 +710,13 @@ def active_action_summaries(rows: list[dict[str, str]], workstream_id: str) -> l
             summary = f"{summary} (due: {due})"
         summaries.append(summary)
     return summaries
+
+
+def safe_normalize_id(value: str) -> str:
+    try:
+        return normalize_id(value)
+    except ValueError:
+        return ""
 
 
 def remove_closed_action_summaries(existing_actions: list[str], action_updates: list[ActionUpdate]) -> list[str]:
@@ -621,11 +762,27 @@ def apply_update(
 ) -> dict[str, Any]:
     record_path = memory_root / "workstreams" / update.workstream_id / "delivery-record.md"
     if not record_path.exists():
-        if update.actions and not has_wdr_delta(update):
+        project_action_scope = (
+            update.workstream_id in PROJECT_ACTION_IDS
+            and update.actions
+            and not any(
+                [
+                    update.status,
+                    update.phase,
+                    update.progress,
+                    update.blockers,
+                    update.risks,
+                    update.dependencies,
+                    update.change_notes,
+                ]
+            )
+        )
+        if update.actions and (project_action_scope or not has_wdr_delta(update)):
             timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
             daily_log = append_daily_log(memory_root, update, [], timestamp, dry_run)
             gaps = unresolved_gaps(update)
-            gaps.append(f"delivery-record.md not found for workstream {update.workstream_id}")
+            if not project_action_scope:
+                gaps.append(f"delivery-record.md not found for workstream {update.workstream_id}")
             return {
                 "ok": True,
                 "workstream_id": update.workstream_id,
@@ -638,7 +795,8 @@ def apply_update(
                 "actions_closed": [],
                 "unresolved_gaps": sorted(set(gaps)),
                 "no_op": False,
-                "wdr_missing": True,
+                "wdr_missing": not project_action_scope,
+                "project_action_scope": project_action_scope,
             }
         return {
             "ok": False,

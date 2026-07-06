@@ -74,11 +74,17 @@ If an item is ambiguous, choose the safest classification that exposes the gap. 
 
 An action is not closed when owner or due trigger is generic, missing, or still a raw speaker label. Use the best corrected project member name; otherwise keep the label and write explicit gap fields in the plan, such as `owner_gap`, `confirmer_gap`, `speaker_label_gap`, or `participant_gaps`; the writer only validates exact missing placeholders.
 
+Meeting actions are intake candidates, not ledger rows. A canonical action needs a specific accountable owner, affected workstream route, due trigger, and observable closure criteria. Generic owners such as `TBD`, `各条线 FDE owner`, or `参会人员` stay in the gap queue and do not enter the open action ledger. Closure criteria must name the deliverable or condition that proves completion; "owner updates WDR/daily/status-sync" is process evidence, not closure.
+
+Default to one canonical action for the same Source + Action. Put multiple impacted lines in `affected_workstreams`; split into separate actions only when owner, due trigger, or deliverable differs per workstream. Project-level actions use `workstream: "program"` downstream rather than being copied into every workstream.
+
 ## Sync Plan
 
 Before writing files, produce a compact JSON plan and inspect it for closure. Load `references/sync-plan-schema.md` whenever drafting or validating the plan. The script executes the plan; it does not infer business meaning.
 
 Keep unknown fields as `TBD` only when the gap is real and should be visible. Do not omit `id`, `classification`, or `text`; use explicit gap fields such as `owner_gap`, `confirmer_gap`, `speaker_label_gap`, `participant_gaps`, or `gap`.
+
+For historical backfills, do not default past-due actions to `open`. If later daily logs, WDRs, or status-sync records confirm the outcome, set `status` to `done`, `cancelled`, `in-progress`, or `blocked` with the evidence in `status_confirmation`. If no follow-up evidence is found, leave the action active only as `blocked` / needs status confirmation.
 
 ## Args
 
@@ -92,13 +98,13 @@ Save the plan, then validate with a mandatory dry run before durable writes:
 uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json> --memory-root <memory-root> --meeting-note-template "{workflow.meeting_note_template}" --business-decision-packet-template "{workflow.business_decision_packet_template}" --dry-run -o <dry-run-report.json>
 ```
 
-Review the dry-run report for touched paths and unresolved gaps. Execute the same command without `--dry-run` only after user confirmation, or in headless mode only when the caller supplied `--execute`:
+Review the dry-run report for touched paths, unresolved gaps, and `action_quality_audit`: actions seen, canonical actions, fanout suppressed, owner gaps, due gaps, closure gaps, past-due open items, blocked actions, and status calibrations. Execute the same command without `--dry-run` only after user confirmation, or in headless mode only when the caller supplied `--execute`:
 
 ```bash
 uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json> --memory-root <memory-root> --meeting-note-template "{workflow.meeting_note_template}" --business-decision-packet-template "{workflow.business_decision_packet_template}" -o <execute-report.json>
 ```
 
-The script writes a structured meeting archive, appends the daily log, appends decision indexes and workstream decision files where applicable, appends WDR meeting-sync updates when the workstream exists, creates Business Decision Packets for `business_decision_needed` items, and writes a status-sync intake file under `intake/status-sync/` when meeting items contain `classification: "action"`. Existing files are preserved; WDRs are appended, not replaced.
+The script writes a structured meeting archive, appends the daily log, appends decision indexes and workstream decision files where applicable, appends WDR meeting-sync updates when the workstream exists, creates Business Decision Packets for `business_decision_needed` items, and writes a canonical status-sync action intake file under `intake/status-sync/` only for ledger-ready meeting actions. Existing files are preserved; WDRs are appended, not replaced.
 
 Meeting actions are not written directly to the action ledger. After sync, run the generated intake through status-sync:
 
@@ -118,6 +124,7 @@ After syncing, report:
 - the durable raw evidence path, when raw evidence was available
 - daily log, decision log, WDRs, workstream decision files, and Business Decision Packets touched
 - generated status-sync intake files for meeting actions
+- action quality audit: canonical actions, fanout suppressed, owner/due/workstream/closure gaps, past-due status calibrations, and blocked actions not sent to ledger
 - unresolved gaps, especially missing workstreams, missing owners, missing due triggers, unresolved speaker labels, missing confirmers, or no-op items without rationale
 - next useful workflow: usually `adp-status-sync` for cadence updates, `adp-risk-dependency-change-review` for open risk/change/business decisions, or `adp-workstream-register` for unknown workstreams
 

@@ -81,6 +81,7 @@ The updates file may include structured `actions` alongside legacy `next_actions
         {
           "owner": "FDE-A",
           "workstream": "l1-checkout",
+          "affected_workstreams": ["l1-checkout"],
           "action": "Add checkout validation evidence",
           "source": "meetings/sync-notes-20260701.md#M-001",
           "reason": "Meeting action",
@@ -94,6 +95,8 @@ The updates file may include structured `actions` alongside legacy `next_actions
   ]
 }
 ```
+
+For one Source + Action that affects many workstreams, send one canonical action with `workstream: "program"` and `affected_workstreams`; do not repeat the same action under every workstream unless owner, due trigger, or deliverable differs. `program` actions update the ledger and daily log without requiring a `workstreams/program/delivery-record.md`.
 
 The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, upserts `actions/action-ledger.md`, and returns JSON with changed fields, action ledger path, actions registered/updated/closed, unresolved gaps, and action candidates. Legacy `next_actions` remain supported; structured `actions` are the durable source for the FDE action list.
 

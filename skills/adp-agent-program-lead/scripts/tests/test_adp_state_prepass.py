@@ -184,6 +184,41 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertEqual(result["action_cross_check"][0]["ledger_action_ids_without_wdr_reference"], ["ACT-20260702-001"])
             self.assertNotIn("Closed historical task", json.dumps(result, ensure_ascii=False))
 
+    def test_program_action_uses_affected_workstreams_for_cross_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            ledger = memory_root / "actions" / "action-ledger.md"
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text(
+                "\n".join(
+                    [
+                        "# Action Ledger",
+                        "",
+                        "| Action ID | Status | Owner | Workstream | Affected Workstreams | Action | Source | Reason | Due / Trigger | Closure Criteria | Last Updated | Owning Workflow |",
+                        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+                        "| ACT-20260705-001 | open | PMO-A | program | l1-checkout; l2-payments | Start ADP trial and return rollout feedback | meetings/2026-07-05-sync.md#M-007 | Meeting action | 2099-07-15 | Feedback summary linked | 2026-07-05T09:00:00+08:00 | adp-meeting-sync |",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            completed = self.run_script(
+                project_root,
+                "--capability",
+                "FDE Action List",
+                "--as-of",
+                "2026-07-05",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["ledger_actions"][0]["workstream"], "program")
+            self.assertEqual(result["ledger_actions"][0]["affected_workstreams"], "l1-checkout; l2-payments")
+            self.assertEqual(result["action_cross_check"][0]["workstream"], "l1-checkout")
+            self.assertEqual(result["action_cross_check"][0]["ledger_open_actions"][0]["action_id"], "ACT-20260705-001")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -188,6 +188,8 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         item["status"] = string_value(item.get("status")) or default_status(item["classification"])
         item["wdr_update"] = string_value(item.get("wdr_update"))
         item["no_op_reason"] = string_value(item.get("no_op_reason"))
+        item["closure_criteria"] = string_value(item.get("closure_criteria"))
+        item["status_confirmation"] = string_value(item.get("status_confirmation"))
         item["owner_gap"] = string_value(item.get("owner_gap"))
         item["confirmer_gap"] = string_value(item.get("confirmer_gap"))
         item["speaker_label_gap"] = string_value(item.get("speaker_label_gap"))
@@ -362,7 +364,7 @@ def apply_plan(
                         f"{item['id']}: WDR update references missing workstream {workstream_id}"
                     )
 
-    status_sync_intake = build_status_sync_intake(memory_root, meeting_path, meeting, items)
+    status_sync_intake, action_quality_audit = build_status_sync_intake(memory_root, meeting_path, meeting, items)
     if status_sync_intake:
         intake_path = status_sync_intake_path(memory_root, meeting, dry_run)
         write_file(
@@ -379,7 +381,14 @@ def apply_plan(
         "meeting": meeting,
         "touched": dedupe_touched(touched),
         "unresolved_gaps": sorted(set(unresolved_gaps)),
-        "next_actions": next_actions(project_root, memory_root, items, touched["status_sync_intake_files"]),
+        "action_quality_audit": action_quality_audit,
+        "next_actions": next_actions(
+            project_root,
+            memory_root,
+            items,
+            touched["status_sync_intake_files"],
+            action_quality_audit,
+        ),
     }
 
 
@@ -492,10 +501,12 @@ def item_gap(item: dict[str, Any]) -> str:
     if item["classification"] in {"action", "wdr_update"} and not item["affected_workstreams"]:
         gaps.append("affected workstream is missing")
     if item["classification"] == "action":
-        if is_missing_owner(item["owner"]):
-            gaps.append("action owner is missing")
+        if is_generic_owner(item["owner"]):
+            gaps.append("action owner is missing or generic")
         if is_missing_due(item["due"]):
             gaps.append("action due trigger is missing")
+        if is_generic_closure_criteria(item["closure_criteria"]):
+            gaps.append("action closure criteria is missing or not verifiable")
     if item["classification"] in {"decision", "business_decision_needed"} and item["confirmer"] == "TBD":
         gaps.append("confirmer is missing")
     if item["classification"] == "wdr_update" and not item["wdr_update"]:
@@ -750,42 +761,132 @@ def build_status_sync_intake(
     meeting_path: Path,
     meeting: dict[str, Any],
     items: list[dict[str, Any]],
-) -> dict[str, Any]:
-    updates_by_workstream: dict[str, dict[str, Any]] = {}
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    audit = {
+        "actions_seen": 0,
+        "canonical_actions": 0,
+        "ledger_ready_actions": 0,
+        "fanout_suppressed": 0,
+        "duplicate_actions_merged": 0,
+        "owner_gap_count": 0,
+        "due_gap_count": 0,
+        "workstream_gap_count": 0,
+        "closure_gap_count": 0,
+        "past_due_open_count": 0,
+        "status_calibrated_count": 0,
+        "blocked_actions": [],
+        "status_calibrations": [],
+    }
+    canonical_actions: dict[str, dict[str, Any]] = {}
+
     for item in items:
         if item["classification"] != "action":
             continue
-        workstreams = item["affected_workstreams"] or ["tbd"]
+        audit["actions_seen"] += 1
         source = f"{rel_to_memory(memory_root, meeting_path)}#{item['id']}"
-        for workstream_id in workstreams:
-            normalized_workstream = normalize_workstreams(workstream_id)[0] if workstream_id != "tbd" else "tbd"
-            update = updates_by_workstream.setdefault(
-                normalized_workstream,
+        affected_workstreams = item["affected_workstreams"]
+        blocking_gaps = action_blocking_gaps(item)
+        closure_criteria = item["closure_criteria"]
+        closure_gap = is_generic_closure_criteria(closure_criteria)
+        if closure_gap:
+            audit["closure_gap_count"] += 1
+            closure_criteria = "TBD"
+
+        for gap in blocking_gaps:
+            if gap["type"] == "owner":
+                audit["owner_gap_count"] += 1
+            elif gap["type"] == "due":
+                audit["due_gap_count"] += 1
+            elif gap["type"] == "workstream":
+                audit["workstream_gap_count"] += 1
+        if blocking_gaps:
+            audit["blocked_actions"].append(
                 {
-                    "id": normalized_workstream,
-                    "source": "adp-meeting-sync",
-                    "next_actions": [],
-                    "actions": [],
-                },
-            )
-            action_text = item["text"]
-            if action_text not in update["next_actions"]:
-                update["next_actions"].append(action_text)
-            update["actions"].append(
-                {
-                    "owner": item["owner"],
-                    "workstream": "TBD" if normalized_workstream == "tbd" else normalized_workstream,
-                    "action": action_text,
+                    "id": item["id"],
                     "source": source,
-                    "reason": item["wdr_update"] or f"Meeting action from {meeting['title']}",
-                    "due": item["due"],
-                    "status": normalize_action_status(item["status"]),
-                    "closure_criteria": string_value(item.get("closure_criteria")) or "TBD",
-                    "owning_workflow": "adp-meeting-sync",
+                    "action": item["text"],
+                    "gaps": [gap["message"] for gap in blocking_gaps],
                 }
             )
+            continue
+
+        original_status = normalize_action_status(item["status"])
+        status = original_status
+        reason_parts = [item["wdr_update"] or f"Meeting action from {meeting['title']}"]
+        if affected_workstreams:
+            reason_parts.append(f"Affected workstreams: {', '.join(affected_workstreams)}")
+        if closure_gap:
+            reason_parts.append("Closure criteria is missing or not verifiable")
+            if status == "open":
+                status = "blocked"
+                audit["status_calibrated_count"] += 1
+                audit["status_calibrations"].append(
+                    {"id": item["id"], "from": "open", "to": "blocked", "reason": "closure criteria gap"}
+                )
+
+        due_date = parse_due_date(item["due"])
+        past_due_needs_confirmation = (
+            due_date is not None
+            and due_date < date.today()
+            and original_status == "open"
+            and not item["status_confirmation"]
+        )
+        if past_due_needs_confirmation:
+            audit["past_due_open_count"] += 1
+            reason_parts.append("Past due and needs status confirmation")
+            if status == "open":
+                audit["status_calibrated_count"] += 1
+                status = "blocked"
+                audit["status_calibrations"].append(
+                    {"id": item["id"], "from": "open", "to": "blocked", "reason": "past due without status confirmation"}
+                )
+
+        key = canonical_action_key(source, item)
+        action = canonical_actions.get(key)
+        if action:
+            audit["duplicate_actions_merged"] += 1
+            action["affected_workstreams"] = merge_values(action["affected_workstreams"], affected_workstreams)
+            action["reason_parts"] = merge_values(action["reason_parts"], reason_parts)
+            continue
+
+        canonical_actions[key] = {
+            "owner": item["owner"],
+            "action": item["text"],
+            "source": source,
+            "reason_parts": reason_parts,
+            "due": item["due"],
+            "status": status,
+            "closure_criteria": closure_criteria or "TBD",
+            "owning_workflow": "adp-meeting-sync",
+            "affected_workstreams": affected_workstreams,
+        }
+
+    updates_by_workstream: dict[str, dict[str, Any]] = {}
+    for action in canonical_actions.values():
+        affected_workstreams = action["affected_workstreams"]
+        action_workstream = canonical_action_workstream(affected_workstreams)
+        action["workstream"] = action_workstream
+        action["reason"] = "; ".join(action.pop("reason_parts"))
+        if len(affected_workstreams) > 1:
+            audit["fanout_suppressed"] += len(affected_workstreams) - 1
+        update = updates_by_workstream.setdefault(
+            action_workstream,
+            {
+                "id": action_workstream,
+                "source": "adp-meeting-sync",
+                "next_actions": [],
+                "actions": [],
+            },
+        )
+        if action_workstream not in {"program", "project", "adp-program"}:
+            if action["action"] not in update["next_actions"]:
+                update["next_actions"].append(action["action"])
+        update["actions"].append(action)
+
+    audit["canonical_actions"] = len(canonical_actions)
+    audit["ledger_ready_actions"] = sum(len(update["actions"]) for update in updates_by_workstream.values())
     if not updates_by_workstream:
-        return {}
+        return {}, audit
     return {
         "generated_by": "adp-meeting-sync",
         "meeting": {
@@ -794,8 +895,52 @@ def build_status_sync_intake(
             "source": meeting["source"],
             "archive": rel_to_memory(memory_root, meeting_path),
         },
+        "action_quality_audit": audit,
         "updates": list(updates_by_workstream.values()),
-    }
+    }, audit
+
+
+def action_blocking_gaps(item: dict[str, Any]) -> list[dict[str, str]]:
+    gaps: list[dict[str, str]] = []
+    if not item["affected_workstreams"]:
+        gaps.append({"type": "workstream", "message": "affected workstream is missing"})
+    if is_generic_owner(item["owner"]) or item["owner_gap"]:
+        gaps.append({"type": "owner", "message": item["owner_gap"] or "action owner is missing or generic"})
+    if is_missing_due(item["due"]):
+        gaps.append({"type": "due", "message": "action due trigger is missing"})
+    return gaps
+
+
+def canonical_action_key(source: str, item: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            normalize_text_key(source),
+            normalize_text_key(item["text"]),
+            normalize_text_key(item["owner"]),
+            normalize_text_key(item["due"]),
+            normalize_text_key(item["closure_criteria"]),
+        ]
+    )
+
+
+def canonical_action_workstream(affected_workstreams: list[str]) -> str:
+    if len(affected_workstreams) == 1:
+        return affected_workstreams[0]
+    if len(affected_workstreams) > 1:
+        return "program"
+    return "TBD"
+
+
+def merge_values(existing: list[str], new_values: list[str]) -> list[str]:
+    merged = list(existing)
+    seen = {normalize_text_key(item) for item in merged}
+    for value in new_values:
+        key = normalize_text_key(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(value)
+    return merged
 
 
 def normalize_action_status(raw: Any) -> str:
@@ -923,6 +1068,61 @@ def is_missing_owner(value: str) -> bool:
     return not owner or owner == "TBD"
 
 
+def is_generic_owner(value: str) -> bool:
+    owner = normalize_text_key(value)
+    if not owner or owner in {"tbd", "owner", "participants", "meeting participants", "all participants"}:
+        return True
+    generic_phrases = [
+        "each workstream",
+        "fde owner",
+        "workstream fde owner",
+        "all fdes",
+        "attendees",
+        "各条线",
+        "各线",
+        "参会人员",
+        "负责人",
+        "待定",
+    ]
+    return any(phrase in owner for phrase in generic_phrases)
+
+
+def is_generic_closure_criteria(value: str) -> bool:
+    criteria = normalize_text_key(value)
+    if not criteria or criteria == "tbd":
+        return True
+    generic_phrases = [
+        "update completion status",
+        "updates completion status",
+        "wdr daily log or status sync",
+        "wdr daily log status sync",
+        "status sync update",
+        "更新完成状态",
+        "后续 status sync",
+        "对应 wdr",
+        "daily log",
+    ]
+    return any(phrase in criteria for phrase in generic_phrases)
+
+
+def parse_due_date(value: str) -> date | None:
+    due = string_value(value)
+    match = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", due)
+    if not match:
+        return None
+    year, month, day = (int(part) for part in match.groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def normalize_text_key(value: str) -> str:
+    text = string_value(value).lower()
+    text = re.sub(r"[\W_]+", " ", text, flags=re.UNICODE)
+    return " ".join(text.split())
+
+
 def string_value(value: Any) -> str:
     if value is None:
         return ""
@@ -957,15 +1157,22 @@ def next_actions(
     memory_root: Path,
     items: list[dict[str, Any]],
     status_sync_intake_files: list[str],
+    action_quality_audit: dict[str, Any],
 ) -> list[str]:
     actions: list[str] = []
     for path in status_sync_intake_files:
         actions.append(f'Run adp-status-sync update "{project_root}" --updates-file "{path}" to register meeting actions.')
+    if action_quality_audit.get("blocked_actions"):
+        actions.append("Resolve blocked meeting action gaps before ledger registration: owner, workstream, and due must be specific.")
+    if action_quality_audit.get("status_calibrated_count"):
+        actions.append("Review blocked past-due or weak-closure meeting actions and confirm whether they are done, cancelled, or still active.")
     if has_missing_workstream_route(memory_root, items):
         actions.append("Run adp-workstream-register or correct workstream ids for missing WDR references.")
     if any(item["classification"] == "business_decision_needed" for item in items):
         actions.append("Run adp-risk-dependency-change-review for open business decision packets.")
-    if not status_sync_intake_files and any(item["classification"] in {"action", "wdr_update"} for item in items):
+    has_wdr_update = any(item["classification"] == "wdr_update" for item in items)
+    has_ready_actions = bool(action_quality_audit.get("ledger_ready_actions"))
+    if not status_sync_intake_files and (has_wdr_update or has_ready_actions):
         actions.append("Run adp-status-sync to refresh recurring status views from the new meeting updates.")
     if not actions:
         actions.append("Review the meeting archive and continue with the next ADP workflow only if gaps remain.")
