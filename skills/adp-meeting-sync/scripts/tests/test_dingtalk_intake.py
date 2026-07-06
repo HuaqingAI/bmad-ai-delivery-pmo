@@ -38,66 +38,81 @@ class DingTalkIntakeTests(unittest.TestCase):
                         if start == "2026-07-06" or end == "2026-07-06":
                             print(json.dumps({"error": "date-only filter was not expanded"}))
                             sys.exit(3)
-                        print(json.dumps({"items": []}))
+                        print(json.dumps({"success": True, "result": {"itemList": []}}))
                         sys.exit(0)
                     print(json.dumps({
-                        "items": [
+                        "success": True,
+                        "result": {
+                            "hasMore": False,
+                            "itemList": [
                             {
-                                "taskUuid": "task-processed",
+                                "uuid": "task-processed",
                                 "title": "Processed sync",
-                                "startTime": "2026-07-01T09:00:00+08:00",
-                                "aiMinutesUrl": "https://minutes.example/processed",
-                                "keywords": ["checkout"]
+                                "startTimeISO": "2026-07-01T09:00:00+08:00",
+                                "shareUrl": "https://minutes.example/processed",
+                                "keywordsInfo": {"keywords": ["checkout"]}
                             },
                             {
-                                "taskUuid": "task-new",
+                                "uuid": "task-new",
                                 "title": "Checkout sync",
-                                "startTime": "2026-07-02T09:00:00+08:00",
-                                "aiMinutesUrl": "https://minutes.example/new",
-                                "keywords": ["checkout", "risk"]
+                                "startTimeISO": "2026-07-02T09:00:00+08:00",
+                                "shareUrl": "https://minutes.example/new",
+                                "keywordsInfo": {"keywords": ["checkout", "risk"]}
                             },
                             {
-                                "taskUuid": "task-date",
+                                "uuid": "task-date",
                                 "title": "Morning sync",
-                                "startTime": "2026-07-06T09:34:00+08:00",
-                                "aiMinutesUrl": "https://minutes.example/date",
-                                "keywords": ["评论模块", "数据回流"]
+                                "startTimeISO": "2026-07-06T09:34:00+08:00",
+                                "shareUrl": "https://minutes.example/date",
+                                "keywordsInfo": {"keywords": ["评论模块", "数据回流"]}
                             }
-                        ]
+                            ]
+                        }
                     }))
                 elif args[:3] == ["minutes", "get", "info"]:
                     task_id = args[args.index("--id") + 1]
                     print(json.dumps({
-                        "taskUuid": task_id,
-                        "title": "Paragraph sync" if task_id == "task-paragraph" else "Checkout sync",
-                        "startTime": "2026-07-02T09:00:00+08:00",
-                        "aiMinutesUrl": "https://minutes.example/new"
+                        "success": True,
+                        "result": {
+                            "taskUuid": task_id,
+                            "title": "Paragraph sync" if task_id == "task-paragraph" else "Checkout sync",
+                            "startTime": "2026-07-02T09:00:00+08:00",
+                            "url": "https://minutes.example/new"
+                        }
                     }))
                 elif args[:3] == ["minutes", "get", "transcription"]:
                     task_id = args[args.index("--id") + 1]
                     if task_id == "task-paragraph" and "--next-token" in args:
                         print(json.dumps({
-                            "paragraphList": [
-                                {
-                                    "speakerName": "PM-B",
-                                    "sentenceList": [
-                                        {"text": "Second paragraph action."}
-                                    ]
-                                }
-                            ]
+                            "success": True,
+                            "result": {
+                                "paragraphList": [
+                                    {
+                                        "nickName": "Meeting room",
+                                        "speakerDisplay": {"nickName": "PM-B"},
+                                        "sentenceList": [
+                                            {"sentence": "Second paragraph action."}
+                                        ]
+                                    }
+                                ]
+                            }
                         }))
                     elif task_id == "task-paragraph":
                         print(json.dumps({
-                            "paragraphList": [
-                                {
-                                    "speakerName": "FDE-A",
-                                    "sentenceList": [
-                                        {"text": "First paragraph fact."},
-                                        {"text": "First paragraph decision."}
-                                    ]
-                                }
-                            ],
-                            "nextToken": "page-2"
+                            "success": True,
+                            "result": {
+                                "paragraphList": [
+                                    {
+                                        "nickName": "Meeting room",
+                                        "speakerDisplay": {"nickName": "FDE-A"},
+                                        "sentenceList": [
+                                            {"sentence": "First paragraph fact."},
+                                            {"sentence": "First paragraph decision."}
+                                        ]
+                                    }
+                                ],
+                                "nextToken": "page-2"
+                            }
                         }))
                     elif "--next-token" in args:
                         print(json.dumps({

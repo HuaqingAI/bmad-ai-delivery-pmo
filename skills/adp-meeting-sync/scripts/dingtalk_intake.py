@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import shlex
 import subprocess
@@ -43,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dws-command",
         default="dws",
-        help="Command used to invoke dws. May include quoted executable parts for tests.",
+        help="Command used to invoke dws. On Windows, the default resolves dws.cmd; quoted/backslash paths are supported.",
     )
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
@@ -179,7 +180,8 @@ def run_dingtalk_intake(args: argparse.Namespace, project_root: Path, memory_roo
     selected = next((candidate for candidate in candidates if candidate["taskUuid"] == args.task_uuid), None)
     info = dws_json(command, ["minutes", "get", "info", "--id", args.task_uuid, "--format", "json"])
     transcript = fetch_transcription(command, args.task_uuid)
-    selected = selected or normalize_candidate(info)
+    info_payload = unwrap_result_object(info)
+    selected = selected or normalize_candidate(info_payload)
     selected = merge_candidate_info(selected, info)
 
     raw_evidence_path = ""
@@ -276,20 +278,53 @@ def extract_filter_date(raw_value: str | None) -> str:
 
 
 def parse_command(raw_command: str) -> list[str]:
-    command = shlex.split(raw_command)
+    command = shlex.split(raw_command, posix=os.name != "nt")
+    command = [strip_surrounding_quotes(part) for part in command]
     if not command:
         raise DwsError("dws command is empty")
+    command[0] = resolve_command_executable(command[0])
     return command
 
 
+def strip_surrounding_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def resolve_command_executable(executable: str) -> str:
+    if os.name != "nt":
+        return executable
+
+    path_like = any(separator in executable for separator in ("\\", "/"))
+    suffix = Path(executable).suffix
+    if suffix:
+        found = shutil.which(executable)
+        return found or executable
+
+    cmd_candidate = f"{executable}.cmd"
+    if path_like and Path(cmd_candidate).exists():
+        return cmd_candidate
+
+    found_cmd = shutil.which(cmd_candidate)
+    if found_cmd:
+        return found_cmd
+
+    found = shutil.which(executable)
+    return found or executable
+
+
 def dws_json(command: list[str], args: list[str]) -> Any:
-    completed = subprocess.run(
-        [*command, *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+    try:
+        completed = subprocess.run(
+            [*command, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise DwsError(f"dws command could not be started: {command[0]} ({exc})") from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
         raise DwsError(f"dws command failed: {detail}")
@@ -335,10 +370,24 @@ def normalize_candidates(raw: Any) -> list[dict[str, Any]]:
 def normalize_candidate(raw: dict[str, Any]) -> dict[str, Any]:
     task_uuid = first_string(raw, ["taskUuid", "task_uuid", "uuid", "id", "taskId", "task_id"])
     title = first_string(raw, ["title", "subject", "name", "meetingTitle", "meeting_title"]) or "Untitled meeting"
-    time_value = first_value(raw, ["startTime", "start_time", "createTime", "create_time", "time", "date"])
+    time_value = first_value(
+        raw,
+        [
+            "startTimeISO",
+            "start_time_iso",
+            "startTime",
+            "start_time",
+            "createTimeISO",
+            "create_time_iso",
+            "createTime",
+            "create_time",
+            "time",
+            "date",
+        ],
+    )
     formatted_time, date = normalize_time(time_value)
-    url = first_string(raw, ["aiMinutesUrl", "ai_minutes_url", "minutesUrl", "minutes_url", "url"])
-    keywords = normalize_keywords(first_value(raw, ["keywords", "tags", "keyWords", "key_words"]))
+    url = first_string(raw, ["aiMinutesUrl", "ai_minutes_url", "minutesUrl", "minutes_url", "shareUrl", "share_url", "url"])
+    keywords = normalize_keywords(first_value(raw, ["keywords", "tags", "keyWords", "key_words", "keywordsInfo", "keywords_info"]))
     return {
         "taskUuid": task_uuid,
         "title": title,
@@ -355,7 +404,7 @@ def normalize_candidate(raw: dict[str, Any]) -> dict[str, Any]:
 def merge_candidate_info(candidate: dict[str, Any], info: Any) -> dict[str, Any]:
     if not isinstance(info, dict):
         return candidate
-    info_candidate = normalize_candidate(info)
+    info_candidate = normalize_candidate(unwrap_result_object(info))
     merged = dict(candidate)
     for key, value in info_candidate.items():
         if value and key not in {"processed", "processed_reason", "possible_matches"}:
@@ -370,7 +419,7 @@ def unwrap_items(raw: Any) -> list[Any]:
         return raw
     if not isinstance(raw, dict):
         return []
-    for key in ("items", "list", "records", "minutes", "data", "result"):
+    for key in ("items", "itemList", "item_list", "list", "records", "minutes", "data", "result"):
         value = raw.get(key)
         if isinstance(value, list):
             return value
@@ -379,6 +428,18 @@ def unwrap_items(raw: Any) -> list[Any]:
             if nested:
                 return nested
     return []
+
+
+def unwrap_result_object(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    result = raw.get("result")
+    if isinstance(result, dict):
+        return result
+    data = raw.get("data")
+    if isinstance(data, dict):
+        return data
+    return raw
 
 
 def mark_processed(candidates: list[dict[str, Any]], memory_root: Path) -> list[dict[str, Any]]:
@@ -500,7 +561,7 @@ def extract_transcript_lines_with_context(raw: Any, inherited_timestamp: str, in
     if not isinstance(raw, dict):
         return []
 
-    speaker = first_string(raw, ["speaker", "speakerName", "speaker_name", "userName", "user_name"]) or inherited_speaker
+    speaker = extract_speaker(raw) or inherited_speaker
     timestamp = first_string(raw, ["time", "timestamp", "startTime", "start_time"]) or inherited_timestamp
 
     for key in (
@@ -540,6 +601,18 @@ def format_transcript_line(text: str, timestamp: str, speaker: str) -> str:
     return f"{prefix}: {text}" if prefix else text
 
 
+def extract_speaker(raw: dict[str, Any]) -> str:
+    speaker = first_string(raw, ["speaker", "speakerName", "speaker_name", "userName", "user_name"])
+    if speaker:
+        return speaker
+    speaker_display = raw.get("speakerDisplay") or raw.get("speaker_display")
+    if isinstance(speaker_display, dict):
+        speaker = first_string(speaker_display, ["nickName", "nick_name", "name", "displayName", "display_name"])
+        if speaker:
+            return speaker
+    return first_string(raw, ["nickName", "nick_name"])
+
+
 def extract_next_token(raw: Any) -> str:
     if isinstance(raw, dict):
         for key in ("nextToken", "next_token", "nextPageToken", "next_page_token", "next"):
@@ -575,6 +648,8 @@ def normalize_keywords(raw: Any) -> list[str]:
         return []
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, dict):
+        return normalize_keywords(first_value(raw, ["keywords", "keyWords", "key_words", "items", "list"]))
     if isinstance(raw, str):
         return [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
     return [str(raw).strip()] if str(raw).strip() else []
