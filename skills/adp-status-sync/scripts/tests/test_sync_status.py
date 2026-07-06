@@ -98,6 +98,7 @@ class SyncStatusTests(unittest.TestCase):
             daily_log = Path(result["updates"][0]["daily_log"])
             self.assertTrue(daily_log.exists())
             self.assertIn("Status sync - l1-checkout", daily_log.read_text(encoding="utf-8"))
+            self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md").exists())
 
     def test_stale_reports_missing_and_old_syncs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -195,6 +196,125 @@ class SyncStatusTests(unittest.TestCase):
             daily_log = Path(result["updates"][0]["daily_log"])
             self.assertTrue(daily_log.exists())
             self.assertIn("no reliable field change", daily_log.read_text(encoding="utf-8"))
+
+    def test_updates_file_registers_actions_in_ledger_and_merges_wdr_next_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            updates_file = project_root / "updates.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "status": "in-progress",
+                                "next_actions": ["FDE-A send summary"],
+                                "actions": [
+                                    {
+                                        "owner": "FDE-A",
+                                        "workstream": "l1-checkout",
+                                        "action": "Add checkout validation evidence",
+                                        "source": "meetings/2026-07-01-sync.md#M-001",
+                                        "reason": "Meeting action",
+                                        "due": "Friday",
+                                        "closure_criteria": "Evidence linked in evidence.md",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            first = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            first_result = json.loads(first.stdout)
+            second = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            second_result = json.loads(second.stdout)
+
+            self.assertTrue(first_result["ok"])
+            self.assertEqual(len(first_result["actions_registered"]), 1)
+            self.assertEqual(second_result["actions_registered"], [])
+            self.assertEqual(len(second_result["actions_updated"]), 1)
+            ledger = project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md"
+            ledger_text = ledger.read_text(encoding="utf-8")
+            self.assertEqual(ledger_text.count("Add checkout validation evidence"), 1)
+            updated = record.read_text(encoding="utf-8")
+            self.assertIn("FDE-A send summary", updated)
+            self.assertIn("Add checkout validation evidence", updated)
+            self.assertIn("due: Friday", updated)
+
+    def test_done_action_is_removed_from_wdr_summary_but_kept_in_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root, text=RECORD.replace("- Next actions: fill missing state", "- Next actions: FDE-A: Add checkout validation evidence (due: Friday)"))
+            memory_root = project_root / "_bmad-output" / "adp" / "memory"
+            ledger = memory_root / "actions" / "action-ledger.md"
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text(
+                "\n".join(
+                    [
+                        "# Action Ledger",
+                        "",
+                        "| Action ID | Status | Owner | Workstream | Action | Source | Reason | Due / Trigger | Closure Criteria | Last Updated | Owning Workflow |",
+                        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+                        "| ACT-20260701-001 | open | FDE-A | l1-checkout | Add checkout validation evidence | meetings/2026-07-01-sync.md#M-001 | Meeting action | Friday | Evidence linked in evidence.md | 2026-07-01T09:00:00+08:00 | adp-status-sync |",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            updates_file = project_root / "close.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "action_id": "ACT-20260701-001",
+                                        "status": "done",
+                                        "source": "workstreams/l1-checkout/evidence.md#proof",
+                                        "reason": "Evidence accepted",
+                                        "closure_criteria": "Evidence linked in evidence.md",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["actions_closed"], ["ACT-20260701-001"])
+            self.assertIn("| ACT-20260701-001 | done |", ledger.read_text(encoding="utf-8"))
+            updated = record.read_text(encoding="utf-8")
+            self.assertIn("- Next actions: fill missing state", updated)
+            self.assertNotIn("FDE-A: Add checkout validation evidence (due: Friday)", updated)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ The consumers are FDE owners, the project lead, status-sync, risk/change review,
 
 - Bare paths and `{skill-root}` (e.g. `scripts/sync_meeting.py`) resolve from this skill's installed directory.
 - `{project-root}` -> the project working directory.
-- `{skill-name}` -> the skill directory's basename.
 - When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
 ## Configuration and Language
@@ -33,6 +32,8 @@ Use `communication_language` for all conversation and status output. Use `docume
 
 ## On Activation
 
+Resolve customization with `uv run {project-root}/_bmad/scripts/resolve_customization.py --skill {skill-root} --key workflow`; if unavailable, read `customize.toml` directly. Apply `{workflow.meeting_note_template}` and `{workflow.business_decision_packet_template}` to writer commands, run any `{workflow.activation_steps_prepend}` / `{workflow.activation_steps_append}` entries at their named moments, and load `{workflow.persistent_facts}` as standing context when those files exist.
+
 Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow sync when the user provides `--memory-root`.
 
 Load these schema files when present, because they define local terminology and valid destinations:
@@ -48,16 +49,15 @@ Load member hints when present from the project charter, workstream records, reg
 
 Use raw meeting evidence as the source of truth: transcript text, chat excerpts, offline notes, or a file path containing that raw content. Third-party AI summaries, including DingTalk AI Minutes summaries, may help identify the meeting and display candidate metadata, but they are not reliable enough for ADP classification because they may omit project context. Do not build the sync plan from a summary alone; ask for raw content when raw evidence is missing.
 
-When the user has not provided raw content and DingTalk access is available through `/dws` or the `dws` CLI, attempt DingTalk intake before asking for pasted content:
+When the user has not provided raw content and DingTalk access is available, run the intake pre-pass instead of hand-listing minutes:
 
-- Use only `dws minutes` commands and always include `--format json`.
-- Discover candidates with `dws minutes list all --max 10 --format json`; add `--query`, `--start`, or `--end` only when the user supplied useful project, workstream, date, or topic hints.
-- Treat a candidate as already processed when its `taskUuid`, AI Minutes URL, or same-date same-title source appears under the ADP memory root. Show time, title, taskUuid, keywords, and the processed/unprocessed reason.
-- Show only likely unprocessed candidates and ask the user to confirm the target meeting before fetching content.
-- For the confirmed meeting, fetch `dws minutes get info --id <taskUuid> --format json` and `dws minutes get transcription --id <taskUuid> --format json`; paginate transcription until complete when a next token is returned.
-- Fetch `summary` only as a navigation aid. If `transcription` is unavailable or incomplete, report the gap and ask the user for raw meeting content instead of classifying from the summary.
+```bash
+uv run "{skill-root}/scripts/dingtalk_intake.py" "{project-root}" --memory-root <memory-root> -o <intake.json>
+```
 
-Save fetched transcript or pasted raw notes under ADP memory, not only `.tmp`. Record DingTalk sources in the plan source field with the task id and evidence type, such as `DingTalk AI Minutes taskUuid=<id>; evidence=transcription`.
+Add `--query`, `--start`, or `--end` only from user-supplied project, workstream, date, or topic hints. The pre-pass lists candidates, marks processed meetings only by exact `taskUuid` or AI Minutes URL under ADP memory, emits same-date same-title memory hits as `possible_matches`, and emits processed/unprocessed reasons. Show likely unprocessed candidates and ask for confirmation unless the run supplied an exact `--task-uuid`.
+
+For an exact meeting, rerun the pre-pass with `--task-uuid <id>`. It fetches info and paginated transcription, saves the transcript under ADP memory, and reports transcript completeness. If the pre-pass returns no complete raw transcript, ask for raw meeting content rather than classifying from a summary. Record DingTalk sources in the plan source field with the task id and evidence type, such as `DingTalk AI Minutes taskUuid=<id>; evidence=transcription`.
 
 ## Classify
 
@@ -72,72 +72,43 @@ Treat the raw meeting notes as source evidence, not as the final artifact. Separ
 
 If an item is ambiguous, choose the safest classification that exposes the gap. A pending business answer is not a no-op. A decision without an accountable confirmer is open, not confirmed. A WDR update against an unknown workstream becomes an unresolved gap and should prompt `adp-workstream-register` or an id correction.
 
-An action is not closed when owner or due trigger is generic, missing, or still a raw speaker label. Use the best corrected project member name; otherwise keep the label and let the writer report the gap.
+An action is not closed when owner or due trigger is generic, missing, or still a raw speaker label. Use the best corrected project member name; otherwise keep the label and write explicit gap fields in the plan, such as `owner_gap`, `confirmer_gap`, `speaker_label_gap`, or `participant_gaps`; the writer only validates exact missing placeholders.
 
 ## Sync Plan
 
-Before writing files, produce a compact JSON plan and inspect it for closure. The script executes the plan; it does not infer business meaning.
+Before writing files, produce a compact JSON plan and inspect it for closure. Load `references/sync-plan-schema.md` whenever drafting or validating the plan. The script executes the plan; it does not infer business meaning.
 
-Required shape:
+Keep unknown fields as `TBD` only when the gap is real and should be visible. Do not omit `id`, `classification`, or `text`; use explicit gap fields such as `owner_gap`, `confirmer_gap`, `speaker_label_gap`, `participant_gaps`, or `gap`.
 
-```json
-{
-  "meeting": {
-    "date": "YYYY-MM-DD",
-    "type": "FDE internal sync",
-    "title": "Short title",
-    "source": "pasted notes, transcript, or file path",
-    "raw_evidence_path": "path to raw transcript or notes, when available",
-    "raw_evidence_label": "transcription",
-    "participants": ["Name"],
-    "summary": "One paragraph"
-  },
-  "items": [
-    {
-      "id": "M-001",
-      "classification": "action",
-      "text": "What was said or decided",
-      "affected_workstreams": ["workstream-id"],
-      "owner": "Name",
-      "due": "date or trigger",
-      "decision_type": "FDE internal decision",
-      "confirmer": "Name",
-      "status": "open",
-      "wdr_update": "Project-level WDR text when applicable",
-      "no_op_reason": "Required for no_op",
-      "packet": {
-        "background": "Why this needs business decision",
-        "decision_needed": "Question to decide",
-        "options": ["Option A", "Option B"],
-        "recommendation": "Recommended answer, if any",
-        "risks_tradeoffs": "Impact of the choice",
-        "deadline": "date or trigger",
-        "confirming_owner": "Business owner"
-      }
-    }
-  ]
-}
-```
+## Args
 
-Keep unknown fields as `TBD` only when the gap is real and should be visible. Do not omit `id`, `classification`, or `text`.
+Headless callers provide `{project-root}`, optional `--memory-root`, either exact `--task-uuid` or `--raw-evidence <path>`, optional prebuilt `--plan <plan.json>`, and one mode: `--dry-run` or `--execute`. Skip candidate confirmation only when an exact source is supplied. Return machine-readable status with touched paths, unresolved gaps, and next actions; in interactive mode, explain the same fields in prose.
 
 ## Write
 
-Run the deterministic writer after the plan is ready:
+Save the plan, then validate with a mandatory dry run before durable writes:
 
 ```bash
-uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json>
+uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json> --memory-root <memory-root> --meeting-note-template "{workflow.meeting_note_template}" --business-decision-packet-template "{workflow.business_decision_packet_template}" --dry-run -o <dry-run-report.json>
 ```
 
-Useful flags:
+Review the dry-run report for touched paths and unresolved gaps. Execute the same command without `--dry-run` only after user confirmation, or in headless mode only when the caller supplied `--execute`:
 
-- `--memory-root <path>` for non-default ADP memory.
-- `--dry-run` to preview target files without writing.
-- `-o <path>` to write the JSON execution report.
+```bash
+uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json> --memory-root <memory-root> --meeting-note-template "{workflow.meeting_note_template}" --business-decision-packet-template "{workflow.business_decision_packet_template}" -o <execute-report.json>
+```
 
-The script writes a structured meeting archive, appends the daily log, appends decision indexes and workstream decision files where applicable, appends WDR meeting-sync updates when the workstream exists, and creates Business Decision Packets for `business_decision_needed` items. Existing files are preserved; WDRs are appended, not replaced.
+The script writes a structured meeting archive, appends the daily log, appends decision indexes and workstream decision files where applicable, appends WDR meeting-sync updates when the workstream exists, creates Business Decision Packets for `business_decision_needed` items, and writes a status-sync intake file under `intake/status-sync/` when meeting items contain `classification: "action"`. Existing files are preserved; WDRs are appended, not replaced.
 
-If the script cannot run, manually create the same outputs from `assets/meeting-sync-templates/`. Preserve existing user content and report any item that could not be closed.
+Meeting actions are not written directly to the action ledger. After sync, run the generated intake through status-sync:
+
+```bash
+adp-status-sync update "{project-root}" --updates-file "<generated-intake-file>"
+```
+
+If the runner requires direct script execution, resolve the installed `adp-status-sync` skill root from the runner first; do not invent an unresolved placeholder.
+
+If the script cannot run, manually create the same outputs from `{workflow.meeting_note_template}` and `{workflow.business_decision_packet_template}`. Preserve existing user content and report any item that could not be closed.
 
 ## Output Contract
 
@@ -146,10 +117,13 @@ After syncing, report:
 - the meeting archive path
 - the durable raw evidence path, when raw evidence was available
 - daily log, decision log, WDRs, workstream decision files, and Business Decision Packets touched
+- generated status-sync intake files for meeting actions
 - unresolved gaps, especially missing workstreams, missing owners, missing due triggers, unresolved speaker labels, missing confirmers, or no-op items without rationale
 - next useful workflow: usually `adp-status-sync` for cadence updates, `adp-risk-dependency-change-review` for open risk/change/business decisions, or `adp-workstream-register` for unknown workstreams
 
 Do not call a meeting closed because a note exists. It is closed when every item has a classification, destination, owner where needed, and either a durable write or a visible gap.
+
+At the terminal stage after this report, run `{workflow.on_complete}` when non-empty.
 
 ## Guardrails
 

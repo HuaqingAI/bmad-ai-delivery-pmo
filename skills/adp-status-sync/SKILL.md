@@ -47,6 +47,8 @@ Run the deterministic writer after the status delta is clear:
 uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --id <workstream-id>
 ```
 
+If `uv` or Python execution is unavailable, manually edit only the targeted WDR volatile fields and append `daily/YYYY-MM-DD.md`, preserving all other content.
+
 Add only fields that are reliable:
 
 - `--status "<status>"`
@@ -61,13 +63,39 @@ Add only fields that are reliable:
 - `--memory-root <path>` for non-default ADP memory
 - `--dry-run` to preview without writing
 
-For multiple workstreams, prefer a JSON updates file and run:
+For multiple workstreams or workflow-produced action intake, prefer a JSON updates file and run:
 
 ```bash
 uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --updates-file <path>
 ```
 
-The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, and returns JSON with changed fields, unresolved gaps, and action candidates.
+The updates file may include structured `actions` alongside legacy `next_actions`:
+
+```json
+{
+  "updates": [
+    {
+      "id": "l1-checkout",
+      "next_actions": ["FDE-A add checkout validation evidence"],
+      "actions": [
+        {
+          "owner": "FDE-A",
+          "workstream": "l1-checkout",
+          "action": "Add checkout validation evidence",
+          "source": "meetings/sync-notes-20260701.md#M-001",
+          "reason": "Meeting action",
+          "due": "Friday",
+          "status": "open",
+          "closure_criteria": "Evidence is linked in evidence.md",
+          "owning_workflow": "adp-meeting-sync"
+        }
+      ]
+    }
+  ]
+}
+```
+
+The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, upserts `actions/action-ledger.md`, and returns JSON with changed fields, action ledger path, actions registered/updated/closed, unresolved gaps, and action candidates. Legacy `next_actions` remain supported; structured `actions` are the durable source for the FDE action list.
 
 ## Staleness
 
@@ -95,6 +123,7 @@ After a sync, report:
 
 - workstreams updated or found stale
 - fields changed and fields intentionally left untouched
+- action ledger path and actions registered, updated, or closed
 - action candidates grouped by owner when available
 - unresolved questions that block a reliable update
 - heavier ADP workflows that should run next, if any
@@ -105,5 +134,6 @@ Do not call a workstream ready because its status field was refreshed. Readiness
 
 - Update only volatile project-status fields unless the user explicitly asks for deeper review.
 - BMM artifacts remain the source of truth; status sync stores links and short management-level deltas only.
+- `actions/action-ledger.md` is the ADP action source of truth. `views/fde-actions.md` is a derived view, and WDR `Next actions` is a merged active-action summary.
 - Preserve existing user content outside the targeted WDR fields and daily-log append.
 - Make no-op explicit when a status note contains no reliable change.

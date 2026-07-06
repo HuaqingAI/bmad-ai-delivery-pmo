@@ -636,3 +636,4 @@ Packaging result:
 1. Run **Validate Module (VM)** for a quality review beyond structural validation, checking capability descriptions, ordering, and agent roster drift.
 2. Install or update ADP in a target project by running `adp-setup`.
 3. Start operational use with `adp-project-kickoff`, then `adp-workstream-register`, then the checkpoint/status/meeting/readiness workflows as delivery progresses.
+4. Execute the Action Ledger enhancement plan in `skills/reports/adp-action-ledger-implementation-plan.md` to make actions a first-class ADP fact source while keeping `views/fde-actions.md` as a derived operating view.

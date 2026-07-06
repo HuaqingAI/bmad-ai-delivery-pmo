@@ -15,9 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "assets" / "meeting-sync-templates"
-MEETING_TEMPLATE = TEMPLATE_ROOT / "meeting-note.md"
-PACKET_TEMPLATE = TEMPLATE_ROOT / "business-decision-packet.md"
+SKILL_ROOT = Path(__file__).resolve().parents[1]
 
 CLASSIFICATIONS = {
     "fact",
@@ -32,23 +30,6 @@ DECISION_TYPE_DEFAULTS = {
     "decision": "FDE internal decision",
     "business_decision_needed": "Business decision",
 }
-
-SPEAKER_LABEL_RE = re.compile(r"(发言人\s*\d+|说话人\s*\d+|speaker\s*\d+)", re.IGNORECASE)
-GENERIC_PERSON_TERMS = {
-    "owner",
-    "fde",
-    "pm",
-    "负责人",
-    "接口人",
-    "参会人员",
-    "项目组",
-    "管理层",
-    "各条线",
-    "相关条线",
-    "对应",
-    "团队",
-}
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -69,6 +50,16 @@ def parse_args() -> argparse.Namespace:
         help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report writes without modifying files.")
+    parser.add_argument(
+        "--meeting-note-template",
+        required=True,
+        help="Meeting archive template path. Relative paths resolve from the skill root.",
+    )
+    parser.add_argument(
+        "--business-decision-packet-template",
+        required=True,
+        help="Business Decision Packet template path. Relative paths resolve from the skill root.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
@@ -103,6 +94,7 @@ def main() -> int:
     try:
         plan = load_plan(args.plan)
         normalized = normalize_plan(plan)
+        templates = resolve_templates(args.meeting_note_template, args.business_decision_packet_template)
     except ValueError as exc:
         emit({"ok": False, "error": str(exc)}, args.output)
         return 2
@@ -122,7 +114,7 @@ def main() -> int:
     if args.verbose:
         print(f"Using memory root: {memory_root}", file=sys.stderr)
 
-    result = apply_plan(project_root, memory_root, normalized, args.dry_run)
+    result = apply_plan(project_root, memory_root, normalized, templates, args.dry_run)
     emit(result, args.output)
     return 0 if result["ok"] else 1
 
@@ -132,6 +124,24 @@ def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
     if not memory_root.is_absolute():
         memory_root = project_root / memory_root
     return memory_root.resolve()
+
+
+def resolve_templates(meeting_template: str, packet_template: str) -> dict[str, Path]:
+    templates = {
+        "meeting_note": resolve_skill_path(meeting_template),
+        "business_decision_packet": resolve_skill_path(packet_template),
+    }
+    for label, path in templates.items():
+        if not path.exists() or not path.is_file():
+            raise ValueError(f"{label} template file not found: {path}")
+    return templates
+
+
+def resolve_skill_path(raw_path: str) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = SKILL_ROOT / path
+    return path.resolve()
 
 
 def load_plan(raw_plan: str) -> dict[str, Any]:
@@ -178,6 +188,10 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         item["status"] = string_value(item.get("status")) or default_status(item["classification"])
         item["wdr_update"] = string_value(item.get("wdr_update"))
         item["no_op_reason"] = string_value(item.get("no_op_reason"))
+        item["owner_gap"] = string_value(item.get("owner_gap"))
+        item["confirmer_gap"] = string_value(item.get("confirmer_gap"))
+        item["speaker_label_gap"] = string_value(item.get("speaker_label_gap"))
+        item["gap"] = string_value(item.get("gap"))
         item["packet"] = item.get("packet") if isinstance(item.get("packet"), dict) else {}
         normalized_items.append(item)
 
@@ -190,6 +204,7 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "raw_evidence_path": string_value(meeting.get("raw_evidence_path")),
             "raw_evidence_label": string_value(meeting.get("raw_evidence_label")) or "raw-evidence",
             "participants": normalize_people(meeting.get("participants")),
+            "participant_gaps": normalize_gap_list(meeting.get("participant_gaps")),
             "summary": string_value(meeting.get("summary")) or "TBD",
         },
         "items": normalized_items,
@@ -222,7 +237,13 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
     return errors
 
 
-def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+def apply_plan(
+    project_root: Path,
+    memory_root: Path,
+    plan: dict[str, Any],
+    templates: dict[str, Path],
+    dry_run: bool,
+) -> dict[str, Any]:
     meeting = plan["meeting"]
     items = plan["items"]
     now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -234,6 +255,7 @@ def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_
         "decision_logs": [],
         "raw_evidence_files": [],
         "business_decision_packets": [],
+        "status_sync_intake_files": [],
         "workstream_records": [],
         "workstream_decisions": [],
     }
@@ -250,10 +272,8 @@ def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_
         touched["raw_evidence_files"].append(str(raw_evidence_path))
     if raw_evidence_gap:
         unresolved_gaps.append(f"meeting: {raw_evidence_gap}")
-
-    for participant in meeting["participants"]:
-        if is_unresolved_speaker_label(participant):
-            unresolved_gaps.append(f"meeting: participant uses unresolved speaker label {participant}")
+    for gap in meeting["participant_gaps"]:
+        unresolved_gaps.append(f"meeting: {gap}")
 
     for item in items:
         if item["classification"] == "business_decision_needed":
@@ -267,7 +287,7 @@ def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_
         unresolved_gaps,
     )
     meeting_content = render_template(
-        MEETING_TEMPLATE,
+        templates["meeting_note"],
         {
             "MEETING_TITLE": meeting["title"],
             "MEETING_DATE": meeting["date"],
@@ -304,7 +324,15 @@ def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_
 
     for item in items:
         if item["classification"] == "business_decision_needed":
-            packet_path = create_business_packet(memory_root, meeting_path, meeting, item, now, dry_run)
+            packet_path = create_business_packet(
+                memory_root,
+                meeting_path,
+                meeting,
+                item,
+                templates["business_decision_packet"],
+                now,
+                dry_run,
+            )
             touched["business_decision_packets"].append(str(packet_path))
             item_destinations.setdefault(item["id"], []).append(rel_to_memory(memory_root, packet_path))
 
@@ -334,6 +362,16 @@ def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_
                         f"{item['id']}: WDR update references missing workstream {workstream_id}"
                     )
 
+    status_sync_intake = build_status_sync_intake(memory_root, meeting_path, meeting, items)
+    if status_sync_intake:
+        intake_path = status_sync_intake_path(memory_root, meeting, dry_run)
+        write_file(
+            intake_path,
+            json.dumps(status_sync_intake, ensure_ascii=False, indent=2),
+            dry_run,
+        )
+        touched["status_sync_intake_files"].append(str(intake_path))
+
     return {
         "ok": True,
         "dry_run": dry_run,
@@ -341,7 +379,7 @@ def apply_plan(project_root: Path, memory_root: Path, plan: dict[str, Any], dry_
         "meeting": meeting,
         "touched": dedupe_touched(touched),
         "unresolved_gaps": sorted(set(unresolved_gaps)),
-        "next_actions": next_actions(unresolved_gaps, items),
+        "next_actions": next_actions(project_root, memory_root, items, touched["status_sync_intake_files"]),
     }
 
 
@@ -352,6 +390,7 @@ def ensure_directories(memory_root: Path, dry_run: bool) -> None:
         "daily",
         "decisions",
         "decisions/business-decision-packets",
+        "intake/status-sync",
         "workstreams",
     ]:
         target = memory_root / rel
@@ -453,20 +492,24 @@ def item_gap(item: dict[str, Any]) -> str:
     if item["classification"] in {"action", "wdr_update"} and not item["affected_workstreams"]:
         gaps.append("affected workstream is missing")
     if item["classification"] == "action":
-        if is_generic_person(item["owner"]):
-            gaps.append("action owner is missing or generic")
+        if is_missing_owner(item["owner"]):
+            gaps.append("action owner is missing")
         if is_missing_due(item["due"]):
             gaps.append("action due trigger is missing")
-    if is_unresolved_speaker_label(item["owner"]):
-        gaps.append("owner uses unresolved speaker label")
     if item["classification"] in {"decision", "business_decision_needed"} and item["confirmer"] == "TBD":
         gaps.append("confirmer is missing")
-    if item["classification"] in {"decision", "business_decision_needed"} and is_unresolved_speaker_label(
-        item["confirmer"],
-    ):
-        gaps.append("confirmer uses unresolved speaker label")
     if item["classification"] == "wdr_update" and not item["wdr_update"]:
         gaps.append("wdr_update text is missing")
+    gaps.extend(
+        gap
+        for gap in [
+            item["owner_gap"],
+            item["confirmer_gap"],
+            item["speaker_label_gap"],
+            item["gap"],
+        ]
+        if gap
+    )
     return "; ".join(gaps)
 
 
@@ -604,6 +647,7 @@ def create_business_packet(
     meeting_path: Path,
     meeting: dict[str, Any],
     item: dict[str, Any],
+    template_path: Path,
     created_at: str,
     dry_run: bool,
 ) -> Path:
@@ -613,7 +657,7 @@ def create_business_packet(
     if not isinstance(packet_path, Path):
         packet_path = business_packet_path(memory_root, meeting, item, dry_run)
     content = render_template(
-        PACKET_TEMPLATE,
+        template_path,
         {
             "TITLE": title,
             "CREATED_AT": created_at,
@@ -699,6 +743,73 @@ def should_append_wdr(item: dict[str, Any]) -> bool:
     return item["classification"] in {"fact", "action", "wdr_update", "decision"} and bool(
         item["affected_workstreams"]
     )
+
+
+def build_status_sync_intake(
+    memory_root: Path,
+    meeting_path: Path,
+    meeting: dict[str, Any],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    updates_by_workstream: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if item["classification"] != "action":
+            continue
+        workstreams = item["affected_workstreams"] or ["tbd"]
+        source = f"{rel_to_memory(memory_root, meeting_path)}#{item['id']}"
+        for workstream_id in workstreams:
+            normalized_workstream = normalize_workstreams(workstream_id)[0] if workstream_id != "tbd" else "tbd"
+            update = updates_by_workstream.setdefault(
+                normalized_workstream,
+                {
+                    "id": normalized_workstream,
+                    "source": "adp-meeting-sync",
+                    "next_actions": [],
+                    "actions": [],
+                },
+            )
+            action_text = item["text"]
+            if action_text not in update["next_actions"]:
+                update["next_actions"].append(action_text)
+            update["actions"].append(
+                {
+                    "owner": item["owner"],
+                    "workstream": "TBD" if normalized_workstream == "tbd" else normalized_workstream,
+                    "action": action_text,
+                    "source": source,
+                    "reason": item["wdr_update"] or f"Meeting action from {meeting['title']}",
+                    "due": item["due"],
+                    "status": normalize_action_status(item["status"]),
+                    "closure_criteria": string_value(item.get("closure_criteria")) or "TBD",
+                    "owning_workflow": "adp-meeting-sync",
+                }
+            )
+    if not updates_by_workstream:
+        return {}
+    return {
+        "generated_by": "adp-meeting-sync",
+        "meeting": {
+            "date": meeting["date"],
+            "title": meeting["title"],
+            "source": meeting["source"],
+            "archive": rel_to_memory(memory_root, meeting_path),
+        },
+        "updates": list(updates_by_workstream.values()),
+    }
+
+
+def normalize_action_status(raw: Any) -> str:
+    status = string_value(raw).lower().replace("_", "-")
+    if status in {"open", "in-progress", "blocked", "done", "cancelled"}:
+        return status
+    if status in {"in progress", "inprogress"}:
+        return "in-progress"
+    return "open"
+
+
+def status_sync_intake_path(memory_root: Path, meeting: dict[str, Any], dry_run: bool) -> Path:
+    filename = f"{meeting['date']}-{slugify(meeting['title'])}-actions.json"
+    return unique_path(memory_root / "intake" / "status-sync", filename, dry_run)
 
 
 def write_file(path: Path, content: str, dry_run: bool) -> None:
@@ -790,8 +901,16 @@ def normalize_people(raw: Any) -> list[str]:
     return [part for part in parts if part]
 
 
-def is_unresolved_speaker_label(value: str) -> bool:
-    return bool(SPEAKER_LABEL_RE.search(string_value(value)))
+def normalize_gap_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = [string_value(item) for item in raw]
+    else:
+        values = [string_value(raw)]
+    return [value for value in values if value]
 
 
 def is_missing_due(value: str) -> bool:
@@ -799,19 +918,9 @@ def is_missing_due(value: str) -> bool:
     return not due or due == "TBD"
 
 
-def is_generic_person(value: str) -> bool:
-    person = string_value(value)
-    if not person or person == "TBD":
-        return True
-    if is_unresolved_speaker_label(person):
-        return True
-    normalized = re.sub(r"[\s/、,，;；]+", " ", person.lower()).strip()
-    if not normalized:
-        return True
-    tokens = [token for token in normalized.split(" ") if token]
-    if not tokens:
-        return True
-    return all(any(term.lower() in token for term in GENERIC_PERSON_TERMS) for token in tokens)
+def is_missing_owner(value: str) -> bool:
+    owner = string_value(value)
+    return not owner or owner == "TBD"
 
 
 def string_value(value: Any) -> str:
@@ -843,17 +952,36 @@ def dedupe_touched(touched: dict[str, list[str]]) -> dict[str, list[str]]:
     return {key: sorted(set(values)) for key, values in touched.items()}
 
 
-def next_actions(unresolved_gaps: list[str], items: list[dict[str, Any]]) -> list[str]:
+def next_actions(
+    project_root: Path,
+    memory_root: Path,
+    items: list[dict[str, Any]],
+    status_sync_intake_files: list[str],
+) -> list[str]:
     actions: list[str] = []
-    if any("missing workstream" in gap for gap in unresolved_gaps):
+    for path in status_sync_intake_files:
+        actions.append(f'Run adp-status-sync update "{project_root}" --updates-file "{path}" to register meeting actions.')
+    if has_missing_workstream_route(memory_root, items):
         actions.append("Run adp-workstream-register or correct workstream ids for missing WDR references.")
     if any(item["classification"] == "business_decision_needed" for item in items):
         actions.append("Run adp-risk-dependency-change-review for open business decision packets.")
-    if any(item["classification"] in {"action", "wdr_update"} for item in items):
+    if not status_sync_intake_files and any(item["classification"] in {"action", "wdr_update"} for item in items):
         actions.append("Run adp-status-sync to refresh recurring status views from the new meeting updates.")
     if not actions:
         actions.append("Review the meeting archive and continue with the next ADP workflow only if gaps remain.")
     return actions
+
+
+def has_missing_workstream_route(memory_root: Path, items: list[dict[str, Any]]) -> bool:
+    for item in items:
+        if item["classification"] in {"action", "wdr_update"} and not item["affected_workstreams"]:
+            return True
+        if should_append_wdr(item):
+            for workstream_id in item["affected_workstreams"]:
+                record_path = memory_root / "workstreams" / workstream_id / "delivery-record.md"
+                if not record_path.exists():
+                    return True
+    return False
 
 
 def emit(result: dict[str, Any], output: str | None) -> None:

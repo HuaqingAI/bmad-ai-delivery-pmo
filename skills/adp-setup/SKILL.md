@@ -1,80 +1,99 @@
 ---
-name: "adp-setup"
+name: adp-setup
 description: Sets up AI Delivery PMO module in a project. Use when the user requests to 'install adp module', 'configure AI Delivery PMO', or 'setup AI Delivery PMO'.
 ---
 
 # Module Setup
 
+## Resolution rules
+
+- Bare paths and `{skill-root}` (e.g. `assets/module.yaml` or `scripts/merge-config.py`) resolve from this skill's installed directory.
+- `{project-root}` -> the project working directory.
+- `{skill-name}` -> the skill directory's basename.
+
 ## Overview
 
-Installs and configures a BMad module into a project. Module identity (name, code, version) comes from `{skill-root}/assets/module.yaml`. Collects user preferences and writes them to three files:
+Installs and configures a BMad module into a project. Module identity, prompts, defaults, and greeting come from `assets/module.yaml`. Setup writes:
 
-- **`{project-root}/_bmad/config.yaml`** — shared project config: core settings at root (e.g. `output_folder`, `document_output_language`) plus a section per module with metadata and module-specific values. User-only keys (`user_name`, `communication_language`) are **never** written here.
-- **`{project-root}/_bmad/config.user.yaml`** — personal settings intended to be gitignored: `user_name`, `communication_language`, and any module variable marked `user_setting: true` in `{skill-root}/assets/module.yaml`. These values live exclusively here.
-- **`{project-root}/_bmad/module-help.csv`** — registers module capabilities for the help system.
+- `{project-root}/_bmad/config.yaml` - shared project config: root core settings plus an `adp` section. User-only keys (`user_name`, `communication_language`) are never written here.
+- `{project-root}/_bmad/config.user.yaml` - personal settings intended to be gitignored: `user_name`, `communication_language`, and module variables marked `user_setting: true`.
+- `{project-root}/_bmad/module-help.csv` - module capabilities for the help system.
 
-Both config scripts use an anti-zombie pattern — existing entries for this module are removed before writing fresh ones, so stale values never persist.
-
-`{project-root}` is a **literal token** in config _values_ (the data written into the files above) — never substitute it there. It signals to the consuming LLM that the value is relative to the project root, not the skill root. **This does not apply to the filesystem path _arguments_ passed to the scripts below** (the `--*-path`, `--*-dir`, and `--target` arguments): those are real paths, so you **must** resolve `{project-root}` to the actual project root before running, or the scripts will write to a literal `{project-root}/` directory under the skill folder. The scripts reject an unresolved token with an error.
+The literal `{project-root}` token stays in config values. Filesystem path arguments (`--*-path`, `--*-dir`, `--target`, and the project root positional argument) must use resolved real paths; scripts reject unresolved `{project-root}` in those arguments.
 
 ## On Activation
 
-1. Read `{skill-root}/assets/module.yaml` for module metadata and variable definitions (the `code` field is the module identifier)
-2. Check if `{project-root}/_bmad/config.yaml` exists — if a section matching the module's code is already present, inform the user this is an update
-3. Check for per-module configuration at `{project-root}/_bmad/adp/config.yaml` and `{project-root}/_bmad/core/config.yaml`. If either file exists:
-   - If `{project-root}/_bmad/config.yaml` does **not** yet have a section for this module: this is a **fresh install**. Inform the user that installer config was detected and values will be consolidated into the new format.
-   - If `{project-root}/_bmad/config.yaml` **already** has a section for this module: this is a **legacy migration**. Inform the user that legacy per-module config was found alongside existing config, and legacy values will be used as fallback defaults.
-   - In both cases, per-module config files and directories will be cleaned up after setup.
+Resolve the actual project root, then inspect install state:
 
-If the user provides arguments (e.g. `accept all defaults`, `--headless`, or inline values like `user name is BMad, I speak Swahili`), map any provided values to config keys, use defaults for the rest, and skip interactive prompting. Still display the full confirmation summary at the end.
+```bash
+uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml"
+```
+
+Use the JSON as the source of truth for module metadata, `install_state`, `effective_defaults`, `default_sources`, `answers_template`, `missing_required_inputs`, `headless_ready`, and `directories_to_create`. If `status` is not `success`, surface the error and stop. If arguments provide values (for example `accept all defaults`, `--headless`, or `user name is BMad, I speak Swahili`), overlay them on `answers_template` and skip interactive prompting.
+
+## Headless Contract
+
+`--headless`/`-H` is non-interactive. It may write without confirmation when the actual project root is known, `inspect-install-state.py` succeeds, and no `missing_required_inputs` remain after applying inline values. Optional inputs are inline core/module values and an explicit project root. If a required value or filesystem path cannot be resolved, do not write.
+
+In headless mode, stdout is one JSON object and no prose:
+
+```json
+{
+  "status": "complete|blocked|error",
+  "install_state": "fresh_install|fresh_install_with_legacy|update|legacy_migration",
+  "config_path": "<resolved project root>/_bmad/config.yaml",
+  "user_config_path": "<resolved project root>/_bmad/config.user.yaml",
+  "help_path": "<resolved project root>/_bmad/module-help.csv",
+  "help_rows_added": 0,
+  "legacy_configs_deleted": [],
+  "legacy_csvs_deleted": [],
+  "directories_to_create": [],
+  "directories_created": [],
+  "directories_existing": [],
+  "legacy_directories_removed": [],
+  "legacy_files_removed_count": 0,
+  "unresolved_gaps": [],
+  "error": null
+}
+```
+
+Use `status: "blocked"` with `unresolved_gaps` when input is missing. Use `status: "error"` with `error` when a script fails. Interactive mode reports the same script results as a human summary.
 
 ## Collect Configuration
 
-Ask the user for values. Show defaults in brackets. Present all values together so the user can respond once with only the values they want to change (e.g. "change language to Swahili, rest are fine"). Never tell the user to "press enter" or "leave blank" — in a chat interface they must type something to respond.
-
-**Default priority** (highest wins): existing new config values > legacy config values > `{skill-root}/assets/module.yaml` defaults. When legacy configs exist, read them and use matching values as defaults instead of `module.yaml` defaults. Only keys that match the current schema are carried forward — changed or removed keys are ignored.
-
-**Core config** (only if no core keys exist yet): `user_name` (default: BMad), `communication_language` and `document_output_language` (default: English — ask as a single language question, both keys get the same answer), `output_folder` (default: `{project-root}/_bmad-output`). Of these, `user_name` and `communication_language` are written exclusively to `config.user.yaml`. The rest go to `config.yaml` at root and are shared across all modules.
-
-**Module config**: Read each variable in `{skill-root}/assets/module.yaml` that has a `prompt` field. Ask using that prompt with its default value (or legacy value if available).
+Use `effective_defaults`, `default_sources`, and `missing_required_inputs` from the inspect JSON. Ask once for missing values or overrides, showing computed defaults in brackets; never tell the user to "press enter" or "leave blank" in chat.
 
 ## Write Files
 
-Write a temp JSON file with the collected answers structured as `{"core": {...}, "module": {...}}` (omit `core` if it already exists). Values inside this JSON keep the literal `{project-root}` token. Then run both scripts — they can run in parallel since they write to different files.
+Write a temp JSON file from `answers_template` overlaid with collected values. Values inside this JSON keep the literal `{project-root}` token.
 
-In the commands below, replace `{project-root}` in every path argument with the actual project root (e.g. `/home/me/myapp`) before running — these are filesystem paths, not config values.
+In the commands below, replace `{project-root}` in every path argument with the actual project root before running; these are filesystem paths, not config values.
 
 ```bash
-python3 "{skill-root}/scripts/merge-config.py" --config-path "{project-root}/_bmad/config.yaml" --user-config-path "{project-root}/_bmad/config.user.yaml" --module-yaml "{skill-root}/assets/module.yaml" --answers {temp-file} --legacy-dir "{project-root}/_bmad"
-python3 "{skill-root}/scripts/merge-help-csv.py" --target "{project-root}/_bmad/module-help.csv" --source "{skill-root}/assets/module-help.csv" --legacy-dir "{project-root}/_bmad" --module-code adp
+uv run "{skill-root}/scripts/merge-config.py" --config-path "{project-root}/_bmad/config.yaml" --user-config-path "{project-root}/_bmad/config.user.yaml" --module-yaml "{skill-root}/assets/module.yaml" --answers {temp-file} --legacy-dir "{project-root}/_bmad" --create-output-dirs
+uv run "{skill-root}/scripts/merge-help-csv.py" --target "{project-root}/_bmad/module-help.csv" --source "{skill-root}/assets/module-help.csv" --legacy-dir "{project-root}/_bmad" --module-code adp
 ```
 
-Both scripts output JSON to stdout with results. If either exits non-zero, surface the error and stop. The scripts automatically read legacy config values as fallback defaults, then delete the legacy files after a successful merge. Check `legacy_configs_deleted` and `legacy_csvs_deleted` in the output to confirm cleanup. Execute skill-owned scripts with `{skill-root}/scripts/...`; do not rely on `./scripts/...`, because shell commands usually run from `{project-root}`.
+Both merge scripts output JSON to stdout. If either exits non-zero, surface the error and stop. Check `legacy_configs_deleted`, `legacy_csvs_deleted`, `directories_to_create`, and `directories_created` in the output. Execute skill-owned scripts with `uv run "{skill-root}/scripts/..."`; do not rely on dot-prefixed script paths, because shell commands usually run from `{project-root}`.
 
-Run `{skill-root}/scripts/merge-config.py --help` or `{skill-root}/scripts/merge-help-csv.py --help` for full usage.
-
-## Create Output Directories
-
-After writing config, create any output directories that were configured. For filesystem operations only (such as creating directories), resolve the `{project-root}` token to the actual project root and create each path-type value from `config.yaml` that does not yet exist — this includes `output_folder` and any module variable whose value starts with `{project-root}/`. The paths stored in the config files must continue to use the literal `{project-root}` token; only the directories on disk should use the resolved paths. Use `mkdir -p` or equivalent to create the full path.
+Run `uv run "{skill-root}/scripts/inspect-install-state.py" --help`, `uv run "{skill-root}/scripts/merge-config.py" --help`, or `uv run "{skill-root}/scripts/merge-help-csv.py" --help` for full usage.
 
 ## Cleanup Legacy Directories
 
-After both merge scripts complete successfully, remove the installer's package directories. Skills and agents in these directories are already installed at `.claude/skills/` — the `_bmad/` directory should only contain config files.
-
-As with the merge scripts, replace `{project-root}` in the `--bmad-dir` and `--skills-dir` path arguments with the actual project root before running.
+After both merge scripts complete successfully, remove the installer's package directories. Skills and agents in these directories are already installed at `{project-root}/.claude/skills/`; `{project-root}/_bmad/` should only contain config files.
 
 ```bash
-python3 "{skill-root}/scripts/cleanup-legacy.py" --bmad-dir "{project-root}/_bmad" --module-code adp --also-remove _config --skills-dir "{project-root}/.claude/skills"
+uv run "{skill-root}/scripts/cleanup-legacy.py" --bmad-dir "{project-root}/_bmad" --module-code adp --also-remove _config --skills-dir "{project-root}/.claude/skills"
 ```
 
-The script verifies that every skill in the legacy directories exists at `.claude/skills/` before removing anything. Directories without skills (like `_config/`) are removed directly. If the script exits non-zero, surface the error and stop. Missing directories (already cleaned by a prior run) are not errors — the script is idempotent.
+The script verifies that every skill in the legacy directories exists at `.claude/skills/` before removing anything. Missing directories are not errors. If the script exits non-zero, surface the error and stop.
 
-Check `directories_removed` and `files_removed_count` in the JSON output for the confirmation step. Run `{skill-root}/scripts/cleanup-legacy.py --help` for full usage.
+Run `uv run "{skill-root}/scripts/cleanup-legacy.py" --help` for full usage.
 
 ## Confirm
 
-Use the script JSON output to display what was written — config values set (written to `config.yaml` at root for core, module section for module values), user settings written to `config.user.yaml` (`user_keys` in result), help entries added, fresh install vs update. If legacy files were deleted, mention the migration. If legacy directories were removed, report the count and list (e.g. "Cleaned up 106 installer package files from bmb/, core/, \_config/ — skills are installed at .claude/skills/"). Then display the `module_greeting` from `{skill-root}/assets/module.yaml` to the user.
+Use the inspect, merge, help, and cleanup JSON to report install state, config paths, user keys written, help rows added, output directories created or already present, legacy files deleted, and legacy package cleanup counts. Then display `module_greeting` from the inspect JSON.
 
 ## Outcome
 
-Once the user's `user_name` and `communication_language` are known (from collected input, arguments, or existing config), use them consistently for the remainder of the session: address the user by their configured name and communicate in their configured `communication_language`.
+Once `user_name` and `communication_language` are known from collected input, arguments, or existing config, use them for the remainder of the session.

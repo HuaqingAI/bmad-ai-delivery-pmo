@@ -7,6 +7,9 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "sync_meeting.py"
+SKILL_ROOT = SCRIPT.parents[1]
+DEFAULT_MEETING_TEMPLATE = SKILL_ROOT / "assets" / "meeting-sync-templates" / "meeting-note.md"
+DEFAULT_PACKET_TEMPLATE = SKILL_ROOT / "assets" / "meeting-sync-templates" / "business-decision-packet.md"
 
 
 class SyncMeetingTests(unittest.TestCase):
@@ -14,7 +17,34 @@ class SyncMeetingTests(unittest.TestCase):
         plan_path = project_root / "plan.json"
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         completed = subprocess.run(
-            [sys.executable, str(SCRIPT), str(project_root), "--plan", str(plan_path)],
+            [
+                sys.executable,
+                str(SCRIPT),
+                str(project_root),
+                "--plan",
+                str(plan_path),
+                "--meeting-note-template",
+                str(DEFAULT_MEETING_TEMPLATE),
+                "--business-decision-packet-template",
+                str(DEFAULT_PACKET_TEMPLATE),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return json.loads(completed.stdout)
+
+    def run_script_with_args(self, project_root: Path, plan: dict, *args: str) -> dict:
+        plan_path = project_root / "plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        command_args = list(args)
+        if "--meeting-note-template" not in command_args:
+            command_args.extend(["--meeting-note-template", str(DEFAULT_MEETING_TEMPLATE)])
+        if "--business-decision-packet-template" not in command_args:
+            command_args.extend(["--business-decision-packet-template", str(DEFAULT_PACKET_TEMPLATE)])
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), str(project_root), "--plan", str(plan_path), *command_args],
             check=True,
             capture_output=True,
             text=True,
@@ -96,7 +126,14 @@ class SyncMeetingTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertTrue(result["touched"]["meeting_archives"])
+            self.assertTrue(result["touched"]["status_sync_intake_files"])
             self.assertTrue((memory_root / "daily" / "2026-07-01.md").exists())
+            intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(intake["updates"][0]["id"], "l1-checkout")
+            self.assertEqual(intake["updates"][0]["source"], "adp-meeting-sync")
+            self.assertEqual(intake["updates"][0]["actions"][0]["owner"], "FDE-A")
+            self.assertEqual(intake["updates"][0]["actions"][0]["source"], "meetings/2026-07-01-fde-internal-sync-checkout-blockers.md#M-001")
+            self.assertIn("--updates-file", result["next_actions"][0])
             decision_log = (memory_root / "decisions" / "decision-log.md").read_text(encoding="utf-8")
             self.assertIn("Choose checkout fallback copy", decision_log)
             self.assertTrue(result["touched"]["business_decision_packets"])
@@ -124,6 +161,7 @@ class SyncMeetingTests(unittest.TestCase):
                     "raw_evidence_path": str(raw),
                     "raw_evidence_label": "transcription",
                     "participants": ["发言人 1"],
+                    "participant_gaps": ["participant uses unresolved speaker label 发言人 1"],
                     "summary": "Needs cleanup.",
                 },
                 "items": [
@@ -133,6 +171,7 @@ class SyncMeetingTests(unittest.TestCase):
                         "text": "Someone needs to follow up.",
                         "affected_workstreams": ["l1-checkout"],
                         "owner": "各条线 FDE owner",
+                        "owner_gap": "action owner is generic",
                     },
                     {
                         "id": "M-002",
@@ -153,7 +192,7 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual("raw transcript", raw_copy.read_text(encoding="utf-8"))
             gaps = "\n".join(result["unresolved_gaps"])
             self.assertIn("participant uses unresolved speaker label", gaps)
-            self.assertIn("action owner is missing or generic", gaps)
+            self.assertIn("action owner is generic", gaps)
             self.assertIn("action due trigger is missing", gaps)
             decision_log = (memory_root / "decisions" / "decision-log.md").read_text(encoding="utf-8")
             self.assertNotIn("| TBD | TBD | TBD | TBD | TBD | TBD | open | TBD |", decision_log)
@@ -174,7 +213,17 @@ class SyncMeetingTests(unittest.TestCase):
             )
 
             completed = subprocess.run(
-                [sys.executable, str(SCRIPT), str(project_root), "--plan", str(plan_path)],
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--plan",
+                    str(plan_path),
+                    "--meeting-note-template",
+                    str(DEFAULT_MEETING_TEMPLATE),
+                    "--business-decision-packet-template",
+                    str(DEFAULT_PACKET_TEMPLATE),
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -185,6 +234,111 @@ class SyncMeetingTests(unittest.TestCase):
             result = json.loads(completed.stdout)
             self.assertFalse(result["ok"])
             self.assertIn("no_op requires no_op_reason", "\n".join(result["validation_errors"]))
+
+    def test_sync_without_actions_does_not_write_status_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-03",
+                    "type": "FDE internal sync",
+                    "title": "Facts only",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "No actions.",
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "fact",
+                        "text": "Checkout validation is running.",
+                        "affected_workstreams": ["l1-checkout"],
+                    }
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["touched"]["status_sync_intake_files"], [])
+            self.assertEqual(list((memory_root / "intake" / "status-sync").glob("*.json")), [])
+
+    def test_missing_workstream_next_action_routes_from_item_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-04",
+                    "type": "FDE internal sync",
+                    "title": "Missing workstream",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "Action needs a workstream.",
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "action",
+                        "text": "FDE-A will find the owning workstream.",
+                        "owner": "FDE-A",
+                        "due": "Friday",
+                    }
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+
+            self.assertTrue(result["ok"])
+            self.assertIn("affected workstream is missing", "\n".join(result["unresolved_gaps"]))
+            self.assertTrue(any("adp-workstream-register" in action for action in result["next_actions"]))
+
+    def test_custom_templates_are_consumed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            custom = project_root / "custom"
+            custom.mkdir()
+            meeting_template = custom / "meeting.md"
+            packet_template = custom / "packet.md"
+            meeting_template.write_text("CUSTOM MEETING {{MEETING_TITLE}}\n{{ITEM_DETAILS}}\n", encoding="utf-8")
+            packet_template.write_text("CUSTOM PACKET {{TITLE}}\n{{DECISION_NEEDED}}\n", encoding="utf-8")
+            plan = {
+                "meeting": {
+                    "date": "2026-07-04",
+                    "type": "FDE internal sync",
+                    "title": "Template check",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "Uses custom templates.",
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "business_decision_needed",
+                        "text": "Business must decide rollout.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "confirmer": "Biz-A",
+                        "packet": {"decision_needed": "Decide rollout"},
+                    }
+                ],
+            }
+
+            result = self.run_script_with_args(
+                project_root,
+                plan,
+                "--meeting-note-template",
+                str(meeting_template),
+                "--business-decision-packet-template",
+                str(packet_template),
+            )
+
+            self.assertTrue(result["ok"])
+            meeting = Path(result["touched"]["meeting_archives"][0]).read_text(encoding="utf-8")
+            packet = Path(result["touched"]["business_decision_packets"][0]).read_text(encoding="utf-8")
+            self.assertIn("CUSTOM MEETING Template check", meeting)
+            self.assertIn("CUSTOM PACKET Decide rollout", packet)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.9"
-# dependencies = ["pyyaml"]
+# requires-python = ">=3.10"
+# dependencies = ["pyyaml>=6.0"]
 # ///
 """Merge module configuration into shared _bmad/config.yaml and config.user.yaml.
 
@@ -29,6 +29,9 @@ try:
 except ImportError:
     print("Error: pyyaml is required (PEP 723 dependency)", file=sys.stderr)
     sys.exit(2)
+
+
+PROJECT_ROOT_TOKEN = "{project-root}"
 
 
 def parse_args():
@@ -61,6 +64,11 @@ def parse_args():
         "Matching values are used as fallback defaults, then legacy files are deleted.",
     )
     parser.add_argument(
+        "--create-output-dirs",
+        action="store_true",
+        help="Create directories for config values that start with {project-root}/.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print detailed progress to stderr",
@@ -80,7 +88,7 @@ def load_yaml_file(path: str) -> dict:
 
 def load_json_file(path: str) -> dict:
     """Load a JSON file."""
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -339,6 +347,84 @@ def write_config(config: dict, config_path: str, verbose: bool = False) -> None:
         )
 
 
+def collect_project_root_paths(value) -> list[str]:
+    """Return string values that start with the literal {project-root}/ token."""
+    if isinstance(value, dict):
+        paths = []
+        for item in value.values():
+            paths.extend(collect_project_root_paths(item))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for item in value:
+            paths.extend(collect_project_root_paths(item))
+        return paths
+    if isinstance(value, str) and value.startswith(PROJECT_ROOT_TOKEN + "/"):
+        return [value]
+    return []
+
+
+def infer_project_root(config_path: str) -> Path:
+    """Infer project root from the target _bmad/config.yaml path."""
+    path = Path(config_path).resolve()
+    return path.parent.parent
+
+
+def resolve_project_path(project_root: Path, config_value: str) -> Path:
+    relative = config_value[len(PROJECT_ROOT_TOKEN) :].lstrip("/\\")
+    return (project_root / relative).resolve()
+
+
+def module_variable_names(module_yaml: dict) -> set[str]:
+    """Return configurable module variable names from module.yaml."""
+    return {
+        key
+        for key, value in module_yaml.items()
+        if isinstance(value, dict) and "prompt" in value
+    }
+
+
+def output_directories(
+    config: dict, config_path: str, module_code: str, module_yaml: dict
+) -> list[str]:
+    """Resolve output directories owned by this setup run."""
+    project_root = infer_project_root(config_path)
+    directories = []
+    seen = set()
+    values = []
+    if "output_folder" in config:
+        values.extend(collect_project_root_paths(config["output_folder"]))
+    module_section = config.get(module_code, {})
+    if isinstance(module_section, dict):
+        for key in module_variable_names(module_yaml):
+            if key in module_section:
+                values.extend(collect_project_root_paths(module_section[key]))
+    for config_value in values:
+        directory = str(resolve_project_path(project_root, config_value))
+        if directory not in seen:
+            seen.add(directory)
+            directories.append(directory)
+    return directories
+
+
+def ensure_output_directories(
+    directories: list[str], verbose: bool = False
+) -> tuple[list[str], list[str]]:
+    """Create missing output directories and return (created, existing)."""
+    created = []
+    existing = []
+    for directory in directories:
+        path = Path(directory)
+        if path.is_dir():
+            existing.append(str(path))
+            continue
+        if verbose:
+            print(f"Creating output directory: {path}", file=sys.stderr)
+        path.mkdir(parents=True, exist_ok=True)
+        created.append(str(path))
+    return created, existing
+
+
 def reject_unresolved_paths(named_paths: list[tuple[str, str]]) -> None:
     """Exit with a clear error if any path argument still contains the literal
     ``{project-root}`` token. That token is meaningful only inside config
@@ -346,7 +432,7 @@ def reject_unresolved_paths(named_paths: list[tuple[str, str]]) -> None:
     loudly here prevents silently creating a junk ``{project-root}/`` directory.
     """
     for name, value in named_paths:
-        if value and "{project-root}" in value:
+        if value and PROJECT_ROOT_TOKEN in value:
             print(
                 json.dumps(
                     {
@@ -405,6 +491,16 @@ def main():
     # Merge and write config.yaml
     updated_config = merge_config(existing_config, module_yaml, answers, args.verbose)
     write_config(updated_config, args.config_path, args.verbose)
+    module_code = module_yaml["code"]
+    directories_to_create = output_directories(
+        updated_config, args.config_path, module_code, module_yaml
+    )
+    directories_created = []
+    directories_existing = []
+    if args.create_output_dirs:
+        directories_created, directories_existing = ensure_output_directories(
+            directories_to_create, args.verbose
+        )
 
     # Merge and write config.user.yaml
     user_settings = extract_user_settings(module_yaml, answers)
@@ -422,7 +518,6 @@ def main():
         )
 
     # Output result summary as JSON
-    module_code = module_yaml["code"]
     result = {
         "status": "success",
         "config_path": str(Path(args.config_path).resolve()),
@@ -433,6 +528,9 @@ def main():
         "user_keys": list(user_settings.keys()),
         "legacy_configs_found": legacy_files_found,
         "legacy_configs_deleted": legacy_deleted,
+        "directories_to_create": directories_to_create,
+        "directories_created": directories_created,
+        "directories_existing": directories_existing,
     }
     print(json.dumps(result, indent=2))
 

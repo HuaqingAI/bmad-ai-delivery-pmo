@@ -75,6 +75,8 @@ DIRECTORIES = [
     "decisions",
     "decisions/business-decision-packets",
     "intake",
+    "intake/status-sync",
+    "actions",
     "workstreams",
     "views",
     "daily",
@@ -89,6 +91,7 @@ TEMPLATE_FILES = [
     "schemas/status-taxonomy.md",
     "schemas/meeting-sync.md",
     "schemas/decision-taxonomy.md",
+    "schemas/action-ledger.md",
     "l0/reference-index.md",
     "l0/extracted-freeze-model.md",
     "l0/extracted-contract-inventory.md",
@@ -99,6 +102,7 @@ TEMPLATE_FILES = [
     "l0/extracted-decision-gates.md",
     "l0/exceptions-and-open-questions.md",
     "decisions/decision-log.md",
+    "actions/action-ledger.md",
     "views/project-lead.md",
     "views/fde-actions.md",
     "views/acceptance-readiness.md",
@@ -645,7 +649,13 @@ def main() -> int:
     args = parse_args()
     project_root = Path(args.project_root).resolve()
     if not project_root.exists() or not project_root.is_dir():
-        result = {"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}
+        result = {
+            "ok": False,
+            "status": "blocked",
+            "reason": "project_root is not an existing directory",
+            "error": "project_root is not an existing directory",
+            "project_root": str(project_root),
+        }
         emit(result, args.output)
         return 2
 
@@ -659,6 +669,8 @@ def main() -> int:
     if workstream_plan_errors:
         result = {
             "ok": False,
+            "status": "blocked",
+            "reason": "workstream plan JSON could not be loaded",
             "dry_run": args.dry_run,
             "project_root": str(project_root),
             "memory_root": str(memory_root),
@@ -694,6 +706,8 @@ def main() -> int:
     ):
         result = {
             "ok": False,
+            "status": "blocked",
+            "reason": "legacy ADP memory found outside the default output root",
             "confirmation_required": True,
             "legacy_memory_confirmation_required": True,
             "dry_run": False,
@@ -735,8 +749,11 @@ def main() -> int:
         and not args.workstream_plan
         and not args.dry_run
     ):
+        candidate_workstreams = discovered_artifacts.get("candidate_workstreams", [])
         result = {
             "ok": False,
+            "status": "blocked",
+            "reason": "existing PRD artifacts require a confirmed workstream plan before kickoff writes memory",
             "confirmation_required": True,
             "workstream_plan_required": True,
             "dry_run": False,
@@ -753,6 +770,12 @@ def main() -> int:
                 "document_output_language": config_values.get("document_output_language", "English"),
             },
             "discovered_bmad_artifacts": discovered_artifacts,
+            "candidate_workstreams": candidate_workstreams,
+            "next_required_input": {
+                "flag": "--workstream-plan",
+                "type": "json_file",
+                "description": "Confirmed PRD-derived workstreams, or an empty workstreams array when every PRD candidate is intentionally excluded.",
+            },
             "confirmed_workstreams": [],
             "workstream_registration_plan": {},
             "directories_created": [],
@@ -782,6 +805,8 @@ def main() -> int:
     ):
         result = {
             "ok": False,
+            "status": "blocked",
+            "reason": "existing BMad artifacts require caller confirmation before kickoff writes memory",
             "confirmation_required": True,
             "dry_run": False,
             "project_root": str(project_root),
@@ -855,6 +880,8 @@ def main() -> int:
 
     result = {
         "ok": not errors,
+        "status": "complete" if not errors else "blocked",
+        "reason": "" if not errors else "one or more scaffold writes failed",
         "dry_run": args.dry_run,
         "project_root": str(project_root),
         "memory_root": str(memory_root),

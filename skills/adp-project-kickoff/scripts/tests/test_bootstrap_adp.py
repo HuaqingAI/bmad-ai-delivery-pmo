@@ -28,7 +28,9 @@ class BootstrapAdpTests(unittest.TestCase):
             memory_root = Path(result["memory_root"])
             self.assertTrue((memory_root / "project-charter.md").exists())
             self.assertTrue((memory_root / "schemas" / "workstream-delivery-record.md").exists())
+            self.assertTrue((memory_root / "schemas" / "action-ledger.md").exists())
             self.assertTrue((memory_root / "l0" / "reference-index.md").exists())
+            self.assertTrue((memory_root / "actions" / "action-ledger.md").exists())
             self.assertTrue((memory_root / "views" / "weekly-report.md").exists())
 
     def test_second_run_preserves_existing_file(self) -> None:
@@ -36,13 +38,17 @@ class BootstrapAdpTests(unittest.TestCase):
             project_root = Path(temp_dir)
             first = self.run_script(project_root)
             charter = Path(first["memory_root"]) / "project-charter.md"
+            ledger = Path(first["memory_root"]) / "actions" / "action-ledger.md"
             charter.write_text("custom content\n", encoding="utf-8")
+            ledger.write_text("custom ledger\n", encoding="utf-8")
 
             second = self.run_script(project_root)
 
             self.assertTrue(second["ok"])
             self.assertEqual(charter.read_text(encoding="utf-8"), "custom content\n")
+            self.assertEqual(ledger.read_text(encoding="utf-8"), "custom ledger\n")
             self.assertIn(str(charter), second["files_existing"])
+            self.assertIn(str(ledger), second["files_existing"])
 
     def test_discovers_target_adp_config_language_and_bmad_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -74,6 +80,7 @@ class BootstrapAdpTests(unittest.TestCase):
 
             result = self.run_script(project_root, "--dry-run")
 
+            self.assertEqual(result["status"], "complete")
             self.assertEqual(result["language"]["communication_language"], "Chinese")
             self.assertEqual(result["language"]["document_output_language"], "Chinese")
             self.assertEqual(result["config_sources"], [str(adp_config)])
@@ -102,12 +109,14 @@ class BootstrapAdpTests(unittest.TestCase):
             blocked = self.run_script(project_root, check=False)
 
             self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["status"], "blocked")
             self.assertTrue(blocked["confirmation_required"])
             self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "project-charter.md").exists())
 
             confirmed = self.run_script(project_root, "--yes")
 
             self.assertTrue(confirmed["ok"])
+            self.assertEqual(confirmed["status"], "complete")
             self.assertTrue((project_root / "_bmad-output" / "adp" / "memory" / "project-charter.md").exists())
 
     def test_requires_workstream_plan_before_writing_when_existing_prds_exist(self) -> None:
@@ -119,13 +128,25 @@ class BootstrapAdpTests(unittest.TestCase):
 
             blocked = self.run_script(project_root, check=False)
             bypass_attempt = self.run_script(project_root, "--yes", check=False)
+            headless_attempt = self.run_script(project_root, "--headless", check=False)
 
             self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["status"], "blocked")
             self.assertTrue(blocked["workstream_plan_required"])
+            self.assertEqual(blocked["next_required_input"]["flag"], "--workstream-plan")
+            self.assertEqual(blocked["candidate_workstreams"][0]["id"], "existing")
             self.assertIn("candidate workstreams", blocked["next_actions"][0])
             self.assertIn("--workstream-plan", blocked["next_actions"][0])
             self.assertFalse(bypass_attempt["ok"])
+            self.assertEqual(bypass_attempt["status"], "blocked")
+            self.assertEqual(bypass_attempt["next_required_input"]["flag"], "--workstream-plan")
+            self.assertEqual(bypass_attempt["candidate_workstreams"][0]["id"], "existing")
             self.assertTrue(bypass_attempt["workstream_plan_required"])
+            self.assertFalse(headless_attempt["ok"])
+            self.assertEqual(headless_attempt["status"], "blocked")
+            self.assertEqual(headless_attempt["next_required_input"]["flag"], "--workstream-plan")
+            self.assertEqual(headless_attempt["candidate_workstreams"][0]["id"], "existing")
+            self.assertTrue(headless_attempt["workstream_plan_required"])
             self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "project-charter.md").exists())
 
     def test_persists_registration_plan_for_confirmed_prd_workstreams(self) -> None:

@@ -32,12 +32,13 @@ CAPABILITY_FILES = {
     "global project readout": {
         "core",
         "workstreams",
+        "actions",
         "daily",
         "decisions",
         "l0",
         "views",
     },
-    "fde action list": {"core", "workstreams", "daily"},
+    "fde action list": {"core", "workstreams", "actions", "daily"},
     "acceptance readiness view": {"core", "workstreams", "l0", "views"},
     "risk and dependency synthesis": {"core", "workstreams", "decisions", "l0", "views"},
     "weekly report generation": {"core", "workstreams", "daily", "decisions", "l0", "views"},
@@ -66,6 +67,8 @@ VIEW_FILES = [
     "dependency-map.md",
     "weekly-report.md",
 ]
+ACTION_LEDGER_REL = Path("actions") / "action-ledger.md"
+ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 
 
 @dataclass
@@ -92,7 +95,6 @@ class Workstream:
     counts: dict[str, int] = field(default_factory=dict)
     gaps: list[str] = field(default_factory=list)
     actions: list[dict[str, str]] = field(default_factory=list)
-    triggers: list[str] = field(default_factory=list)
 
 
 def parse_args() -> argparse.Namespace:
@@ -219,6 +221,77 @@ def parse_markdown_table(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def split_markdown_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in stripped:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    return cells
+
+
+def parse_action_ledger(memory_root: Path) -> list[dict[str, str]]:
+    path = memory_root / ACTION_LEDGER_REL
+    if not path.exists():
+        return []
+    table_lines = [line.strip() for line in read_text(path).splitlines() if line.strip().startswith("|")]
+    if len(table_lines) < 2:
+        return []
+    headers = [cell.strip().lower() for cell in split_markdown_row(table_lines[0])]
+    rows: list[dict[str, str]] = []
+    for line in table_lines[1:]:
+        cells = split_markdown_row(line)
+        if all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in cells):
+            continue
+        if len(cells) != len(headers):
+            continue
+        raw = dict(zip(headers, cells, strict=True))
+        row = {
+            "action_id": raw.get("action id", ""),
+            "status": raw.get("status", ""),
+            "owner": raw.get("owner", "TBD"),
+            "workstream": normalize_id(raw.get("workstream", "")) or raw.get("workstream", "TBD"),
+            "action": raw.get("action", ""),
+            "source": raw.get("source", rel_to_memory(memory_root, path)),
+            "reason": raw.get("reason", ""),
+            "due_or_trigger": raw.get("due / trigger", "TBD"),
+            "closure_criteria": raw.get("closure criteria", "TBD"),
+            "last_updated": raw.get("last updated", ""),
+            "owning_workflow": raw.get("owning workflow", ""),
+        }
+        if any(is_meaningful(value) for value in row.values()):
+            rows.append(row)
+    return rows
+
+
+def active_ledger_actions(memory_root: Path) -> list[dict[str, str]]:
+    actions = []
+    for row in parse_action_ledger(memory_root):
+        if row.get("status", "").lower() not in ACTIVE_ACTION_STATUSES:
+            continue
+        actions.append(row)
+    return actions
+
+
 def count_meaningful_lines(path: Path) -> int:
     if not path.exists():
         return 0
@@ -279,7 +352,7 @@ def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_
     )
     scan_workstream_sidecars(ws, memory_root)
     collect_workstream_gaps(ws, as_of, max_age_days)
-    collect_actions_and_triggers(ws)
+    collect_wdr_actions(ws)
     return ws
 
 
@@ -360,7 +433,7 @@ def parse_date(value: str) -> date | None:
         return None
 
 
-def collect_actions_and_triggers(ws: Workstream) -> None:
+def collect_wdr_actions(ws: Workstream) -> None:
     if is_meaningful(ws.next_actions):
         ws.actions.append(
             {
@@ -368,29 +441,18 @@ def collect_actions_and_triggers(ws: Workstream) -> None:
                 "workstream": ws.workstream_id,
                 "action": ws.next_actions,
                 "source": "delivery-record.md",
-                "due_or_trigger": extract_due_or_trigger(ws.next_actions),
+                "due_or_trigger": extract_labeled_due_or_trigger(ws.next_actions),
             }
         )
-    if is_meaningful(ws.blockers) or is_meaningful(ws.risks) or is_meaningful(ws.change_notes):
-        ws.triggers.append("adp-risk-dependency-change-review")
-    if any("evidence" in gap or "readiness" in gap for gap in ws.gaps):
-        ws.triggers.append("adp-acceptance-readiness-review")
-    if any("last status sync" in gap for gap in ws.gaps):
-        ws.triggers.append("adp-status-sync")
-    if any("L0 references" in gap for gap in ws.gaps):
-        ws.triggers.append("adp-l0-reference-sync")
 
 
-def extract_due_or_trigger(text: str) -> str:
-    patterns = [
-        r"\bby\s+([^.;]+)",
-        r"\bdue\s*[:=]\s*([^.;]+)",
-        r"\btrigger\s*[:=]\s*([^.;]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
+def extract_labeled_due_or_trigger(text: str) -> str:
+    pattern = r"(?:^|[;\n|])\s*(?:due|trigger)\s*[:=]\s*([^.;\n|]+)"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        value = match.group(1).strip()
+        if is_meaningful(value):
+            return value
     return "TBD"
 
 
@@ -415,6 +477,8 @@ def collect_files(memory_root: Path, requested_groups: set[str]) -> tuple[list[d
     if "views" in requested_groups:
         for rel in VIEW_FILES:
             add_optional_file(memory_root / "views" / rel, memory_root, sources, missing)
+    if "actions" in requested_groups:
+        add_optional_file(memory_root / ACTION_LEDGER_REL, memory_root, sources, missing)
     if "daily" in requested_groups:
         sources.extend(file_item(path, memory_root) for path in sorted((memory_root / "daily").glob("*.md")))
     if "meetings" in requested_groups:
@@ -466,6 +530,91 @@ def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, str]]:
     return gaps
 
 
+def action_cross_check_evidence(
+    memory_root: Path,
+    workstreams: list[Workstream],
+    ledger_actions: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    actions_by_workstream: dict[str, list[dict[str, str]]] = {}
+    for action in ledger_actions:
+        actions_by_workstream.setdefault(normalize_id(action.get("workstream", "")), []).append(action)
+
+    for ws in workstreams:
+        ledger_for_workstream = actions_by_workstream.get(ws.workstream_id, [])
+        wdr_items = [
+            {
+                "action": item,
+                "normalized_action": normalize_match_text(item),
+                "action_ids": extract_action_ids(item),
+                "source": ws.files.get("delivery_record", rel_to_memory(memory_root, ws.path)),
+            }
+            for item in split_next_actions(ws.next_actions)
+        ]
+        ledger_items = [
+            {
+                "action_id": action.get("action_id", ""),
+                "action": action.get("action", ""),
+                "normalized_action": normalize_match_text(action.get("action", "")),
+                "source": action.get("source", ACTION_LEDGER_REL.as_posix()),
+                "due_or_trigger": action.get("due_or_trigger", "TBD"),
+            }
+            for action in ledger_for_workstream
+        ]
+        wdr_action_ids = sorted({action_id for item in wdr_items for action_id in item["action_ids"]})
+        ledger_action_ids = sorted({item["action_id"] for item in ledger_items if is_meaningful(item["action_id"])})
+        if not wdr_items and not ledger_items:
+            continue
+        evidence.append(
+            {
+                "workstream": ws.workstream_id,
+                "wdr_next_actions": wdr_items,
+                "ledger_open_actions": ledger_items,
+                "exact_action_id_matches": sorted(set(wdr_action_ids) & set(ledger_action_ids)),
+                "ledger_action_ids_without_wdr_reference": sorted(set(ledger_action_ids) - set(wdr_action_ids)),
+                "wdr_action_ids_without_open_ledger_reference": sorted(set(wdr_action_ids) - set(ledger_action_ids)),
+            }
+        )
+    return evidence
+
+
+def extract_action_ids(text: str) -> list[str]:
+    return sorted({match.upper() for match in re.findall(r"\bACT-[A-Z0-9]+(?:-[A-Z0-9]+)*\b", text or "", flags=re.IGNORECASE)})
+
+
+def normalize_match_text(value: str) -> str:
+    text = re.sub(r"[\W_]+", " ", str(value or "").lower(), flags=re.UNICODE)
+    return " ".join(text.split())
+
+
+def split_next_actions(value: str) -> list[str]:
+    placeholders = {"", "tbd", "todo", "none", "n/a", "na", "fill missing state"}
+    items = [item.strip() for item in re.split(r"\s*;\s*", value or "")]
+    return [item for item in items if item and item.lower() not in placeholders]
+
+
+def merge_actions(
+    ledger_actions: list[dict[str, str]],
+    wdr_actions: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    merged = list(ledger_actions)
+    seen = {
+        action_match_key(action.get("owner", ""), action.get("workstream", ""), action.get("action", ""))
+        for action in ledger_actions
+    }
+    for action in wdr_actions:
+        key = action_match_key(action.get("owner", ""), action.get("workstream", ""), action.get("action", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(action)
+    return merged
+
+
+def action_match_key(owner: str, workstream: str, action: str) -> str:
+    return "|".join(normalize_match_text(value) for value in [owner, workstream, action])
+
+
 def workstream_payload(ws: Workstream, memory_root: Path) -> dict[str, Any]:
     return {
         "id": ws.workstream_id,
@@ -491,18 +640,20 @@ def workstream_payload(ws: Workstream, memory_root: Path) -> dict[str, Any]:
         "counts": ws.counts,
         "gaps": ws.gaps,
         "actions": ws.actions,
-        "workflow_triggers": sorted(set(ws.triggers)),
         "record": rel_to_memory(memory_root, ws.path),
     }
 
 
-def summarize_counts(workstreams: list[Workstream], sources: list[dict[str, Any]]) -> dict[str, int]:
+def summarize_counts(
+    workstreams: list[Workstream],
+    sources: list[dict[str, Any]],
+    action_count: int | None = None,
+) -> dict[str, int]:
     return {
         "sources_read": len(sources),
         "workstreams": len(workstreams),
-        "actions": sum(len(ws.actions) for ws in workstreams),
+        "actions": action_count if action_count is not None else sum(len(ws.actions) for ws in workstreams),
         "gaps": sum(len(ws.gaps) for ws in workstreams),
-        "workflow_triggers": len({trigger for ws in workstreams for trigger in ws.triggers}),
     }
 
 
@@ -532,7 +683,9 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     workstreams = [parse_workstream(path, memory_root, as_of, args.max_age_days) for path in records]
     workstream_sources = [file_item(ws.path, memory_root) for ws in workstreams]
     all_sources = [*sources, *workstream_sources]
-    actions = [action for ws in workstreams for action in ws.actions]
+    ledger_actions = active_ledger_actions(memory_root) if "actions" in groups else []
+    wdr_actions = [action for ws in workstreams for action in ws.actions]
+    actions = merge_actions(ledger_actions, wdr_actions)
     gaps = [
         {"workstream": ws.workstream_id, "gap": gap, "source": ws.files.get("delivery_record", rel_to_memory(memory_root, ws.path))}
         for ws in workstreams
@@ -543,11 +696,11 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         for item in missing_workstreams
     )
     xref_gaps = cross_reference_gaps(workstreams)
-    workflow_triggers = sorted({trigger for ws in workstreams for trigger in ws.triggers})
+    action_xref_evidence = action_cross_check_evidence(memory_root, workstreams, ledger_actions) if ledger_actions else []
 
     payload = {
         "ok": True,
-        "schema_version": 1,
+        "schema_version": 2,
         "project_root": str(project_root),
         "memory_root": str(memory_root),
         "capability": args.capability,
@@ -561,13 +714,14 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "missing_sources": sorted(set(missing_sources)),
         "workstreams": [workstream_payload(ws, memory_root) for ws in workstreams],
         "cross_reference_gaps": xref_gaps,
+        "action_cross_check": action_xref_evidence,
         "gaps": gaps,
+        "ledger_actions": ledger_actions,
         "actions": actions,
         "owners": sorted({ws.owner for ws in workstreams if is_meaningful(ws.owner)}),
         "due_triggers": sorted({action["due_or_trigger"] for action in actions if is_meaningful(action["due_or_trigger"])}),
-        "workflow_triggers": workflow_triggers,
-        "recommended_workflow": workflow_triggers[0] if len(workflow_triggers) == 1 else "",
-        "counts": summarize_counts(workstreams, all_sources),
+        "recommended_workflow": "",
+        "counts": summarize_counts(workstreams, all_sources, len(actions)),
     }
     return 0, payload
 

@@ -1,0 +1,19 @@
+# DO NOT EDIT -- overwritten on every update.
+#
+# Workflow customization surface for adp-meeting-sync.
+# Team overrides:     {project-root}/_bmad/custom/adp-meeting-sync.toml
+# Personal overrides: {project-root}/_bmad/custom/adp-meeting-sync.user.toml
+
+[workflow]
+
+# --- Universal defaults. Merge: scalars override, arrays append. ---
+activation_steps_prepend = []
+activation_steps_append = []
+persistent_facts = ["file:{project-root}/**/project-context.md"]
+on_complete = ""
+
+# --- Skill-specific templates. Scalar overrides win. ---
+# Override when the organization owns a different meeting archive format.
+meeting_note_template = "assets/meeting-sync-templates/meeting-note.md"
+# Override when Business Decision Packets must follow an organization-owned decision format.
+business_decision_packet_template = "assets/meeting-sync-templates/business-decision-packet.md"

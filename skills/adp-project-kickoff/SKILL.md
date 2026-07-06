@@ -3,7 +3,7 @@ name: adp-project-kickoff
 description: Bootstraps shared ADP project memory. Use when the user says "adp-project-kickoff" or "start ADP project".
 ---
 
-# adp-project-kickoff
+## Overview
 
 This workflow initializes an AI Delivery PMO project by creating the shared ADP memory structure, starter schemas, L0 reference placeholders, decision logs, daily logs, and report views. Act as a delivery setup facilitator: keep startup cheap, preserve existing work, and leave the user with a usable project state surface rather than a long questionnaire.
 
@@ -29,19 +29,25 @@ Load BMad configuration from the target project in this order:
 
 Use `communication_language` for all conversation and status output. Use `document_output_language` for generated project documents and report text. If no config file exists, say that explicitly and fall back to English.
 
-## Activation
+## On Activation
 
 Infer the project root from the current workspace unless the user gives a path. If `{project-root}/_bmad-output/adp/memory/` already exists, treat the run as an idempotent refresh: preserve content, report what already exists, and create only missing recommended files.
 
 If legacy ADP memory exists at `{project-root}/_bmad/memory/adp/` and the new default root does not intentionally use it, do not silently create a second empty state tree. Tell the user to migrate the legacy folder to `{project-root}/_bmad-output/adp/memory/` or rerun with `--memory-root {project-root}/_bmad/memory/adp` to keep using the legacy location.
 
-Before writing anything, discover existing BMad project artifacts in the target project. Look for planning outputs such as PRD, architecture, epics, UX/design, product brief, and research files under configured `planning_artifacts`, `{project-root}/_bmad-output/planning-artifacts`, and common docs folders. Look for implementation outputs such as stories, sprint status, validation notes, and project context under configured `implementation_artifacts`, `{project-root}/_bmad-output/implementation-artifacts`, and common docs folders.
+Before writing anything, run the deterministic discovery prepass:
 
-If existing BMad artifacts are found and the user did not pass `--headless`, `--yes`, `--dry-run`, or an already-confirmed workstream plan, summarize the discovered context and ask for confirmation before initializing or refreshing ADP memory. Explain that kickoff will create an ADP coordination layer from the existing project state and will not overwrite or duplicate the BMM source artifacts. If the user declines, stop without writing files.
+```bash
+uv run "{skill-root}/scripts/bootstrap_adp.py" "{project-root}" --dry-run
+```
+
+Judge and summarize the returned JSON; do not independently search raw folders for planning or implementation artifacts. If existing BMad artifacts are found and the user did not pass `--headless`, `--yes`, or an already-confirmed workstream plan, summarize the discovered context and ask for confirmation before initializing or refreshing ADP memory. Explain that kickoff will create an ADP coordination layer from the existing project state and will not overwrite or duplicate the BMM source artifacts. If the user declines, stop without writing files.
 
 When existing PRDs are found, treat each PRD as a candidate FDE workstream, not as generic project background. Show the candidate line list with suggested workstream id, name, and PRD path, then ask which lines should be included in ADP memory and whether any candidates should be renamed, merged, split, or excluded. Do not create or update Workstream Delivery Records during kickoff; `adp-workstream-register` owns workstream files.
 
 For confirmed PRD lines, quickly inspect each selected PRD for project-level coordination facts only: scope summary, acceptance path, business owner or confirmer, visible dependencies, L0 references, risks, open questions, and next checkpoint. Keep detailed requirements inside the PRD. Present the extracted facts as a short confirmation table; when facts are weak, mark them `TBD` or gap rather than guessing. After the user confirms, pass those lines to the scaffold script with `--workstream-plan <json-file>` so kickoff persists `intake/workstream-registration-plan.json` and `.md` for `adp-workstream-register` to consume.
+
+Headless callers get the script JSON directly. If PRDs are discovered without `--workstream-plan`, return the blocked JSON with `candidate_workstreams` and `next_required_input`; do not enter confirmation prose.
 
 Accept a brief when the user provides one, but do not block setup for missing details. Combine the brief with discovered artifact paths as kickoff source context. Capture only reliable facts into `project-charter.md`; leave unknown objectives, stakeholders, cadence exceptions, L0 references, and escalation paths as explicit placeholders.
 
@@ -94,6 +100,8 @@ If the script cannot run, create the same folders and files from `assets/adp-mem
 
 ## Output Contract
 
+In headless mode, return the script JSON directly: `status: complete` on success, or `status: blocked` with `candidate_workstreams` and `next_required_input` when PRDs require a workstream plan.
+
 After setup, report:
 
 - the ADP memory root
@@ -106,32 +114,7 @@ Do not claim the project is ready just because the scaffold exists. The kickoff 
 
 ## Files Created
 
-The default scaffold creates:
-
-- `index.md`, `project-charter.md`, `cadence.md`
-- `schemas/workstream-delivery-record.md`
-- `schemas/readiness-scorecard.md`
-- `schemas/status-taxonomy.md`
-- `schemas/meeting-sync.md`
-- `schemas/decision-taxonomy.md`
-- `l0/reference-index.md`
-- `l0/extracted-freeze-model.md`
-- `l0/extracted-contract-inventory.md`
-- `l0/extracted-gates.md`
-- `l0/extracted-nfr.md`
-- `l0/extracted-evidence-rules.md`
-- `l0/extracted-impacts.md`
-- `l0/extracted-decision-gates.md`
-- `l0/exceptions-and-open-questions.md`
-- `decisions/decision-log.md`
-- `views/project-lead.md`
-- `views/fde-actions.md`
-- `views/acceptance-readiness.md`
-- `views/risk-matrix.md`
-- `views/dependency-map.md`
-- `views/weekly-report.md`
-
-It also creates empty `intake/`, `meetings/`, `daily/`, `workstreams/`, and `decisions/business-decision-packets/` folders. When a confirmed PRD workstream plan is supplied, it additionally creates `intake/workstream-registration-plan.json` and `intake/workstream-registration-plan.md`.
+The scaffold writes the files and folders represented by `assets/adp-memory-templates/` into the ADP memory root, preserving existing files. Use the script JSON for exact created/existing paths. `actions/action-ledger.md` remains the durable action source of truth; `views/fde-actions.md` is derived. When a confirmed PRD workstream plan is supplied, the script also writes `intake/workstream-registration-plan.json` and `intake/workstream-registration-plan.md` without overwriting existing files.
 
 ## Guardrails
 
