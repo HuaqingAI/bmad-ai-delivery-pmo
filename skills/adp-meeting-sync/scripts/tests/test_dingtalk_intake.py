@@ -32,6 +32,14 @@ class DingTalkIntakeTests(unittest.TestCase):
                 args = sys.argv[1:]
 
                 if args[:3] == ["minutes", "list", "all"]:
+                    if "--start" in args or "--end" in args:
+                        start = args[args.index("--start") + 1] if "--start" in args else ""
+                        end = args[args.index("--end") + 1] if "--end" in args else ""
+                        if start == "2026-07-06" or end == "2026-07-06":
+                            print(json.dumps({"error": "date-only filter was not expanded"}))
+                            sys.exit(3)
+                        print(json.dumps({"items": []}))
+                        sys.exit(0)
                     print(json.dumps({
                         "items": [
                             {
@@ -47,18 +55,51 @@ class DingTalkIntakeTests(unittest.TestCase):
                                 "startTime": "2026-07-02T09:00:00+08:00",
                                 "aiMinutesUrl": "https://minutes.example/new",
                                 "keywords": ["checkout", "risk"]
+                            },
+                            {
+                                "taskUuid": "task-date",
+                                "title": "Morning sync",
+                                "startTime": "2026-07-06T09:34:00+08:00",
+                                "aiMinutesUrl": "https://minutes.example/date",
+                                "keywords": ["评论模块", "数据回流"]
                             }
                         ]
                     }))
                 elif args[:3] == ["minutes", "get", "info"]:
+                    task_id = args[args.index("--id") + 1]
                     print(json.dumps({
-                        "taskUuid": args[args.index("--id") + 1],
-                        "title": "Checkout sync",
+                        "taskUuid": task_id,
+                        "title": "Paragraph sync" if task_id == "task-paragraph" else "Checkout sync",
                         "startTime": "2026-07-02T09:00:00+08:00",
                         "aiMinutesUrl": "https://minutes.example/new"
                     }))
                 elif args[:3] == ["minutes", "get", "transcription"]:
-                    if "--next-token" in args:
+                    task_id = args[args.index("--id") + 1]
+                    if task_id == "task-paragraph" and "--next-token" in args:
+                        print(json.dumps({
+                            "paragraphList": [
+                                {
+                                    "speakerName": "PM-B",
+                                    "sentenceList": [
+                                        {"text": "Second paragraph action."}
+                                    ]
+                                }
+                            ]
+                        }))
+                    elif task_id == "task-paragraph":
+                        print(json.dumps({
+                            "paragraphList": [
+                                {
+                                    "speakerName": "FDE-A",
+                                    "sentenceList": [
+                                        {"text": "First paragraph fact."},
+                                        {"text": "First paragraph decision."}
+                                    ]
+                                }
+                            ],
+                            "nextToken": "page-2"
+                        }))
+                    elif "--next-token" in args:
                         print(json.dumps({
                             "segments": [
                                 {"speaker": "FDE-A", "text": "Second page action."}
@@ -112,6 +153,29 @@ class DingTalkIntakeTests(unittest.TestCase):
             self.assertEqual(unprocessed["processed_reason"], "unprocessed")
             self.assertIn("--task-uuid", result["next_actions"][0])
 
+    def test_date_only_filter_expands_and_falls_back_to_local_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            fake_dws = self.write_fake_dws(project_root)
+
+            result = self.run_script(
+                project_root,
+                "--start",
+                "2026-07-06",
+                "--end",
+                "2026-07-06",
+                "--dws-command",
+                f'"{sys.executable}" "{fake_dws}"',
+            )
+
+            self.assertTrue(result["ok"])
+            list_args = result["diagnostics"]["list_args"]
+            self.assertTrue(list_args[list_args.index("--start") + 1].startswith("2026-07-06T00:00:00"))
+            self.assertTrue(list_args[list_args.index("--end") + 1].startswith("2026-07-06T23:59:59"))
+            self.assertTrue(result["diagnostics"]["date_filter_fallback_used"])
+            self.assertEqual([item["taskUuid"] for item in result["candidates"]], ["task-date"])
+
     def test_same_date_title_is_possible_match_not_processed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -159,6 +223,32 @@ class DingTalkIntakeTests(unittest.TestCase):
             self.assertIn("taskUuid=task-new", raw_text)
             self.assertIn("First page fact.", raw_text)
             self.assertIn("Second page action.", raw_text)
+
+    def test_fetch_reads_paragraph_list_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            fake_dws = self.write_fake_dws(project_root)
+
+            result = self.run_script(
+                project_root,
+                "--task-uuid",
+                "task-paragraph",
+                "--dws-command",
+                f'"{sys.executable}" "{fake_dws}"',
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["transcript"]["complete"])
+            self.assertEqual(result["transcript"]["page_count"], 2)
+            self.assertEqual(result["transcript"]["segment_count"], 3)
+            raw_path = Path(result["raw_evidence_path"])
+            self.assertTrue(raw_path.exists())
+            self.assertTrue(raw_path.is_relative_to(memory_root))
+            raw_text = raw_path.read_text(encoding="utf-8")
+            self.assertIn("FDE-A: First paragraph fact.", raw_text)
+            self.assertIn("FDE-A: First paragraph decision.", raw_text)
+            self.assertIn("PM-B: Second paragraph action.", raw_text)
 
     def test_supplied_raw_evidence_is_preserved_under_memory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

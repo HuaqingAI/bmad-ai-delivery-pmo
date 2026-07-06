@@ -55,7 +55,7 @@ When the user has not provided raw content and DingTalk access is available, run
 uv run "{skill-root}/scripts/dingtalk_intake.py" "{project-root}" --memory-root <memory-root> -o <intake.json>
 ```
 
-Add `--query`, `--start`, or `--end` only from user-supplied project, workstream, date, or topic hints. The pre-pass lists candidates, marks processed meetings only by exact `taskUuid` or AI Minutes URL under ADP memory, emits same-date same-title memory hits as `possible_matches`, and emits processed/unprocessed reasons. Show likely unprocessed candidates and ask for confirmation unless the run supplied an exact `--task-uuid`.
+Add `--query`, `--start`, or `--end` only from user-supplied project, workstream, date, or topic hints. The pre-pass lists 50 candidates by default, expands date-only filters to full local-day timestamps, and falls back to unfiltered listing plus local date filtering when DingTalk returns an empty server-filtered list. It marks processed meetings only by exact `taskUuid` or AI Minutes URL under ADP memory, emits same-date same-title memory hits as `possible_matches`, and emits processed/unprocessed reasons. Show likely unprocessed candidates and ask for confirmation unless the run supplied an exact `--task-uuid`.
 
 For an exact meeting, rerun the pre-pass with `--task-uuid <id>`. It fetches info and paginated transcription, saves the transcript under ADP memory, and reports transcript completeness. If the pre-pass returns no complete raw transcript, ask for raw meeting content rather than classifying from a summary. Record DingTalk sources in the plan source field with the task id and evidence type, such as `DingTalk AI Minutes taskUuid=<id>; evidence=transcription`.
 

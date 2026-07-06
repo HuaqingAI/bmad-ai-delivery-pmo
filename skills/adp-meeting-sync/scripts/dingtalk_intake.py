@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query", help="Optional DingTalk minutes query hint.")
     parser.add_argument("--start", help="Optional DingTalk minutes start-date hint.")
     parser.add_argument("--end", help="Optional DingTalk minutes end-date hint.")
-    parser.add_argument("--max", type=int, default=10, help="Maximum candidates to list. Default: 10.")
+    parser.add_argument("--max", type=int, default=50, help="Maximum candidates to list. Default: 50.")
     parser.add_argument(
         "--dws-command",
         default="dws",
@@ -141,8 +141,23 @@ def preserve_supplied_raw_evidence(
 
 def run_dingtalk_intake(args: argparse.Namespace, project_root: Path, memory_root: Path) -> dict[str, Any]:
     command = parse_command(args.dws_command)
-    raw_list = dws_json(command, list_args(args))
-    candidates = mark_processed(normalize_candidates(raw_list), memory_root)
+    primary_list_args = list_args(args)
+    raw_candidates = normalize_candidates(dws_json(command, primary_list_args))
+    diagnostics: dict[str, Any] = {
+        "list_args": primary_list_args,
+        "date_filter_fallback_used": False,
+    }
+    if has_date_filter(args) and not raw_candidates:
+        try:
+            fallback_raw = dws_json(command, list_args(args, include_date_filters=False))
+            fallback_candidates = filter_candidates_by_date(normalize_candidates(fallback_raw), args)
+            if fallback_candidates:
+                raw_candidates = fallback_candidates
+                diagnostics["date_filter_fallback_used"] = True
+                diagnostics["date_filter_fallback_reason"] = "server date filter returned no candidates"
+        except DwsError as exc:
+            diagnostics["date_filter_fallback_error"] = str(exc)
+    candidates = mark_processed(raw_candidates, memory_root)
 
     if not args.task_uuid:
         unprocessed = [candidate for candidate in candidates if not candidate["processed"]]
@@ -154,6 +169,7 @@ def run_dingtalk_intake(args: argparse.Namespace, project_root: Path, memory_roo
             "selected": {},
             "raw_evidence_path": "",
             "raw_evidence_label": "",
+            "diagnostics": diagnostics,
             "gaps": [] if unprocessed else ["No unprocessed DingTalk candidates found."],
             "next_actions": ["Choose an unprocessed taskUuid and rerun with --task-uuid."] if unprocessed else [
                 "Ask the user for raw transcript, chat excerpt, offline notes, or a raw evidence path."
@@ -189,6 +205,7 @@ def run_dingtalk_intake(args: argparse.Namespace, project_root: Path, memory_roo
             "segment_count": transcript["segment_count"],
             "next_token": transcript["next_token"],
         },
+        "diagnostics": diagnostics,
         "gaps": gaps,
         "next_actions": ["Use raw_evidence_path and selected metadata in the meeting sync plan."]
         if raw_evidence_path
@@ -196,15 +213,66 @@ def run_dingtalk_intake(args: argparse.Namespace, project_root: Path, memory_roo
     }
 
 
-def list_args(args: argparse.Namespace) -> list[str]:
+def list_args(args: argparse.Namespace, include_date_filters: bool = True) -> list[str]:
     command = ["minutes", "list", "all", "--max", str(args.max), "--format", "json"]
     if args.query:
         command.extend(["--query", args.query])
-    if args.start:
-        command.extend(["--start", args.start])
-    if args.end:
-        command.extend(["--end", args.end])
+    if include_date_filters and args.start:
+        command.extend(["--start", normalize_list_time_bound(args.start, is_end=False)])
+    if include_date_filters and args.end:
+        command.extend(["--end", normalize_list_time_bound(args.end, is_end=True)])
     return command
+
+
+def has_date_filter(args: argparse.Namespace) -> bool:
+    return bool(args.start or args.end)
+
+
+def normalize_list_time_bound(raw_value: str, *, is_end: bool) -> str:
+    value = raw_value.strip()
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return value
+    clock = "23:59:59" if is_end else "00:00:00"
+    return f"{value}T{clock}{local_timezone_offset()}"
+
+
+def local_timezone_offset() -> str:
+    offset = datetime.now().astimezone().utcoffset()
+    if offset is None:
+        return ""
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes = abs(total_minutes)
+    return f"{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def filter_candidates_by_date(candidates: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    start_date = extract_filter_date(args.start)
+    end_date = extract_filter_date(args.end)
+    if not start_date and not end_date:
+        return candidates
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        candidate_date = candidate.get("date", "")
+        if not candidate_date:
+            continue
+        if start_date and candidate_date < start_date:
+            continue
+        if end_date and candidate_date > end_date:
+            continue
+        filtered.append(candidate)
+    return filtered
+
+
+def extract_filter_date(raw_value: str | None) -> str:
+    if not raw_value:
+        return ""
+    value = raw_value.strip()
+    if len(value) >= 10 and value[4:5] == "-" and value[7:8] == "-":
+        return value[:10]
+    return ""
 
 
 def parse_command(raw_command: str) -> list[str]:
@@ -420,30 +488,56 @@ def unique_path(directory: Path, filename: str) -> Path:
 
 
 def extract_transcript_lines(raw: Any) -> list[str]:
+    return extract_transcript_lines_with_context(raw, "", "")
+
+
+def extract_transcript_lines_with_context(raw: Any, inherited_timestamp: str, inherited_speaker: str) -> list[str]:
     if isinstance(raw, str):
-        return [raw]
+        text = raw.strip()
+        return [format_transcript_line(text, inherited_timestamp, inherited_speaker)] if text else []
     if isinstance(raw, list):
-        return [line for item in raw for line in extract_transcript_lines(item)]
+        return [line for item in raw for line in extract_transcript_lines_with_context(item, inherited_timestamp, inherited_speaker)]
     if not isinstance(raw, dict):
         return []
 
-    for key in ("transcription", "transcript", "sentences", "segments", "records", "items", "list", "data", "result"):
+    speaker = first_string(raw, ["speaker", "speakerName", "speaker_name", "userName", "user_name"]) or inherited_speaker
+    timestamp = first_string(raw, ["time", "timestamp", "startTime", "start_time"]) or inherited_timestamp
+
+    for key in (
+        "transcription",
+        "transcript",
+        "paragraphList",
+        "paragraphs",
+        "paragraph_list",
+        "sentenceList",
+        "sentence_list",
+        "sentences",
+        "segments",
+        "records",
+        "items",
+        "list",
+        "data",
+        "result",
+    ):
         value = raw.get(key)
         if isinstance(value, str):
-            return [value]
+            text = value.strip()
+            return [format_transcript_line(text, timestamp, speaker)] if text else []
         if isinstance(value, (list, dict)):
-            lines = extract_transcript_lines(value)
+            lines = extract_transcript_lines_with_context(value, timestamp, speaker)
             if lines:
                 return lines
 
     text = first_string(raw, ["text", "content", "sentence", "utterance", "words"])
     if not text:
         return []
-    speaker = first_string(raw, ["speaker", "speakerName", "speaker_name", "userName", "user_name"])
-    timestamp = first_string(raw, ["time", "timestamp", "startTime", "start_time"])
+    return [format_transcript_line(text, timestamp, speaker)]
+
+
+def format_transcript_line(text: str, timestamp: str, speaker: str) -> str:
     prefix_parts = [part for part in [timestamp, speaker] if part]
     prefix = " ".join(prefix_parts)
-    return [f"{prefix}: {text}" if prefix else text]
+    return f"{prefix}: {text}" if prefix else text
 
 
 def extract_next_token(raw: Any) -> str:
