@@ -29,11 +29,11 @@ Resolve the actual project root, then inspect install state:
 uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml"
 ```
 
-Use the JSON as the source of truth for module metadata, `install_state`, `effective_defaults`, `default_sources`, `answers_template`, `missing_required_inputs`, `headless_ready`, and `directories_to_create`. If `status` is not `success`, surface the error and stop. If arguments provide values (for example `accept all defaults`, `--headless`, or `user name is BMad, I speak Swahili`), overlay them on `answers_template` and skip interactive prompting.
+Use the JSON as the source of truth for module metadata, `install_state`, `effective_defaults`, `default_sources`, `answers_template`, `missing_required_inputs`, `headless_ready`, `directories_to_create`, and `installed_skills_dir`. If `status` is not `success`, surface the error and stop. If arguments provide values (for example `accept all defaults`, `--headless`, or `user name is BMad, I speak Swahili`), overlay them on `answers_template` and skip interactive prompting.
 
 ## Headless Contract
 
-`--headless`/`-H` is non-interactive. It may write without confirmation when the actual project root is known, `inspect-install-state.py` succeeds, and no `missing_required_inputs` remain after applying inline values. Optional inputs are inline core/module values and an explicit project root. If a required value or filesystem path cannot be resolved, do not write.
+`--headless`/`-H` is non-interactive. It may write without confirmation when the actual project root is known and `inspect-install-state.py --answers {temp-file}` returns `headless_ready: true`. Optional inputs are inline core/module values and an explicit project root. If a required value or filesystem path cannot be resolved, do not write.
 
 In headless mode, stdout is one JSON object and no prose:
 
@@ -50,6 +50,7 @@ In headless mode, stdout is one JSON object and no prose:
   "directories_to_create": [],
   "directories_created": [],
   "directories_existing": [],
+  "installed_skills_dir": "<resolved installed skills directory>",
   "legacy_directories_removed": [],
   "legacy_files_removed_count": 0,
   "unresolved_gaps": [],
@@ -65,7 +66,13 @@ Use `effective_defaults`, `default_sources`, and `missing_required_inputs` from 
 
 ## Write Files
 
-Write a temp JSON file from `answers_template` overlaid with collected values. Values inside this JSON keep the literal `{project-root}` token.
+Write a temp JSON file from `answers_template` overlaid with collected values. Values inside this JSON keep the literal `{project-root}` token. Validate the final answer object before writing:
+
+```bash
+uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml" --answers {temp-file}
+```
+
+If the validation JSON has `headless_ready: false`, block headless mode and ask for the returned `missing_required_inputs`. Use `validated_answers` as the write input.
 
 In the commands below, replace `{project-root}` in every path argument with the actual project root before running; these are filesystem paths, not config values.
 
@@ -80,13 +87,13 @@ Run `uv run "{skill-root}/scripts/inspect-install-state.py" --help`, `uv run "{s
 
 ## Cleanup Legacy Directories
 
-After both merge scripts complete successfully, remove the installer's package directories. Skills and agents in these directories are already installed at `{project-root}/.claude/skills/`; `{project-root}/_bmad/` should only contain config files.
+After both merge scripts complete successfully, remove the installer's package directories. Skills and agents in these directories are already installed at `installed_skills_dir` from the inspect JSON; `{project-root}/_bmad/` should only contain config files.
 
 ```bash
-uv run "{skill-root}/scripts/cleanup-legacy.py" --bmad-dir "{project-root}/_bmad" --module-code adp --also-remove _config --skills-dir "{project-root}/.claude/skills"
+uv run "{skill-root}/scripts/cleanup-legacy.py" --bmad-dir "{project-root}/_bmad" --module-code adp --also-remove _config --skills-dir "{installed_skills_dir}"
 ```
 
-The script verifies that every skill in the legacy directories exists at `.claude/skills/` before removing anything. Missing directories are not errors. If the script exits non-zero, surface the error and stop.
+The script verifies that every skill in the legacy directories exists at the inspected installed skills directory before removing anything. Missing directories are not errors. If the script exits non-zero, surface the error and stop.
 
 Run `uv run "{skill-root}/scripts/cleanup-legacy.py" --help` for full usage.
 

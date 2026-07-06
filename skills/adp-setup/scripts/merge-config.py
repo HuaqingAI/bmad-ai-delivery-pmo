@@ -420,7 +420,22 @@ def ensure_output_directories(
             continue
         if verbose:
             print(f"Creating output directory: {path}", file=sys.stderr)
-        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"Failed to create output directory {path}: {error}",
+                        "directories_to_create": directories,
+                        "directories_created": created,
+                        "directories_existing": existing,
+                    },
+                    indent=2,
+                )
+            )
+            sys.exit(2)
         created.append(str(path))
     return created, existing
 
@@ -488,9 +503,8 @@ def main():
             if args.verbose:
                 print("Applied legacy values as fallback defaults", file=sys.stderr)
 
-    # Merge and write config.yaml
+    # Build prospective files before writing anything.
     updated_config = merge_config(existing_config, module_yaml, answers, args.verbose)
-    write_config(updated_config, args.config_path, args.verbose)
     module_code = module_yaml["code"]
     directories_to_create = output_directories(
         updated_config, args.config_path, module_code, module_yaml
@@ -502,11 +516,12 @@ def main():
             directories_to_create, args.verbose
         )
 
-    # Merge and write config.user.yaml
     user_settings = extract_user_settings(module_yaml, answers)
     existing_user_config = load_yaml_file(args.user_config_path)
     updated_user_config = dict(existing_user_config)
     updated_user_config.update(user_settings)
+
+    write_config(updated_config, args.config_path, args.verbose)
     if user_settings:
         write_config(updated_user_config, args.user_config_path, args.verbose)
 

@@ -66,6 +66,7 @@ class AdpSetupScriptTests(unittest.TestCase):
             module_yaml = root / "module.yaml"
             bmad_dir = root / "_bmad"
             write_module_yaml(module_yaml)
+            (root / "skills").mkdir()
             (bmad_dir / "adp").mkdir(parents=True)
             (bmad_dir / "core").mkdir(parents=True)
             (bmad_dir / "config.yaml").write_text(
@@ -96,6 +97,8 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertEqual(result["effective_defaults"]["module"]["personal_note"], "legacy note")
             self.assertIn(str((root / "existing-output").resolve()), result["directories_to_create"])
             self.assertIn(str((root / "existing-memory").resolve()), result["directories_to_create"])
+            self.assertEqual(result["installed_skills_dir"], str((root / "skills").resolve()))
+            self.assertEqual(result["installed_skills_dir_source"], "default")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -109,6 +112,26 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertFalse(result["headless_ready"])
             self.assertEqual(result["missing_required_inputs"][0]["key"], "required_value")
             self.assertIn("required_value", result["unresolved_gaps"][0])
+
+            answers = root / "answers.json"
+            answers.write_text(
+                json.dumps({"module": {"required_value": "provided"}}),
+                encoding="utf-8",
+            )
+            validated = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    str(root),
+                    "--module-yaml",
+                    str(module_yaml),
+                    "--answers",
+                    str(answers),
+                ).stdout
+            )
+
+            self.assertTrue(validated["headless_ready"])
+            self.assertEqual(validated["missing_required_inputs"], [])
+            self.assertEqual(validated["validated_answers"]["module"]["required_value"], "provided")
 
     def test_module_yaml_user_facing_fields_are_readable_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -245,6 +268,52 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertIn("user_name: Legacy User", user_text)
             self.assertIn("personal_note: fresh note", user_text)
             self.assertNotIn("removed_key", config_text)
+
+    def test_merge_config_creates_output_dirs_before_writing_configs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module_yaml = root / "module.yaml"
+            answers = root / "answers.json"
+            config_path = root / "_bmad" / "config.yaml"
+            user_config_path = root / "_bmad" / "config.user.yaml"
+            blocked_output = root / "_bmad-output"
+            write_module_yaml(module_yaml)
+            blocked_output.write_text("not a directory", encoding="utf-8")
+            answers.write_text(
+                json.dumps(
+                    {
+                        "core": {
+                            "user_name": "Ada",
+                            "communication_language": "English",
+                            "document_output_language": "English",
+                            "output_folder": "{project-root}/_bmad-output",
+                        },
+                        "module": {"delivery_root": "adp/memory"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = run_script(
+                MERGE_CONFIG,
+                "--config-path",
+                str(config_path),
+                "--user-config-path",
+                str(user_config_path),
+                "--module-yaml",
+                str(module_yaml),
+                "--answers",
+                str(answers),
+                "--create-output-dirs",
+                check=False,
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["status"], "error")
+            self.assertIn("Failed to create output directory", result["error"])
+            self.assertFalse(config_path.exists())
+            self.assertFalse(user_config_path.exists())
 
     def test_scripts_reject_unresolved_project_root_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

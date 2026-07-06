@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
         "--legacy-dir",
         help="Directory containing legacy module/core config. Defaults to project _bmad.",
     )
+    parser.add_argument(
+        "--answers",
+        help="Optional answers JSON to validate after overlaying inline or collected values.",
+    )
     parser.add_argument("-o", "--output", help="Write JSON output to this file")
     parser.add_argument("--verbose", action="store_true", help="Print diagnostics to stderr")
     return parser.parse_args()
@@ -102,6 +106,17 @@ def load_yaml_file(path: Path, required: bool = False) -> dict[str, Any]:
         fail(f"Could not read {path}: {error}", 2)
     except yaml.YAMLError as error:
         fail(f"Could not parse YAML {path}: {error}", 1)
+    return data if isinstance(data, dict) else {}
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except OSError as error:
+        fail(f"Could not read {path}: {error}", 2)
+    except json.JSONDecodeError as error:
+        fail(f"Could not parse JSON {path}: {error}", 1)
     return data if isinstance(data, dict) else {}
 
 
@@ -230,6 +245,31 @@ def choose_defaults(
     return defaults, sources, missing
 
 
+def overlay_answers(
+    defaults: dict[str, dict[str, Any]], answers: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    overlaid = {
+        "core": dict(defaults.get("core", {})),
+        "module": dict(defaults.get("module", {})),
+    }
+    for scope in ("core", "module"):
+        values = answers.get(scope, {})
+        if isinstance(values, dict):
+            overlaid[scope].update(values)
+    return overlaid
+
+
+def remaining_missing_inputs(
+    missing: list[dict[str, str]], answers: dict[str, dict[str, Any]]
+) -> list[dict[str, str]]:
+    remaining = []
+    for item in missing:
+        value = answers.get(item["scope"], {}).get(item["key"])
+        if value is None or value == "":
+            remaining.append(item)
+    return remaining
+
+
 def apply_result_templates(
     variables: dict[str, dict[str, Any]], module_defaults: dict[str, Any]
 ) -> dict[str, Any]:
@@ -306,6 +346,35 @@ def install_state(config: dict[str, Any], module_code: str, legacy_files: list[s
     return "fresh_install"
 
 
+def resolve_project_token_path(project_root: Path, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if value.startswith(PROJECT_ROOT_TOKEN + "/"):
+        return Path(resolve_project_path(project_root, value))
+    return Path(value).expanduser().resolve()
+
+
+def installed_skills_dir(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
+    configured = resolve_project_token_path(project_root, config.get("bmad_builder_output_folder"))
+    candidates = []
+    if configured:
+        candidates.append(("config", configured))
+    candidates.extend(
+        [
+            ("default", project_root / "skills"),
+            ("agents", project_root / ".agents" / "skills"),
+            ("claude", project_root / ".claude" / "skills"),
+        ]
+    )
+
+    for source, path in candidates:
+        if path.is_dir():
+            return {"path": str(path.resolve()), "source": source}
+
+    source, path = candidates[0]
+    return {"path": str(path.resolve()), "source": f"{source}_default"}
+
+
 def main() -> None:
     args = parse_args()
     reject_unresolved_paths(
@@ -314,6 +383,7 @@ def main() -> None:
             ("--config-path", args.config_path),
             ("--user-config-path", args.user_config_path),
             ("--legacy-dir", args.legacy_dir),
+            ("--answers", args.answers),
         ]
     )
 
@@ -343,11 +413,15 @@ def main() -> None:
     defaults, sources, missing = choose_defaults(
         variables, current_core, current_module, legacy_core, legacy_module
     )
+    provided_answers = load_json_file(Path(args.answers)) if args.answers else {}
+    validated_answers = overlay_answers(defaults, provided_answers)
+    remaining_missing = remaining_missing_inputs(missing, validated_answers)
     metadata = extract_module_metadata(module_yaml)
     gaps = [
         f"Missing required {item['scope']} value: {item['key']}"
-        for item in missing
+        for item in remaining_missing
     ]
+    skills_dir = installed_skills_dir(project_root, config)
 
     result = {
         "status": "success",
@@ -368,12 +442,17 @@ def main() -> None:
         "effective_defaults": defaults,
         "default_sources": sources,
         "answers_template": defaults,
-        "missing_required_inputs": missing,
-        "headless_ready": not missing,
+        "provided_answers": provided_answers,
+        "validated_answers": validated_answers,
+        "pre_overlay_missing_required_inputs": missing,
+        "missing_required_inputs": remaining_missing,
+        "headless_ready": not remaining_missing,
         "unresolved_gaps": gaps,
         "directories_to_create": directories_to_create(
-            project_root, str(module_code), metadata, defaults, variables
+            project_root, str(module_code), metadata, validated_answers, variables
         ),
+        "installed_skills_dir": skills_dir["path"],
+        "installed_skills_dir_source": skills_dir["source"],
     }
     if args.verbose:
         print(
