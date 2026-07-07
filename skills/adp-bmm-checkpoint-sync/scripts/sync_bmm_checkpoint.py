@@ -7,12 +7,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+from checkpoint_discovery import run_discovery
+from checkpoint_registry import CandidateRegistry, parse_override_value
 
 
 CHECKPOINTS = {"prd", "architecture", "epic-story", "implementation", "validation", "baseline"}
@@ -61,7 +66,7 @@ class ArtifactUpdate:
     notes: str
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Sync a BMM checkpoint packet into _bmad-output/adp/memory/workstreams/{id}.",
     )
@@ -116,6 +121,17 @@ def parse_args() -> argparse.Namespace:
         metavar="GAP|DIMENSION|OWNER|ACTION|DUE|ESCALATION",
         help="Readiness gap row, repeatable.",
     )
+    parser.add_argument(
+        "--action-file",
+        help="JSON action handoff payload for adp-status-sync. Accepts a list or {'actions': [...]} object.",
+    )
+    parser.add_argument(
+        "--action",
+        action="append",
+        default=[],
+        metavar="OWNER|ACTION|DUE_OR_TRIGGER|CLOSURE_CRITERIA",
+        help="Local-only action handoff scoped to --workstream-id. Repeatable.",
+    )
     parser.add_argument("--record-status", choices=["draft", "gap", "ready"], help="Intentional ADP status update.")
     parser.add_argument(
         "--memory-root",
@@ -125,7 +141,95 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Report planned writes without changing files.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    args.command = "legacy-sync"
+    args.candidate_id = ""
+    args.handoff_actions = []
+    return args
+
+
+def parse_discover_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Discover a BMM checkpoint candidate and write intake registry.")
+    parser.add_argument("project_root", help="Project root containing ADP memory and BMM/TEA artifacts.")
+    parser.add_argument("--workstream-id", required=True, help="Workstream id. Normalized to lowercase hyphen-case.")
+    parser.add_argument("--checkpoint", required=True, choices=sorted(CHECKPOINTS), help="BMM checkpoint type.")
+    parser.add_argument("--artifact", action="append", default=[], metavar="[KEY=]PATH", help="BMM/TEA source artifact.")
+    parser.add_argument("--summary", default="", help="Project-level summary to carry into the candidate.")
+    parser.add_argument("--asserted-by", default="", help="Owner or source asserting the discovered facts.")
+    parser.add_argument("--authority-scope", action="append", default=[], help="Workstream the asserter can confirm.")
+    parser.add_argument("--affected-workstream", action="append", default=[], help="Workstream affected by this candidate.")
+    parser.add_argument("--required-confirmer", action="append", default=[], help="Required confirmer before project-level ready.")
+    parser.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Report planned candidate writes without changing files.")
+    parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    args = parser.parse_args(argv)
+    args.command = "discover"
+    return args
+
+
+def parse_confirm_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Confirm, dismiss, or supersede a BMM checkpoint candidate.")
+    parser.add_argument("project_root", help="Project root containing ADP memory.")
+    parser.add_argument("--candidate-id", required=True, help="Candidate id returned by discover.")
+    parser.add_argument("--decision", choices=["confirm", "dismiss", "supersede"], default="confirm")
+    parser.add_argument("--confirmed-by", default="", help="Owner or workflow making this confirmation.")
+    parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        metavar="PATH=VALUE",
+        help="Dot-path override to apply to the candidate, repeatable.",
+    )
+    parser.add_argument("--overrides-file", help="JSON object containing dot-path overrides.")
+    parser.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Report planned confirmation without changing files.")
+    parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    args = parser.parse_args(argv)
+    args.command = "confirm"
+    return args
+
+
+def parse_candidate_sync_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Sync a confirmed BMM checkpoint candidate into ADP memory.")
+    parser.add_argument("project_root", help="Project root containing ADP memory.")
+    parser.add_argument("--candidate-id", required=True, help="Confirmed candidate id to sync.")
+    parser.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Report planned writes without changing files.")
+    parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    args = parser.parse_args(argv)
+    args.command = "candidate-sync"
+    return args
+
+
+def parse_command_line(argv: list[str] | None = None) -> argparse.Namespace:
+    items = list(sys.argv[1:] if argv is None else argv)
+    if not items:
+        return parse_args(items)
+    command = items[0]
+    if command == "discover":
+        return parse_discover_args(items[1:])
+    if command == "confirm":
+        return parse_confirm_args(items[1:])
+    if command == "sync":
+        if "--candidate-id" in items[1:] or "-h" in items[1:] or "--help" in items[1:]:
+            return parse_candidate_sync_args(items[1:])
+        args = parse_args(items[1:])
+        args.command = "legacy-sync"
+        return args
+    return parse_args(items)
 
 
 def normalize_id(raw: str) -> str:
@@ -158,6 +262,293 @@ def compact_list(items: list[str]) -> list[str]:
             result.append(cleaned)
             seen.add(cleaned)
     return result
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def stable_digest(value: Any, length: int = 12) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()[:length]
+
+
+def clean_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def is_missing_value(value: Any) -> bool:
+    text = clean_text(value).lower()
+    return text in {"", "tbd", "todo", "unknown", "n/a", "na", "none", "unassigned"}
+
+
+def normalize_status(raw: Any) -> str:
+    status = clean_text(raw).lower().replace("_", "-")
+    if status in {"in progress", "inprogress"}:
+        status = "in-progress"
+    return status if status in {"open", "in-progress", "blocked", "done", "cancelled"} else "open"
+
+
+def normalize_workstream_items(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"\s*[,;]\s*", value)
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = [value]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = clean_text(item)
+        if is_missing_value(text):
+            continue
+        try:
+            normalized_id = normalize_id(text)
+        except ValueError:
+            continue
+        if normalized_id in seen:
+            continue
+        normalized.append(normalized_id)
+        seen.add(normalized_id)
+    return normalized
+
+
+def normalize_handoff_action(raw: dict[str, Any], default_workstream: str, default_source: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("handoff action must be a JSON object")
+    affected = normalize_workstream_items(
+        raw.get("affected_workstreams")
+        or raw.get("affectedWorkstreams")
+        or raw.get("impacts")
+    )
+    raw_workstream = clean_text(raw.get("workstream") or raw.get("workstream_id"))
+    if not raw_workstream and len(affected) > 1:
+        workstream = "program"
+    else:
+        workstream = raw_workstream or default_workstream
+        try:
+            workstream = normalize_id(workstream)
+        except ValueError:
+            workstream = clean_text(workstream)
+    action: dict[str, Any] = {
+        "owner": clean_text(raw.get("owner")),
+        "workstream": workstream,
+        "action": clean_text(raw.get("action") or raw.get("text") or raw.get("next_action")),
+        "source": clean_text(raw.get("source")) or default_source,
+        "reason": clean_text(raw.get("reason")) or f"{default_workstream} {workstream} checkpoint action",
+        "due_or_trigger": clean_text(raw.get("due_or_trigger") or raw.get("due") or raw.get("trigger")),
+        "status": normalize_status(raw.get("status")),
+        "closure_criteria": clean_text(raw.get("closure_criteria")),
+        "owning_workflow": clean_text(raw.get("owning_workflow")) or "adp-bmm-checkpoint-sync",
+    }
+    if affected:
+        action["affected_workstreams"] = affected
+    action_id = clean_text(raw.get("action_id") or raw.get("id"))
+    if action_id:
+        action["action_id"] = action_id
+    return action
+
+
+def claim_actions(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    claims = candidate.get("claims", {})
+    raw_actions = claims.get("actions", []) if isinstance(claims, dict) else []
+    if raw_actions is None:
+        return []
+    if not isinstance(raw_actions, list):
+        raw_actions = [raw_actions]
+    default_workstream = normalize_id(str(candidate.get("workstream_id", "")))
+    default_source = f"intake/bmm-checkpoints/candidates/{candidate.get('candidate_id', 'unknown')}.json#claims.actions"
+    return [normalize_handoff_action(item, default_workstream, default_source) for item in raw_actions]
+
+
+def load_action_file(path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if isinstance(payload, dict) and "actions" in payload:
+        payload = payload["actions"]
+    elif isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        raise ValueError("--action-file must contain a JSON list or an object with an actions list")
+    if not all(isinstance(item, dict) for item in payload):
+        raise ValueError("--action-file actions must be JSON objects")
+    return payload
+
+
+def parse_local_action_specs(raw_items: list[str], workstream_id: str, source: str) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for raw in raw_items:
+        owner, action, due_or_trigger, closure_criteria = split_pipe(raw, 4)
+        actions.append(
+            normalize_handoff_action(
+                {
+                    "owner": owner,
+                    "workstream": workstream_id,
+                    "action": action,
+                    "due_or_trigger": due_or_trigger,
+                    "closure_criteria": closure_criteria,
+                    "source": source,
+                    "reason": "BMM checkpoint local action",
+                    "status": "open",
+                    "owning_workflow": "adp-bmm-checkpoint-sync",
+                },
+                workstream_id,
+                source,
+            )
+        )
+    return actions
+
+
+def handoff_action_issues(action: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    generic_owners = {"fde owner", "owner", "team", "project team", "someone", "unknown", "unassigned"}
+    owner = clean_text(action.get("owner"))
+    if is_missing_value(owner) or owner.lower() in generic_owners:
+        issues.append("missing specific owner")
+    workstream = clean_text(action.get("workstream"))
+    if is_missing_value(workstream):
+        issues.append("missing workstream route")
+    affected = normalize_workstream_items(action.get("affected_workstreams", []))
+    if workstream == "program" and not affected:
+        issues.append("program action missing affected_workstreams")
+    if workstream != "program" and len(affected) > 1:
+        issues.append("cross-workstream action must use workstream program")
+    if not affected and workstream != "program" and len(normalize_workstream_items(action.get("impacts", []))) > 1:
+        issues.append("cross-workstream action missing affected_workstreams")
+    if is_missing_value(action.get("action")):
+        issues.append("missing observable action")
+    if is_missing_value(action.get("due_or_trigger")):
+        issues.append("missing due_or_trigger")
+    if is_missing_value(action.get("closure_criteria")):
+        issues.append("missing closure_criteria")
+    if is_missing_value(action.get("source")):
+        issues.append("missing source")
+    return issues
+
+
+def readiness_row_gap_message(row: Any) -> str | None:
+    if isinstance(row, str):
+        gap, _dimension, owner, action, due, _escalation = split_pipe(row, 6)
+    elif isinstance(row, list) and len(row) >= 6:
+        gap, _dimension, owner, action, due, _escalation = [clean_text(item) or "TBD" for item in row[:6]]
+    else:
+        return None
+    if is_missing_value(action) and is_missing_value(due):
+        return None
+    if is_missing_value(owner) or is_missing_value(action) or is_missing_value(due):
+        return None
+    return f"readiness gap '{gap}' has action/due but no closure_criteria"
+
+
+def audit_handoff_actions(
+    actions: list[dict[str, Any]],
+    readiness_rows: list[Any],
+    checkpoint_context: dict[str, Any],
+) -> dict[str, Any]:
+    blocked: list[dict[str, str]] = []
+    ready_count = 0
+    fanout_suppressed = 0
+    for action in actions:
+        issues = handoff_action_issues(action)
+        if issues:
+            blocked.append(
+                {
+                    "action": clean_text(action.get("action")) or "(missing action)",
+                    "reason": "; ".join(issues),
+                    "source": clean_text(action.get("source")) or checkpoint_context.get("source", "checkpoint action"),
+                }
+            )
+            continue
+        ready_count += 1
+        affected = normalize_workstream_items(action.get("affected_workstreams", []))
+        if clean_text(action.get("workstream")) == "program" and len(affected) > 1:
+            fanout_suppressed += len(affected) - 1
+    handoff_gaps = compact_list([message for row in readiness_rows if (message := readiness_row_gap_message(row))])
+    return {
+        "actions_seen": len(actions),
+        "ledger_ready_actions": ready_count,
+        "blocked_actions": blocked,
+        "handoff_gaps": handoff_gaps,
+        "fanout_suppressed": fanout_suppressed,
+        "no_op": False,
+    }
+
+
+def ledger_ready_handoff_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [action for action in actions if not handoff_action_issues(action)]
+
+
+def status_sync_intake_path(memory_root: Path, workstream_id: str, checkpoint: str, stable_key: str, dry_run: bool) -> Path:
+    _ = (workstream_id, checkpoint, dry_run)
+    return memory_root / "intake" / "status-sync" / f"{stable_key}-actions.json"
+
+
+def status_sync_intake_payload(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    updates: list[dict[str, Any]] = []
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for action in actions:
+        update_id = clean_text(action.get("workstream")) or "program"
+        if update_id not in by_id:
+            by_id[update_id] = []
+            order.append(update_id)
+        by_id[update_id].append(action)
+    for update_id in order:
+        updates.append({"id": update_id, "source": "adp-bmm-checkpoint-sync", "actions": by_id[update_id]})
+    return {"updates": updates}
+
+
+def load_canonical_json(path: Path) -> str | None:
+    try:
+        return canonical_json(json.loads(path.read_text(encoding="utf-8-sig")))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_status_sync_intake(
+    memory_root: Path,
+    workstream_id: str,
+    checkpoint: str,
+    actions: list[dict[str, Any]],
+    stable_key: str,
+    dry_run: bool,
+) -> tuple[Path, bool]:
+    path = status_sync_intake_path(memory_root, workstream_id, checkpoint, stable_key, dry_run)
+    payload = status_sync_intake_payload(actions)
+    canonical = canonical_json(payload)
+    if dry_run:
+        return path, False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target = path
+    existing = load_canonical_json(target) if target.exists() else None
+    if existing == canonical:
+        return target, True
+    if existing is not None and existing != canonical:
+        digest = stable_digest(payload, 8)
+        target = target.with_name(f"{target.stem}-{digest}{target.suffix}")
+        existing = load_canonical_json(target) if target.exists() else None
+        if existing == canonical:
+            return target, True
+        if existing is not None and existing != canonical:
+            counter = 2
+            while target.exists():
+                candidate = path.with_name(f"{path.stem}-{digest}-{counter}{path.suffix}")
+                existing = load_canonical_json(candidate) if candidate.exists() else None
+                if existing == canonical:
+                    return candidate, True
+                if existing is None:
+                    target = candidate
+                    break
+                counter += 1
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return target, False
+
+
+def status_sync_command_hints(project_root: Path, intake_path: Path) -> list[str]:
+    return [
+        f'If runner alias exists: adp-status-sync update "{project_root}" --updates-file "{intake_path}"',
+        f'Otherwise resolve adp-status-sync skill root and run: uv run "{{status-sync-skill-root}}/scripts/sync_status.py" update "{project_root}" --updates-file "{intake_path}"',
+    ]
 
 
 def split_pipe(raw: str, expected: int) -> list[str]:
@@ -363,6 +754,29 @@ def default_gaps(args: argparse.Namespace, owner: str, artifacts: list[ArtifactU
     return gaps
 
 
+def ready_validation_failures(
+    args: argparse.Namespace,
+    generated_gaps: list[list[str]],
+    artifacts: list[ArtifactUpdate],
+) -> list[str]:
+    if args.record_status != "ready":
+        return []
+    failures = [gap[0] for gap in generated_gaps]
+    if args.readiness_gap:
+        failures.append("explicit readiness gaps are present")
+    if not args.business_confirmation:
+        failures.append("business/customer confirmation is missing")
+    if args.impact and not args.business_confirmation:
+        failures.append("impacted workstream confirmation is missing")
+    if args.evidence_required and not args.evidence:
+        failures.append("evidence is required but no evidence rows were supplied")
+    if args.checkpoint == "validation" and not args.evidence:
+        failures.append("validation checkpoint is missing evidence rows")
+    if args.checkpoint == "implementation" and not args.evidence and not any(item.label == "Code / PR" for item in artifacts):
+        failures.append("implementation checkpoint is missing implementation evidence")
+    return compact_list(failures)
+
+
 def ensure_table_file(path: Path, title: str, header: str) -> bool:
     if path.exists():
         return False
@@ -550,32 +964,127 @@ def next_actions_for(args: argparse.Namespace, gaps: list[list[str]]) -> list[st
     return actions or ["Use adp-status-sync for lightweight updates between BMM checkpoints."]
 
 
-def main() -> int:
-    args = parse_args()
+def action_file_path(project_root: Path, raw_path: str) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
+def handoff_actions_from_args(
+    args: argparse.Namespace,
+    project_root: Path,
+    workstream_id: str,
+    default_source: str,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for raw in getattr(args, "handoff_actions", []) or []:
+        actions.append(normalize_handoff_action(raw, workstream_id, default_source))
+    action_file = getattr(args, "action_file", None)
+    if action_file:
+        for raw in load_action_file(action_file_path(project_root, action_file)):
+            actions.append(normalize_handoff_action(raw, workstream_id, default_source))
+    actions.extend(parse_local_action_specs(getattr(args, "action", []) or [], workstream_id, default_source))
+    return actions
+
+
+def legacy_handoff_stable_key(args: argparse.Namespace, workstream_id: str, checkpoint: str, date_str: str, actions: list[dict[str, Any]]) -> str:
+    payload = {
+        "workstream_id": workstream_id,
+        "checkpoint": checkpoint,
+        "summary": getattr(args, "summary", ""),
+        "artifact": getattr(args, "artifact", []),
+        "artifact_status": getattr(args, "artifact_status", ""),
+        "scope": getattr(args, "scope", []),
+        "acceptance": getattr(args, "acceptance", []),
+        "evidence_required": getattr(args, "evidence_required", []),
+        "open_question": getattr(args, "open_question", []),
+        "dependency": getattr(args, "dependency", []),
+        "impact": getattr(args, "impact", []),
+        "l0_reference": getattr(args, "l0_reference", []),
+        "risk": getattr(args, "risk", []),
+        "blocker": getattr(args, "blocker", []),
+        "milestone": getattr(args, "milestone", []),
+        "next_action": getattr(args, "next_action", []),
+        "business_confirmation": getattr(args, "business_confirmation", []),
+        "change_note": getattr(args, "change_note", []),
+        "evidence": getattr(args, "evidence", []),
+        "decision": getattr(args, "decision", []),
+        "readiness_gap": getattr(args, "readiness_gap", []),
+        "record_status": getattr(args, "record_status", ""),
+        "actions": actions,
+    }
+    payload_hash = stable_digest(payload, 16)
+    return f"{date_str}-bmm-checkpoint-{workstream_id}-{checkpoint}-{payload_hash}"
+
+
+def action_handoff_stable_key(args: argparse.Namespace, workstream_id: str, checkpoint: str, date_str: str, actions: list[dict[str, Any]]) -> str:
+    candidate_id = clean_text(getattr(args, "candidate_id", ""))
+    if candidate_id:
+        return f"{date_str}-bmm-checkpoint-{workstream_id}-{checkpoint}-{candidate_id}"
+    return legacy_handoff_stable_key(args, workstream_id, checkpoint, date_str, actions)
+
+
+def merge_action_handoff_result(
+    result: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+    workstream_id: str,
+    checkpoint: str,
+    date_str: str,
+    readiness_rows_for_audit: list[Any],
+) -> None:
+    default_source = (
+        f"intake/bmm-checkpoints/candidates/{args.candidate_id}.json#claims.actions"
+        if clean_text(getattr(args, "candidate_id", ""))
+        else f"legacy-bmm-checkpoint:{workstream_id}:{checkpoint}"
+    )
+    handoff_actions = handoff_actions_from_args(args, project_root, workstream_id, default_source)
+    audit = audit_handoff_actions(
+        handoff_actions,
+        readiness_rows_for_audit,
+        {"source": default_source, "workstream_id": workstream_id, "checkpoint": checkpoint},
+    )
+    ready_actions = ledger_ready_handoff_actions(handoff_actions)
+    status_sync_intake_files: list[str] = []
+    if ready_actions:
+        stable_key = action_handoff_stable_key(args, workstream_id, checkpoint, date_str, ready_actions)
+        intake_path, no_op = write_status_sync_intake(
+            memory_root,
+            workstream_id,
+            checkpoint,
+            ready_actions,
+            stable_key,
+            args.dry_run,
+        )
+        audit["no_op"] = no_op
+        status_sync_intake_files.append(str(intake_path))
+        result["next_actions"] = compact_list([*result.get("next_actions", []), *status_sync_command_hints(project_root, intake_path)])
+    result["status_sync_intake_files"] = status_sync_intake_files
+    result["action_handoff_audit"] = audit
+
+
+def run_legacy_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     project_root = Path(args.project_root).resolve()
     if not project_root.exists() or not project_root.is_dir():
-        emit({"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}, args.output)
-        return 2
+        return 2, {"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}
     try:
         workstream_id = normalize_id(args.workstream_id)
     except ValueError as exc:
-        emit({"ok": False, "error": str(exc), "raw_workstream_id": args.workstream_id}, args.output)
-        return 2
+        return 2, {"ok": False, "error": str(exc), "raw_workstream_id": args.workstream_id}
 
     memory_root = resolve_memory_root(project_root, args.memory_root)
     workstream_root = memory_root / "workstreams" / workstream_id
     record_path = workstream_root / "delivery-record.md"
     if not record_path.exists():
-        emit(
-            {
-                "ok": False,
-                "error": "delivery-record.md not found; run adp-workstream-register first",
-                "workstream_root": str(workstream_root),
-                "record_path": str(record_path),
-            },
-            args.output,
-        )
-        return 2
+        return 2, {
+            "ok": False,
+            "error": "delivery-record.md not found; run adp-workstream-register first",
+            "workstream_root": str(workstream_root),
+            "record_path": str(record_path),
+        }
 
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     date_str = timestamp[:10]
@@ -584,6 +1093,19 @@ def main() -> int:
     record_before = record_path.read_text(encoding="utf-8")
     owner = parse_owner(record_before)
     generated_gaps = default_gaps(args, owner, artifacts)
+    ready_failures = ready_validation_failures(args, generated_gaps, artifacts)
+    if ready_failures:
+        return 1, {
+            "ok": False,
+            "error": "record-status ready rejected; deterministic readiness blockers are present",
+            "record_status": args.record_status,
+            "validation_failures": ready_failures,
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "workstream_id": workstream_id,
+            "workstream_root": str(workstream_root),
+            "checkpoint": args.checkpoint,
+        }
     record_after = update_record(record_before, args, artifacts, generated_gaps, timestamp)
 
     evidence_path = workstream_root / "evidence.md"
@@ -655,12 +1177,221 @@ def main() -> int:
         "decisions_added": decision_added,
         "readiness_gaps_added": readiness_added,
         "generated_gaps": [gap[0] for gap in generated_gaps],
+        "ready_validation_failures": [],
         "daily_log": str(daily_path),
         "warnings": warnings,
         "next_actions": next_actions_for(args, generated_gaps),
     }
-    emit(result, args.output)
-    return 0
+    merge_action_handoff_result(
+        result,
+        args=args,
+        project_root=project_root,
+        memory_root=memory_root,
+        workstream_id=workstream_id,
+        checkpoint=args.checkpoint,
+        date_str=date_str,
+        readiness_rows_for_audit=[*args.readiness_gap, *generated_gaps],
+    )
+    return 0, result
+
+
+def overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    if args.overrides_file:
+        payload = json.loads(Path(args.overrides_file).read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict):
+            raise ValueError("--overrides-file must contain a JSON object")
+        overrides.update(payload)
+    for raw in args.override:
+        if "=" not in raw:
+            raise ValueError(f"override must use PATH=VALUE: {raw}")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"override path is empty: {raw}")
+        overrides[key] = parse_override_value(value)
+    return overrides
+
+
+def run_confirm(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    project_root = Path(args.project_root).resolve()
+    if not project_root.exists() or not project_root.is_dir():
+        return 2, {"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}
+    try:
+        overrides = overrides_from_args(args)
+        registry = CandidateRegistry(resolve_memory_root(project_root, args.memory_root))
+        result = registry.confirm(
+            args.candidate_id,
+            args.decision,
+            overrides,
+            confirmed_by=args.confirmed_by,
+            dry_run=args.dry_run,
+        )
+        return (0 if result.get("ok") else 2), result
+    except Exception as exc:
+        return 2, {"ok": False, "error": str(exc), "candidate_id": args.candidate_id}
+
+
+def claim_list(claims: dict[str, Any], key: str) -> list[str]:
+    value = claims.get(key, [])
+    if isinstance(value, list):
+        return compact_list([str(item) for item in value])
+    if value:
+        return compact_list([str(value)])
+    return []
+
+
+def candidate_readiness_gaps(candidate: dict[str, Any]) -> list[str]:
+    claims = candidate.get("claims", {})
+    authority = candidate.get("authority", {})
+    gaps = claim_list(claims, "readiness_gaps")
+    gaps.extend(claim_list(claims, "open_questions"))
+    confirmation_state = authority.get("confirmation_state", "")
+    if confirmation_state in {"discovered", "cross-line-pending", "business-pending"}:
+        gaps.append(f"Confirmation state is {confirmation_state}; do not mark record ready.")
+    required_confirmers = compact_list([str(item) for item in authority.get("required_confirmers", [])])
+    confirmed_by = {
+        str(event.get("confirmed_by", "")).strip()
+        for event in candidate.get("confirmation_events", [])
+        if str(event.get("confirmed_by", "")).strip()
+    }
+    missing_confirmers = [item for item in required_confirmers if item not in confirmed_by]
+    if missing_confirmers:
+        gaps.append("Required confirmers missing: " + ", ".join(missing_confirmers))
+    if not claim_list(claims, "business_confirmation"):
+        gaps.append("Business/customer confirmation is missing.")
+    if candidate.get("checkpoint") == "validation" and not claim_list(claims, "evidence"):
+        gaps.append("Validation checkpoint is missing evidence rows.")
+    return compact_list(gaps)
+
+
+def candidate_to_sync_args(args: argparse.Namespace, candidate: dict[str, Any]) -> argparse.Namespace:
+    claims = candidate.get("claims", {})
+    scope = claims.get("scope", {}) if isinstance(claims.get("scope"), dict) else {}
+    acceptance = claims.get("acceptance", {}) if isinstance(claims.get("acceptance"), dict) else {}
+    artifact = candidate.get("artifact", {})
+    authority = candidate.get("authority", {})
+    artifact_path = str(artifact.get("path", ""))
+    artifact_kind = str(artifact.get("kind", candidate.get("checkpoint", "artifact")))
+    artifact_status = str(artifact.get("status", "linked")).lower()
+    if artifact_status not in ARTIFACT_STATUSES:
+        artifact_status = "linked"
+
+    asserted_by = str(authority.get("asserted_by") or "TBD")
+    source_link = artifact_path or str(candidate.get("candidate_id"))
+    readiness_gaps = candidate_readiness_gaps(candidate)
+    record_status = "gap" if readiness_gaps else None
+
+    evidence_rows = [
+        f"{item}|source|{source_link}|TBD|candidate|TBD"
+        for item in claim_list(claims, "evidence")
+    ]
+    decision_rows = [
+        f"checkpoint|{item}|{asserted_by}|{candidate.get('checkpoint')} checkpoint|candidate|{source_link}"
+        for item in claim_list(claims, "decisions")
+    ]
+    readiness_rows_for_sync = [
+        f"{gap}|Checkpoint readiness|{asserted_by}|Resolve before record-status ready|Before readiness review|Project lead if unresolved"
+        for gap in readiness_gaps
+    ]
+    business_confirmation = claim_list(claims, "business_confirmation")
+    confirmation_state = str(authority.get("confirmation_state") or "")
+    if confirmation_state:
+        business_confirmation.append(f"candidate confirmation state: {confirmation_state}")
+
+    return argparse.Namespace(
+        command="candidate-sync-inner",
+        project_root=args.project_root,
+        workstream_id=candidate.get("workstream_id", ""),
+        checkpoint=candidate.get("checkpoint", ""),
+        summary=claims.get("summary") or f"{candidate.get('checkpoint')} checkpoint candidate {candidate.get('candidate_id')}",
+        artifact=[f"{artifact_kind}={artifact_path}"] if artifact_path else [],
+        artifact_status=artifact_status,
+        scope=compact_list([str(item) for item in scope.get("in", [])]),
+        acceptance=compact_list([str(item) for item in acceptance.get("criteria", [])]),
+        evidence_required=compact_list([str(item) for item in acceptance.get("evidence_required", [])]),
+        open_question=claim_list(claims, "open_questions"),
+        dependency=claim_list(claims, "dependencies"),
+        impact=claim_list(claims, "impacts"),
+        l0_reference=[],
+        risk=claim_list(claims, "risks"),
+        blocker=[],
+        milestone=[],
+        next_action=claim_list(claims, "next_actions"),
+        business_confirmation=compact_list(business_confirmation),
+        change_note=[f"Candidate {candidate.get('candidate_id')} from {artifact.get('source_scope_key', 'unknown source')}"],
+        evidence=evidence_rows,
+        decision=decision_rows,
+        readiness_gap=readiness_rows_for_sync,
+        record_status=record_status,
+        memory_root=args.memory_root,
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        output=None,
+        candidate_id=candidate.get("candidate_id", ""),
+        action_file=None,
+        action=[],
+        handoff_actions=claim_actions(candidate),
+    )
+
+
+def run_candidate_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    project_root = Path(args.project_root).resolve()
+    if not project_root.exists() or not project_root.is_dir():
+        return 2, {"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}
+    registry = CandidateRegistry(resolve_memory_root(project_root, args.memory_root))
+    candidate = registry.load(args.candidate_id)
+    if not candidate:
+        return 2, {"ok": False, "error": "candidate not found", "candidate_id": args.candidate_id}
+    if candidate.get("status") == "applied":
+        return 0, {
+            "ok": True,
+            "no_op": True,
+            "candidate_id": args.candidate_id,
+            "status": "applied",
+            "candidate_path": str(registry.candidate_path(args.candidate_id)),
+            "status_sync_intake_files": [],
+            "action_handoff_audit": {
+                "actions_seen": 0,
+                "ledger_ready_actions": 0,
+                "blocked_actions": [],
+                "handoff_gaps": [],
+                "fanout_suppressed": 0,
+                "no_op": True,
+            },
+        }
+    if candidate.get("status") != "confirmed":
+        return 2, {
+            "ok": False,
+            "error": "candidate must be confirmed before sync",
+            "candidate_id": args.candidate_id,
+            "status": candidate.get("status"),
+            "candidate_path": str(registry.candidate_path(args.candidate_id)),
+        }
+
+    sync_args = candidate_to_sync_args(args, candidate)
+    code, result = run_legacy_sync(sync_args)
+    result["candidate_id"] = args.candidate_id
+    result["candidate_path"] = str(registry.candidate_path(args.candidate_id))
+    if code == 0:
+        applied = registry.mark_applied(args.candidate_id, result, dry_run=args.dry_run)
+        result["candidate_status"] = applied.get("status")
+        result["candidate_no_op"] = applied.get("no_op", False)
+    return code, result
+
+
+def main() -> int:
+    args = parse_command_line()
+    if args.command == "discover":
+        code, result = run_discovery(args)
+    elif args.command == "confirm":
+        code, result = run_confirm(args)
+    elif args.command == "candidate-sync":
+        code, result = run_candidate_sync(args)
+    else:
+        code, result = run_legacy_sync(args)
+    emit(result, getattr(args, "output", None))
+    return code
 
 
 def emit(result: dict, output: str | None) -> None:
