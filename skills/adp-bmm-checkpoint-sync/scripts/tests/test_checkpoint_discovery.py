@@ -112,6 +112,21 @@ status: baseline
             synced_again = self.run_command("sync", str(project_root), "--candidate-id", candidate_id)
 
             self.assertEqual(discovered["status"], "discovered")
+            self.assertTrue(discovered["confirmation_required"])
+            self.assertEqual(discovered["source_scope_key"], discovered["candidate"]["artifact"]["source_scope_key"])
+            self.assertEqual(discovered["authority_scope"], ["l1-checkout"])
+            self.assertEqual(discovered["affected_workstreams"], ["l1-checkout"])
+            self.assertEqual(discovered["required_confirmers"], [])
+            self.assertEqual(discovered["confirmation_state"], "discovered")
+            self.assertEqual(discovered["selected_artifacts"][0]["kind"], "prd")
+            self.assertEqual(discovered["ignored_artifacts"], [])
+            self.assertTrue(Path(discovered["review_paths"]["candidate_json"]).exists())
+            self.assertTrue(Path(discovered["review_paths"]["preview_md"]).exists())
+            self.assertIn("--decision confirm", discovered["next_commands"]["confirm"])
+            self.assertIn("--decision dismiss", discovered["next_commands"]["dismiss"])
+            preview_text = Path(discovered["review_paths"]["preview_md"]).read_text(encoding="utf-8")
+            self.assertIn("## Confirmation Checklist", preview_text)
+            self.assertIn("Next commands:", preview_text)
             self.assertEqual(confirmed["status"], "confirmed")
             self.assertEqual(synced["candidate_status"], "applied")
             self.assertTrue(synced_again["no_op"])
@@ -195,6 +210,38 @@ status: baseline
             )
             self.assertIn({"path": "$.gate", "value": "PASS", "line": 1}, trace_fields)
             self.assertIn({"path": "$.coverage.statements", "value": "91", "line": 1}, trace_fields)
+
+    def test_discover_reports_ignored_additional_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.register_workstream(project_root)
+            docs = project_root / "docs"
+            docs.mkdir()
+            prd = docs / "prd.md"
+            arch = docs / "architecture.md"
+            prd.write_text("# PRD\n\n## Scope\n\n- Checkout\n", encoding="utf-8")
+            arch.write_text("# Architecture\n\n## Decisions\n\n- Use event intake\n", encoding="utf-8")
+
+            discovered = self.run_command(
+                "discover",
+                str(project_root),
+                "--workstream-id",
+                "L1 Checkout",
+                "--checkpoint",
+                "baseline",
+                "--artifact",
+                f"prd={prd}",
+                "--artifact",
+                f"architecture={arch}",
+                "--summary",
+                "Baseline uses PRD and architecture inputs",
+            )
+
+            self.assertEqual(discovered["selected_artifacts"][0]["path"], str(prd.resolve()).replace("\\", "/"))
+            self.assertEqual(discovered["ignored_artifacts"][0]["path"], str(arch.resolve()).replace("\\", "/"))
+            self.assertIn("Only first existing artifact is bound", discovered["warnings"][0])
+            candidate = json.loads(Path(discovered["candidate_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(candidate["ignored_artifacts"][0]["reason"], "only first existing artifact is bound to this candidate")
 
 
 if __name__ == "__main__":

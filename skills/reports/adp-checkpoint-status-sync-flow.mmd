@@ -1,0 +1,48 @@
+%%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 54, "rankSpacing": 72}, "theme": "base", "themeVariables": {"fontFamily": "Microsoft YaHei, Arial, sans-serif", "primaryTextColor": "#1f2937", "lineColor": "#6b7280"}}}%%
+flowchart LR
+    A["Owner Action 清单 / 当前状态"]
+    B["L Owner 推进本线 BMM 主线<br/>PRD / Architecture / Epic / Story / Dev / Validation"]
+    C["adp-bmm-checkpoint-sync"]
+    D["adp-meeting-sync"]
+    E["adp-status-sync"]
+    F["ADP 共享事实面<br/>WDR / evidence / decisions / readiness / daily"]
+    G["checkpoint action intake"]
+    H["meeting action intake"]
+    I["adp-agent-program-lead<br/>生成 Owner action 清单 / 项目视图"]
+    J["触发源<br/>人工输入 / checkpoint gap / meeting 分类 /<br/>status 异常 / Program Lead 建议 / milestone"]
+    K["adp-risk-dependency-change-review<br/>跨线风险 / 依赖 / scope change / 业务待决"]
+    L["adp-acceptance-readiness-review<br/>evidence / acceptance / readiness / cutover"]
+
+    A --> B
+    B --> C
+    B --> D
+    B --> E
+
+    C --> F
+    D --> F
+    E --> F
+
+    C --> G
+    D --> H
+    G --> E
+    H --> E
+
+    F --> I
+    I --> A
+
+    J --> K
+    J --> L
+    K --> F
+    L --> F
+
+    classDef main fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1f2937;
+    classDef sync fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#1f2937;
+    classDef intake fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#1f2937;
+    classDef review fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#1f2937;
+    classDef shared fill:#ffffff,stroke:#6b7280,stroke-width:2px,color:#1f2937;
+
+    class A,B main;
+    class C,D,E sync;
+    class G,H intake;
+    class I,J,K,L review;
+    class F shared;

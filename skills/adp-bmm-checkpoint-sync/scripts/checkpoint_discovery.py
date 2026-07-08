@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from checkpoint_extractors import CHECKPOINTS, discover_candidate
+from checkpoint_extractors import CHECKPOINTS, discover_candidate, render_preview
 from checkpoint_registry import CandidateRegistry
 
 
@@ -50,6 +51,62 @@ def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
     return memory_root.resolve()
 
 
+def shell_command(parts: list[str]) -> str:
+    return " ".join(subprocess.list2cmdline([str(part)]) for part in parts)
+
+
+def confirmation_checklist(candidate: dict[str, Any], registry: CandidateRegistry, project_root: Path) -> dict[str, Any]:
+    candidate_id = candidate["candidate_id"]
+    authority = candidate.get("authority", {})
+    script_path = Path(__file__).with_name("sync_bmm_checkpoint.py").resolve()
+    return {
+        "confirmation_required": True,
+        "selected_artifacts": candidate.get("selected_artifacts", []),
+        "ignored_artifacts": candidate.get("ignored_artifacts", []),
+        "source_scope_key": candidate.get("artifact", {}).get("source_scope_key", ""),
+        "authority_scope": authority.get("authority_scope", []),
+        "affected_workstreams": authority.get("affected_workstreams", []),
+        "required_confirmers": authority.get("required_confirmers", []),
+        "confirmation_state": authority.get("confirmation_state", "discovered"),
+        "review_paths": {
+            "candidate_json": str(registry.candidate_path(candidate_id)),
+            "preview_md": str(registry.preview_path(candidate_id)),
+        },
+        "next_commands": {
+            "confirm": shell_command(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "confirm",
+                    str(project_root),
+                    "--candidate-id",
+                    candidate_id,
+                    "--decision",
+                    "confirm",
+                    "--confirmed-by",
+                    "<owner>",
+                    "--override",
+                    "authority.confirmation_state=confirmed-local",
+                ]
+            ),
+            "dismiss": shell_command(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "confirm",
+                    str(project_root),
+                    "--candidate-id",
+                    candidate_id,
+                    "--decision",
+                    "dismiss",
+                    "--confirmed-by",
+                    "<owner>",
+                ]
+            ),
+        },
+    }
+
+
 def run_discovery(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     project_root = Path(args.project_root).resolve()
     if not project_root.exists() or not project_root.is_dir():
@@ -67,7 +124,11 @@ def run_discovery(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             required_confirmers=args.required_confirmer,
         )
         registry = CandidateRegistry(resolve_memory_root(project_root, args.memory_root))
+        checklist = confirmation_checklist(candidate, registry, project_root)
+        candidate["confirmation_checklist"] = checklist
+        preview = render_preview(candidate)
         result = registry.discover(candidate, preview, dry_run=args.dry_run)
+        result.update(checklist)
         result["warnings"] = warnings
         return 0, result
     except Exception as exc:

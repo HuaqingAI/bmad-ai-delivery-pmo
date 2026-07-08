@@ -75,6 +75,24 @@ class SyncBmmCheckpointTests(unittest.TestCase):
         )
         return json.loads(completed.stdout)
 
+    def run_dry_run_report(self, *args: str, check: bool = True) -> dict:
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            check=check,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        report_path = ""
+        for line in completed.stdout.splitlines():
+            if line.startswith("report_path:"):
+                report_path = line.split(":", 1)[1].strip()
+                break
+        self.assertTrue(report_path, completed.stdout)
+        report = Path(report_path)
+        self.assertTrue(report.exists())
+        return json.loads(report.read_text(encoding="utf-8"))
+
     def write_prd(self, project_root: Path) -> Path:
         docs = project_root / "docs"
         docs.mkdir(exist_ok=True)
@@ -536,8 +554,8 @@ class SyncBmmCheckpointTests(unittest.TestCase):
             project_root = Path(temp_dir)
             self.register_workstream(project_root)
 
-            result = self.run_script(
-                project_root,
+            result = self.run_dry_run_report(
+                str(project_root),
                 "--workstream-id",
                 "l1-checkout",
                 "--checkpoint",
@@ -555,7 +573,97 @@ class SyncBmmCheckpointTests(unittest.TestCase):
 
             intake = Path(result["status_sync_intake_files"][0])
             self.assertTrue(result["dry_run"])
+            self.assertEqual(result["stdout_only"], False)
+            self.assertEqual(result["report_path"], result["dry_run_report_path"])
+            self.assertTrue(result["report_exists"])
+            self.assertTrue(Path(result["report_path"]).exists())
+            self.assertTrue(result["can_apply"])
+            self.assertEqual(result["apply_blockers"], [])
+            self.assertEqual(result["recommended_next_step"], "review_then_apply")
+            self.assertIn("--workstream-id l1-checkout", result["apply_command"])
+            self.assertIn("-o", result["apply_command"])
             self.assertFalse(intake.exists())
+
+    def test_legacy_dry_run_explicit_output_is_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.register_workstream(project_root)
+            report = project_root / "review" / "legacy-dry-run.json"
+
+            result = self.run_dry_run_report(
+                str(project_root),
+                "--workstream-id",
+                "l1-checkout",
+                "--checkpoint",
+                "prd",
+                "--summary",
+                "显式输出路径 dry-run",
+                "--business-confirmation",
+                "Biz-A owns final confirmation",
+                "--dry-run",
+                "-o",
+                str(report),
+            )
+
+            self.assertEqual(Path(result["report_path"]), report.resolve())
+            self.assertTrue(result["report_exists"])
+            self.assertFalse(result["stdout_only"])
+
+    def test_candidate_sync_dry_run_writes_candidate_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.register_workstream(project_root)
+            candidate_id = self.discover_confirm_candidate(project_root)
+
+            result = self.run_dry_run_report("sync", str(project_root), "--candidate-id", candidate_id, "--dry-run")
+
+            report = Path(result["report_path"])
+            self.assertEqual(report.name, f"{candidate_id}-sync-dry-run.json")
+            self.assertTrue(result["report_exists"])
+            self.assertEqual(result["candidate_id"], candidate_id)
+            self.assertEqual(result["planned_files"], result["files_planned"])
+            self.assertTrue(result["apply_command"].startswith(sys.executable))
+            candidate = json.loads(Path(result["candidate_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(candidate["status"], "confirmed")
+
+    def test_ready_guardrail_dry_run_report_blocks_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.register_workstream(project_root)
+
+            result = self.run_dry_run_report(
+                str(project_root),
+                "--workstream-id",
+                "l1-checkout",
+                "--checkpoint",
+                "validation",
+                "--summary",
+                "Validation looks complete in prose",
+                "--record-status",
+                "ready",
+                "--dry-run",
+                check=False,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["can_apply"])
+            self.assertIn("validation checkpoint is missing evidence rows", result["apply_blockers"])
+            self.assertEqual(result["recommended_next_step"], "run_readiness_review")
+
+    def test_top_level_help_shows_recommended_subcommands(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertIn("Recommended path", completed.stdout)
+        self.assertIn("discover <project-root>", completed.stdout)
+        self.assertIn("confirm <project-root>", completed.stdout)
+        self.assertIn("sync <project-root> --candidate-id", completed.stdout)
+        self.assertIn("packet-sync", completed.stdout)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ uv run "{skill-root}/scripts/resolve_bmad_config.py" "{project-root}"
 
 Use the JSON `communication_language` for conversation and status output, `document_output_language` for generated project documents and report text, and surface any resolver warnings.
 
+On Windows, set `PYTHONIOENCODING=utf-8` before running the sync script. For dry-runs, prefer `-o` when the caller needs a specific review path; otherwise the script writes a default dry-run report under ADP memory and prints only a short stdout summary.
+
 ## On Activation
 
 Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; if a sync target workstream record is missing, tell the user to run `adp-workstream-register` first. Continue only when a workstream id and checkpoint are known, or when the user supplied a `candidate_id` for confirm/sync.
@@ -78,6 +80,8 @@ uv run "{skill-root}/scripts/sync_bmm_checkpoint.py" discover "{project-root}" -
 
 Use optional authority flags when known: `--asserted-by`, `--authority-scope`, `--affected-workstream`, and `--required-confirmer`. Use `--dry-run` to preview.
 
+Discover returns a confirmation checklist with `confirmation_required`, `selected_artifacts`, `ignored_artifacts`, authority scope, review paths, and confirm/dismiss commands. After discover, show that checklist and stop for explicit scope confirmation; do not sync a discovered candidate. Headless callers must treat `confirmation_required: true` as the next-state signal. If several artifacts are supplied, only the first existing artifact is bound unless the script explicitly supports multi-source; surface `ignored_artifacts` and use `packet-sync` for multi-source baseline packets.
+
 Fact source priority within a checkpoint:
 
 | Checkpoint | Prefer |
@@ -100,13 +104,7 @@ uv run "{skill-root}/scripts/sync_bmm_checkpoint.py" confirm "{project-root}" --
 
 Use `--override path=value` for candidate corrections. Repeating the same confirmation is a no-op; different overrides append a confirmation event instead of silently replacing history. Use `--decision dismiss` for a candidate that should not be synced.
 
-Add or replace candidate actions with whole-field overrides, not list-index patches:
-
-```bash
-uv run "{skill-root}/scripts/sync_bmm_checkpoint.py" confirm "{project-root}" --candidate-id CHK-... --confirmed-by "FDE-A" --override 'claims.actions=[{"owner":"FDE-A","workstream":"{workstream-id}","action":"Link checkout smoke test evidence","due_or_trigger":"before acceptance readiness review","closure_criteria":"Evidence row links the smoke test report","source":"workstreams/{workstream-id}/readiness.md#validation-gap","reason":"validation checkpoint readiness gap","status":"open","owning_workflow":"adp-bmm-checkpoint-sync"}]'
-```
-
-For larger payloads, prefer `--overrides-file` with a JSON object such as `{"claims.actions":[...]}`.
+Add or replace candidate actions with whole-field overrides, not list-index patches. Prefer `--overrides-file` for action payloads, using a JSON object such as `{"claims.actions":[...]}`.
 
 ## Sync
 
@@ -118,6 +116,8 @@ uv run "{skill-root}/scripts/sync_bmm_checkpoint.py" sync "{project-root}" --can
 
 The sync writes WDR artifact rows, project status, cross-workstream links, evidence, decisions, readiness gaps, and the checkpoint daily log using the existing writer. After that writer succeeds, it emits status-sync intake for ledger-ready `claims.actions`; an already `applied` candidate returns `no_op=true` and does not rewrite WDR / evidence / decisions / readiness / daily or emit new intake.
 
+Candidate sync dry-run writes a review report by default at `intake/bmm-checkpoints/dry-runs/{candidate-id}-sync-dry-run.json`. The JSON carries `report_path`, `report_exists`, `stdout_only: false`, `planned_files`, `can_apply`, `apply_blockers`, `recommended_next_step`, and `apply_command`.
+
 Compatibility mode still accepts the old packet shape:
 
 ```bash
@@ -125,6 +125,8 @@ uv run "{skill-root}/scripts/sync_bmm_checkpoint.py" "{project-root}" --workstre
 ```
 
 Use compatibility mode only when the caller already supplied reliable facts. Run it with `--dry-run` first, review the planned files, generated gaps, record status, and action handoff audit, then execute the same packet only after explicit confirmation; automators should stay on candidate sync unless they already hold a confirmed packet. Add optional facts only when the source supports them; run `uv run "{skill-root}/scripts/sync_bmm_checkpoint.py" --help` for the current flag surface.
+
+Compatibility dry-run writes a review report by default at `intake/bmm-checkpoints/dry-runs/{date}-{workstream}-{checkpoint}-{hash}.json`; explicit `-o` overrides that path and must be reflected in `report_path`. If `record-status=ready` is blocked, treat `can_apply=false` and `apply_blockers` as the authoritative next-step signal.
 
 `--action-file <path>` accepts the same action objects as `claims.actions`, either as a list or `{ "actions": [...] }`. Use it for `program` and cross-workstream actions with `affected_workstreams`. `--action "owner|action|due_or_trigger|closure_criteria"` is a local convenience scoped only to the current `--workstream-id`; it cannot express fanout. Do not treat free-form `--next-action` or `claims.next_actions` as ledger-ready, and do not convert ordinary `--readiness-gap` rows into actions because that row schema has no `closure_criteria`.
 
@@ -144,11 +146,11 @@ Prefer `gap` over invented certainty. The script rejects `--record-status ready`
 
 ## Output Contract
 
-After discover, report the candidate id, candidate JSON path, preview path, status, superseded candidates, and warnings.
+After discover, report the candidate id, `candidate_path`, `preview_path`, status, superseded candidates, warnings, and the confirmation checklist. Verify paths exist before saying files were generated; dry-run report paths are separate from candidate review paths.
 
 After confirm, report candidate id, status, whether it was a no-op, and the candidate path.
 
-After sync, report the workstream folder path, files updated or planned in dry-run, artifact rows changed, visible gaps added to readiness, decisions/evidence rows created, daily log path, candidate status, `status_sync_intake_files`, `action_handoff_audit`, and the next useful workflow. Usually that is `adp-acceptance-readiness-review` for evidence gaps or `adp-risk-dependency-change-review` for risks, dependencies, changes, or business decisions.
+After sync, report the workstream folder path, files updated, `planned_files` for dry-run, artifact rows changed, visible gaps added to readiness, decisions/evidence rows created, daily log path, candidate status, `candidate_path`, `preview_path`, `dry_run_report_path`, `status_sync_intake_files`, `action_handoff_audit`, and the next useful workflow. Planned files are not generated files. Usually the next workflow is `adp-acceptance-readiness-review` for evidence gaps or `adp-risk-dependency-change-review` for risks, dependencies, changes, or business decisions.
 
 When `status_sync_intake_files` is non-empty, surface both command shapes:
 

@@ -71,7 +71,7 @@ def discover_candidate(
         raise ValueError(f"unsupported checkpoint: {checkpoint}")
     project_root = project_root.resolve()
     normalized_workstream = normalize_id(workstream_id)
-    artifact, warnings = select_artifact(project_root, checkpoint, artifact_args)
+    artifact, warnings, selected_artifacts, ignored_artifacts = select_artifact(project_root, checkpoint, artifact_args)
     if not artifact["exists"]:
         raise ValueError(f"artifact not found: {artifact['path']}")
 
@@ -105,30 +105,76 @@ def discover_candidate(
         "source_prepass": source_prepass,
         "authority": authority,
         "source_refs": source_refs(artifact_path),
+        "confirmation_required": True,
+        "selected_artifacts": selected_artifacts,
+        "ignored_artifacts": ignored_artifacts,
     }
     return candidate, render_preview(candidate), warnings
 
 
-def select_artifact(project_root: Path, checkpoint: str, artifact_args: list[str]) -> tuple[dict[str, Any], list[str]]:
+def select_artifact(project_root: Path, checkpoint: str, artifact_args: list[str]) -> tuple[dict[str, Any], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     warnings: list[str] = []
     if artifact_args:
+        candidates: list[dict[str, Any]] = []
         for raw in artifact_args:
             key, raw_path = parse_artifact_arg(raw)
             path = resolve_artifact_path(project_root, raw_path)
             kind = infer_kind(key, path, checkpoint)
-            if path.exists():
-                return {"kind": kind, "path": str(path), "exists": True}, warnings
-            warnings.append(f"ignored missing artifact: {raw_path}")
-        key, raw_path = parse_artifact_arg(artifact_args[0])
-        path = resolve_artifact_path(project_root, raw_path)
-        return {"kind": infer_kind(key, path, checkpoint), "path": str(path), "exists": False}, warnings
+            candidates.append(
+                {
+                    "raw": raw,
+                    "kind": kind,
+                    "path": str(path),
+                    "exists": path.exists(),
+                }
+            )
+        selected = next((item for item in candidates if item["exists"]), candidates[0])
+        selected_artifacts = [artifact_selection_row(selected, "bound to candidate")]
+        ignored_artifacts: list[dict[str, Any]] = []
+        ignored_existing = False
+        for item in candidates:
+            if item is selected:
+                continue
+            reason = "only first existing artifact is bound to this candidate" if item["exists"] else "missing artifact"
+            ignored_artifacts.append(artifact_selection_row(item, reason))
+            if item["exists"]:
+                ignored_existing = True
+            else:
+                warnings.append(f"ignored missing artifact: {item['raw']}")
+        if ignored_existing:
+            warnings.append(
+                "Only first existing artifact is bound to this candidate; use packet-sync for multi-source baseline."
+            )
+        return {"kind": selected["kind"], "path": selected["path"], "exists": selected["exists"]}, warnings, selected_artifacts, ignored_artifacts
 
     for pattern in SOURCE_GLOBS.get(checkpoint, []):
         matches = sorted(project_root.glob(pattern))
         for path in matches:
             if path.is_file():
-                return {"kind": infer_kind("", path, checkpoint), "path": str(path), "exists": True}, warnings
-    return {"kind": checkpoint, "path": str(project_root / SOURCE_GLOBS.get(checkpoint, [checkpoint])[0]), "exists": False}, warnings
+                selected = {
+                    "raw": pattern,
+                    "kind": infer_kind("", path, checkpoint),
+                    "path": str(path),
+                    "exists": True,
+                }
+                return {"kind": selected["kind"], "path": selected["path"], "exists": True}, warnings, [artifact_selection_row(selected, "auto-discovered")], []
+    missing = {
+        "raw": SOURCE_GLOBS.get(checkpoint, [checkpoint])[0],
+        "kind": checkpoint,
+        "path": str(project_root / SOURCE_GLOBS.get(checkpoint, [checkpoint])[0]),
+        "exists": False,
+    }
+    return {"kind": checkpoint, "path": missing["path"], "exists": False}, warnings, [], [artifact_selection_row(missing, "not found")]
+
+
+def artifact_selection_row(item: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "raw": item.get("raw", ""),
+        "kind": item.get("kind", ""),
+        "path": portable_path(Path(item.get("path", ""))),
+        "exists": bool(item.get("exists")),
+        "reason": reason,
+    }
 
 
 def parse_artifact_arg(raw: str) -> tuple[str, str]:
@@ -567,9 +613,53 @@ def render_preview(candidate: dict[str, Any]) -> str:
         f"- Required confirmers: {', '.join(authority.get('required_confirmers', [])) or 'none'}",
         f"- Confirmation state: {authority.get('confirmation_state', 'discovered')}",
         "",
-        "## Parsed Source",
+        "## Artifact Selection",
         "",
     ]
+    selected = candidate.get("selected_artifacts", [])
+    ignored = candidate.get("ignored_artifacts", [])
+    if selected:
+        lines.append("Selected artifacts:")
+        for item in selected:
+            lines.append(f"- {item.get('kind', 'artifact')}: {item.get('path', 'TBD')} ({item.get('reason', 'selected')})")
+    else:
+        lines.append("Selected artifacts: none")
+    if ignored:
+        lines.append("")
+        lines.append("Ignored artifacts:")
+        for item in ignored:
+            lines.append(f"- {item.get('kind', 'artifact')}: {item.get('path', 'TBD')} ({item.get('reason', 'ignored')})")
+    lines.extend(
+        [
+            "",
+            "## Confirmation Checklist",
+            "",
+            "- Confirm this candidate represents the intended source boundary before sync.",
+            f"- Source scope key: {candidate['artifact'].get('source_scope_key', 'TBD')}",
+            f"- Authority scope: {', '.join(authority.get('authority_scope', [])) or 'TBD'}",
+            f"- Affected workstreams: {', '.join(authority.get('affected_workstreams', [])) or 'TBD'}",
+            f"- Required confirmers: {', '.join(authority.get('required_confirmers', [])) or 'none'}",
+            f"- Confirmation state: {authority.get('confirmation_state', 'discovered')}",
+        ]
+    )
+    checklist = candidate.get("confirmation_checklist", {})
+    if isinstance(checklist, dict) and checklist.get("next_commands"):
+        next_commands = checklist["next_commands"]
+        lines.extend(
+            [
+                "",
+                "Next commands:",
+                f"- Confirm: {next_commands.get('confirm', 'TBD')}",
+                f"- Dismiss: {next_commands.get('dismiss', 'TBD')}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Parsed Source",
+            "",
+        ]
+    )
     add_prepass_summary(lines, prepass)
     return "\n".join(lines)
 

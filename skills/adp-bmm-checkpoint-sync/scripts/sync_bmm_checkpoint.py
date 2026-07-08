@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -214,11 +216,40 @@ def parse_candidate_sync_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def print_top_level_help() -> None:
+    print(
+        """usage: sync_bmm_checkpoint.py <command> ...
+
+Recommended path:
+  sync_bmm_checkpoint.py discover <project-root> --workstream-id ID --checkpoint CHECKPOINT --artifact key=path
+  sync_bmm_checkpoint.py confirm <project-root> --candidate-id CHK-... --decision confirm --confirmed-by OWNER
+  sync_bmm_checkpoint.py sync <project-root> --candidate-id CHK-...
+
+Commands:
+  discover      Generate or reuse a checkpoint candidate; does not write WDR.
+  confirm       Confirm, dismiss, or supersede a candidate.
+  sync          Sync a confirmed candidate into ADP memory.
+  packet-sync   Compatibility mode for direct checkpoint packets.
+  legacy-sync   Alias for packet-sync.
+
+Compatibility:
+  The historical bare form is still accepted:
+  sync_bmm_checkpoint.py <project-root> --workstream-id ID --checkpoint CHECKPOINT --summary TEXT
+
+Run a command with --help for its full flag surface."""
+    )
+
+
 def parse_command_line(argv: list[str] | None = None) -> argparse.Namespace:
     items = list(sys.argv[1:] if argv is None else argv)
-    if not items:
-        return parse_args(items)
+    if not items or items[0] in {"-h", "--help"}:
+        print_top_level_help()
+        raise SystemExit(0)
     command = items[0]
+    if command in {"packet-sync", "legacy-sync"}:
+        args = parse_args(items[1:])
+        args.command = "legacy-sync"
+        return args
     if command == "discover":
         return parse_discover_args(items[1:])
     if command == "confirm":
@@ -230,7 +261,6 @@ def parse_command_line(argv: list[str] | None = None) -> argparse.Namespace:
         args.command = "legacy-sync"
         return args
     return parse_args(items)
-
 
 def normalize_id(raw: str) -> str:
     value = raw.strip().lower()
@@ -246,6 +276,10 @@ def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
     if not memory_root.is_absolute():
         memory_root = project_root / memory_root
     return memory_root.resolve()
+
+
+def shell_command(parts: list[str]) -> str:
+    return " ".join(subprocess.list2cmdline([str(part)]) for part in parts)
 
 
 def table_cell(value: str) -> str:
@@ -270,6 +304,17 @@ def canonical_json(value: Any) -> str:
 
 def stable_digest(value: Any, length: int = 12) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()[:length]
+
+
+def configure_stdio() -> None:
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for stream in [sys.stdout, sys.stderr]:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8")
+            except Exception:
+                pass
 
 
 def clean_text(value: Any) -> str:
@@ -1025,6 +1070,80 @@ def action_handoff_stable_key(args: argparse.Namespace, workstream_id: str, chec
     return legacy_handoff_stable_key(args, workstream_id, checkpoint, date_str, actions)
 
 
+def append_repeat(parts: list[str], flag: str, values: list[Any]) -> None:
+    for value in values or []:
+        parts.extend([flag, str(value)])
+
+
+def default_execute_report_path(report_path: Path) -> Path:
+    stem = report_path.stem
+    if stem.endswith("-dry-run"):
+        stem = stem[: -len("-dry-run")]
+    return report_path.with_name(f"{stem}-execute-report.json")
+
+
+def legacy_apply_command(args: argparse.Namespace, project_root: Path, execute_report_path: Path) -> str:
+    script_path = Path(__file__).resolve()
+    parts = [
+        sys.executable,
+        str(script_path),
+        str(project_root),
+        "--workstream-id",
+        getattr(args, "workstream_id", ""),
+        "--checkpoint",
+        getattr(args, "checkpoint", ""),
+        "--summary",
+        getattr(args, "summary", ""),
+        "--artifact-status",
+        getattr(args, "artifact_status", "linked"),
+    ]
+    append_repeat(parts, "--artifact", getattr(args, "artifact", []))
+    append_repeat(parts, "--scope", getattr(args, "scope", []))
+    append_repeat(parts, "--acceptance", getattr(args, "acceptance", []))
+    append_repeat(parts, "--evidence-required", getattr(args, "evidence_required", []))
+    append_repeat(parts, "--open-question", getattr(args, "open_question", []))
+    append_repeat(parts, "--dependency", getattr(args, "dependency", []))
+    append_repeat(parts, "--impact", getattr(args, "impact", []))
+    append_repeat(parts, "--l0-reference", getattr(args, "l0_reference", []))
+    append_repeat(parts, "--risk", getattr(args, "risk", []))
+    append_repeat(parts, "--blocker", getattr(args, "blocker", []))
+    append_repeat(parts, "--milestone", getattr(args, "milestone", []))
+    append_repeat(parts, "--next-action", getattr(args, "next_action", []))
+    append_repeat(parts, "--business-confirmation", getattr(args, "business_confirmation", []))
+    append_repeat(parts, "--change-note", getattr(args, "change_note", []))
+    append_repeat(parts, "--evidence", getattr(args, "evidence", []))
+    append_repeat(parts, "--decision", getattr(args, "decision", []))
+    append_repeat(parts, "--readiness-gap", getattr(args, "readiness_gap", []))
+    append_repeat(parts, "--action", getattr(args, "action", []))
+    if getattr(args, "action_file", None):
+        parts.extend(["--action-file", getattr(args, "action_file")])
+    if getattr(args, "record_status", None):
+        parts.extend(["--record-status", getattr(args, "record_status")])
+    if getattr(args, "memory_root", None):
+        parts.extend(["--memory-root", getattr(args, "memory_root")])
+    if getattr(args, "verbose", False):
+        parts.append("--verbose")
+    parts.extend(["-o", str(execute_report_path)])
+    return shell_command(parts)
+
+
+def candidate_apply_command(args: argparse.Namespace, project_root: Path, execute_report_path: Path) -> str:
+    parts = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "sync",
+        str(project_root),
+        "--candidate-id",
+        getattr(args, "candidate_id", ""),
+    ]
+    if getattr(args, "memory_root", None):
+        parts.extend(["--memory-root", getattr(args, "memory_root")])
+    if getattr(args, "verbose", False):
+        parts.append("--verbose")
+    parts.extend(["-o", str(execute_report_path)])
+    return shell_command(parts)
+
+
 def merge_action_handoff_result(
     result: dict[str, Any],
     *,
@@ -1097,9 +1216,14 @@ def run_legacy_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if ready_failures:
         return 1, {
             "ok": False,
+            "dry_run": args.dry_run,
             "error": "record-status ready rejected; deterministic readiness blockers are present",
             "record_status": args.record_status,
             "validation_failures": ready_failures,
+            "can_apply": False,
+            "apply_blockers": ready_failures,
+            "recommended_next_step": "run_readiness_review",
+            "apply_command": "",
             "project_root": str(project_root),
             "memory_root": str(memory_root),
             "workstream_id": workstream_id,
@@ -1172,6 +1296,7 @@ def run_legacy_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "checkpoint": args.checkpoint,
         "files_updated": compact_list(files_updated),
         "files_planned": compact_list(files_planned),
+        "planned_files": compact_list(files_planned),
         "artifact_updates": [update.__dict__ for update in artifacts],
         "evidence_added": evidence_added,
         "decisions_added": decision_added,
@@ -1182,6 +1307,11 @@ def run_legacy_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "warnings": warnings,
         "next_actions": next_actions_for(args, generated_gaps),
     }
+    if args.dry_run:
+        result["can_apply"] = True
+        result["apply_blockers"] = []
+        result["recommended_next_step"] = "review_then_apply"
+        result["apply_command"] = ""
     merge_action_handoff_result(
         result,
         args=args,
@@ -1346,10 +1476,12 @@ def run_candidate_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if candidate.get("status") == "applied":
         return 0, {
             "ok": True,
+            "dry_run": args.dry_run,
             "no_op": True,
             "candidate_id": args.candidate_id,
             "status": "applied",
             "candidate_path": str(registry.candidate_path(args.candidate_id)),
+            "preview_path": str(registry.preview_path(args.candidate_id)),
             "status_sync_intake_files": [],
             "action_handoff_audit": {
                 "actions_seen": 0,
@@ -1367,12 +1499,14 @@ def run_candidate_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "candidate_id": args.candidate_id,
             "status": candidate.get("status"),
             "candidate_path": str(registry.candidate_path(args.candidate_id)),
+            "preview_path": str(registry.preview_path(args.candidate_id)),
         }
 
     sync_args = candidate_to_sync_args(args, candidate)
     code, result = run_legacy_sync(sync_args)
     result["candidate_id"] = args.candidate_id
     result["candidate_path"] = str(registry.candidate_path(args.candidate_id))
+    result["preview_path"] = str(registry.preview_path(args.candidate_id))
     if code == 0:
         applied = registry.mark_applied(args.candidate_id, result, dry_run=args.dry_run)
         result["candidate_status"] = applied.get("status")
@@ -1380,7 +1514,139 @@ def run_candidate_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     return code, result
 
 
+def default_dry_run_report_path(args: argparse.Namespace, result: dict[str, Any]) -> Path | None:
+    memory_root_value = result.get("memory_root")
+    if not memory_root_value:
+        project_root_value = result.get("project_root") or getattr(args, "project_root", "")
+        if project_root_value:
+            memory_root_value = str(resolve_memory_root(Path(project_root_value).resolve(), getattr(args, "memory_root", "_bmad-output/adp/memory")))
+    if not memory_root_value:
+        return None
+    root = Path(memory_root_value) / "intake" / "bmm-checkpoints" / "dry-runs"
+    command = getattr(args, "command", "")
+    candidate_id = clean_text(result.get("candidate_id") or getattr(args, "candidate_id", ""))
+    if command == "candidate-sync" and candidate_id:
+        return root / f"{candidate_id}-sync-dry-run.json"
+    if command == "discover" and candidate_id:
+        return root / f"{candidate_id}-discover-dry-run.json"
+    if command == "confirm" and candidate_id:
+        return root / f"{candidate_id}-confirm-dry-run.json"
+    workstream_id = clean_text(result.get("workstream_id") or getattr(args, "workstream_id", "workstream"))
+    checkpoint = clean_text(result.get("checkpoint") or getattr(args, "checkpoint", "checkpoint"))
+    try:
+        workstream_id = normalize_id(workstream_id)
+    except ValueError:
+        workstream_id = "workstream"
+    date_str = datetime.now().astimezone().date().isoformat()
+    digest = stable_digest(
+        {
+            "command": command or "legacy-sync",
+            "workstream_id": workstream_id,
+            "checkpoint": checkpoint,
+            "summary": getattr(args, "summary", ""),
+            "artifact": getattr(args, "artifact", []),
+            "scope": getattr(args, "scope", []),
+            "acceptance": getattr(args, "acceptance", []),
+            "evidence": getattr(args, "evidence", []),
+            "decision": getattr(args, "decision", []),
+            "readiness_gap": getattr(args, "readiness_gap", []),
+            "actions": getattr(args, "action", []),
+            "action_file": getattr(args, "action_file", ""),
+            "record_status": getattr(args, "record_status", ""),
+        },
+        12,
+    )
+    return root / f"{date_str}-{workstream_id}-{checkpoint}-{digest}.json"
+
+
+def output_report_path(args: argparse.Namespace, result: dict[str, Any]) -> Path | None:
+    output = getattr(args, "output", None)
+    if output:
+        return Path(output).resolve()
+    if getattr(args, "dry_run", False):
+        return default_dry_run_report_path(args, result)
+    return None
+
+
+def annotate_output_contract(args: argparse.Namespace, result: dict[str, Any], report_path: Path | None) -> None:
+    result["stdout_only"] = report_path is None
+    result["report_path"] = str(report_path) if report_path else ""
+    result["report_exists"] = False
+    if not getattr(args, "dry_run", False):
+        return
+    if report_path:
+        result["dry_run_report_path"] = str(report_path)
+    result["planned_files"] = compact_list(result.get("files_planned", []))
+    execute_report = default_execute_report_path(report_path) if report_path else Path("execute-report.json")
+    command = getattr(args, "command", "")
+    if result.get("can_apply") is False:
+        result.setdefault("apply_command", "")
+        return
+    if command == "candidate-sync":
+        result["can_apply"] = True
+        result.setdefault("apply_blockers", [])
+        result["recommended_next_step"] = "review_then_apply"
+        result["apply_command"] = candidate_apply_command(args, Path(args.project_root).resolve(), execute_report)
+    elif command in {"legacy-sync", "candidate-sync-inner"}:
+        result["can_apply"] = True
+        result.setdefault("apply_blockers", [])
+        result["recommended_next_step"] = "review_then_apply"
+        result["apply_command"] = legacy_apply_command(args, Path(args.project_root).resolve(), execute_report)
+    elif command == "discover":
+        result["can_apply"] = False
+        result["apply_blockers"] = ["candidate must be confirmed before sync"]
+        result["recommended_next_step"] = "confirm_candidate"
+    elif command == "confirm":
+        result["recommended_next_step"] = "sync_candidate" if result.get("status") == "confirmed" else "dismiss_candidate"
+
+
+def write_json_report(path: Path, result: dict[str, Any]) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return path.exists()
+
+
+def safe_stdout(text: str, fallback: str) -> None:
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        try:
+            print(fallback, file=sys.stderr)
+        except UnicodeEncodeError:
+            pass
+
+
+def dry_run_summary(result: dict[str, Any]) -> str:
+    status = "ok" if result.get("ok") else "failed"
+    report_path = result.get("report_path") or "(not written)"
+    can_apply = result.get("can_apply")
+    lines = [f"dry-run {status}", f"report_path: {report_path}", f"report_exists: {bool(result.get('report_exists'))}"]
+    if can_apply is not None:
+        lines.append(f"can_apply: {bool(can_apply)}")
+    next_step = result.get("recommended_next_step")
+    if next_step:
+        lines.append(f"recommended_next_step: {next_step}")
+    return "\n".join(lines)
+
+
+def emit(result: dict, output: Path | None, *, summary_only: bool = False) -> None:
+    if output:
+        report_exists = write_json_report(output, result)
+        result["report_exists"] = report_exists
+        if report_exists:
+            write_json_report(output, result)
+        if summary_only:
+            safe_stdout(
+                dry_run_summary(result),
+                "JSON report was written; stdout summary failed.",
+            )
+        return
+    payload = json.dumps(result, ensure_ascii=False, indent=2)
+    safe_stdout(payload, "JSON was not written; rerun with -o <path>.")
+
+
 def main() -> int:
+    configure_stdio()
     args = parse_command_line()
     if args.command == "discover":
         code, result = run_discovery(args)
@@ -1390,16 +1656,10 @@ def main() -> int:
         code, result = run_candidate_sync(args)
     else:
         code, result = run_legacy_sync(args)
-    emit(result, getattr(args, "output", None))
+    report_path = output_report_path(args, result)
+    annotate_output_contract(args, result, report_path)
+    emit(result, report_path, summary_only=bool(getattr(args, "dry_run", False)))
     return code
-
-
-def emit(result: dict, output: str | None) -> None:
-    payload = json.dumps(result, ensure_ascii=False, indent=2)
-    if output:
-        Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
-    else:
-        print(payload)
 
 
 if __name__ == "__main__":
