@@ -34,6 +34,8 @@ For each item, record:
 - due date or trigger when applicable
 - unresolved gap when not closed
 
+When the meeting starts from `adp-meeting-pack`, preserve `meeting_pack_id`, `meeting_pack_path`, `scenario`, `audit_path`, and `roadmap_version` from the pack distillate in the meeting archive, daily log, and any status-sync intake.
+
 ## Required Output
 
 A meeting sync is incomplete if any item remains unclassified without an explicit reason.

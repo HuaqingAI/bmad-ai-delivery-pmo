@@ -1,0 +1,1926 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# ///
+"""Audit ADP shared project state quality from the deterministic prepass."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import locale
+import platform
+import re
+import subprocess
+import sys
+import tempfile
+from collections import defaultdict
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+SKILLS_ROOT = SCRIPT_ROOT.parent
+DEFAULT_PREPASS_SCRIPT = SKILLS_ROOT / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
+DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
+DEFAULT_AUDIT_OUTPUT_PATH = "audits"
+ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
+TERMINAL_DECISION_STATUSES = {"accepted", "closed", "done", "cancelled", "rejected", "superseded"}
+TERMINAL_INTAKE_STATUSES = {"applied", "superseded"}
+PENDING_INTAKE_STATUSES = {"", "pending"}
+PLACEHOLDERS = {"", "-", "tbd", "todo", "none", "n/a", "na", "unknown"}
+REQUIRED_PREPASS_GAP_FIELDS = {"gap", "category", "gap_type", "blocking", "field", "recommended_workflow"}
+REQUIRED_PREPASS_COLLECTIONS = {
+    "sources_read",
+    "missing_sources",
+    "workstreams",
+    "gaps",
+    "cross_reference_gaps",
+    "action_cross_check",
+    "ledger_actions",
+}
+SUPPORTED_PREPASS_SCHEMA_VERSION = 2
+VALID_GAP_CATEGORIES = {"freshness", "completeness", "consistency", "closure", "merge_quality"}
+SCENARIO_CAPABILITIES = {
+    "global": "Global Project Readout",
+    "fde-morning": "FDE Action List",
+    "business-biweekly": "Global Project Readout",
+    "weekly-report": "Weekly Report Generation",
+    "project-lead": "Global Project Readout",
+    "roadmap": "Global Project Readout",
+}
+VIEW_OWNER_WORKFLOWS = {
+    "views/project-lead.md": "adp-agent-program-lead",
+    "views/weekly-report.md": "adp-agent-program-lead",
+    "views/fde-actions.md": "adp-agent-program-lead",
+    "views/acceptance-readiness.md": "adp-acceptance-readiness-review",
+    "views/cutover-readiness.md": "adp-acceptance-readiness-review",
+    "views/risk-matrix.md": "adp-risk-dependency-change-review",
+    "views/dependency-map.md": "adp-risk-dependency-change-review",
+    "views/roadmap.md": "adp-roadmap-sync",
+}
+VIEW_SOURCE_PATTERNS = {
+    "views/project-lead.md": (
+        "workstreams/*/delivery-record.md",
+        "actions/action-ledger.md",
+        "daily/*.md",
+        "decisions/**/*.md",
+        "l0/*.md",
+    ),
+    "views/weekly-report.md": (
+        "workstreams/*/delivery-record.md",
+        "actions/action-ledger.md",
+        "daily/*.md",
+        "decisions/**/*.md",
+        "l0/*.md",
+    ),
+    "views/fde-actions.md": (
+        "workstreams/*/delivery-record.md",
+        "actions/action-ledger.md",
+        "decisions/**/*.md",
+    ),
+    "views/acceptance-readiness.md": ("workstreams/*/delivery-record.md", "l0/*.md"),
+    "views/cutover-readiness.md": ("workstreams/*/delivery-record.md", "l0/*.md"),
+    "views/risk-matrix.md": ("workstreams/*/delivery-record.md", "decisions/**/*.md", "l0/*.md"),
+    "views/dependency-map.md": ("workstreams/*/delivery-record.md", "decisions/**/*.md", "l0/*.md"),
+    "views/roadmap.md": ("workstreams/*/delivery-record.md", "decisions/**/*.md", "l0/*.md"),
+}
+
+
+class ContractArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        arguments = sys.argv[1:]
+        scenario = cli_option_value(arguments, "--scenario") or "global"
+        error = f"invalid arguments: {message}"
+        memlog = None
+        if "--headless" in arguments:
+            startup_args = headless_startup_args(arguments)
+            requested_memlog = resolve_headless_memlog(startup_args)
+            memlog = initialize_headless_memlog(startup_args, requested_memlog)
+            memlog = append_headless_memlog(startup_args, memlog, "event", error)
+        emit(
+            failure_envelope(
+                status="error",
+                scenario=scenario,
+                error=error,
+                memlog=memlog,
+            ),
+            None,
+        )
+        raise SystemExit(2)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = ContractArgumentParser(
+        description=(
+            "Run the ADP state prepass, then audit freshness, completeness, "
+            "consistency, closure, and merge quality. Writes audit JSON and Markdown."
+        )
+    )
+    parser.add_argument("project_root", help="Project root containing ADP memory.")
+    parser.add_argument(
+        "--scenario",
+        choices=sorted(SCENARIO_CAPABILITIES),
+        default="global",
+        help="Scenario label for output and default prepass capability.",
+    )
+    parser.add_argument("--capability", help="Override the prepass capability.")
+    parser.add_argument("--workstream", action="append", default=[], help="Workstream id to include. Repeatable.")
+    parser.add_argument(
+        "--memory-root",
+        default=DEFAULT_MEMORY_ROOT,
+        help=f"ADP state root, relative to project root unless absolute. Default: {DEFAULT_MEMORY_ROOT}.",
+    )
+    parser.add_argument("--prepass-json", help="Existing prepass JSON to audit instead of running the prepass.")
+    parser.add_argument("--prepass-script", default=str(DEFAULT_PREPASS_SCRIPT), help="Path to adp-state-prepass.py.")
+    parser.add_argument("--max-age-days", type=int, default=7, help="Freshness threshold in days. Default: 7.")
+    parser.add_argument("--as-of", help="Audit date, YYYY-MM-DD. Default: today.")
+    parser.add_argument("--output-dir", help="Audit output directory. Default: <memory-root>/audits.")
+    parser.add_argument("--run-folder-pattern", default="", help="Optional output subfolder pattern. Supports {date} and {scenario}.")
+    parser.add_argument("--headless", action="store_true", help="Persist effective parameters and decisions in a memlog.")
+    parser.add_argument("--memlog", help="Headless memlog path. Relative paths resolve from the project root.")
+    parser.add_argument(
+        "--execution-mode",
+        choices=["direct-python", "python-fallback", "uv"],
+        default="direct-python",
+        help="Runtime used for the audit; recorded in the headless decision trail.",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    parser.add_argument("-o", "--output", help="Write run result JSON to this file instead of stdout.")
+    args = parser.parse_args()
+    args.provided_options = {
+        item.split("=", 1)[0]
+        for item in sys.argv[1:]
+        if item.startswith("--")
+    }
+    return args
+
+
+def cli_option_value(arguments: list[str], option: str) -> str:
+    for index, argument in enumerate(arguments):
+        if argument.startswith(f"{option}="):
+            return argument.split("=", 1)[1]
+        if argument == option and index + 1 < len(arguments):
+            return arguments[index + 1]
+    return ""
+
+
+def headless_startup_args(arguments: list[str]) -> argparse.Namespace:
+    project_root = Path.cwd().resolve()
+    for argument in arguments:
+        if argument.startswith("-"):
+            continue
+        candidate = Path(argument).expanduser()
+        if candidate.exists() and candidate.is_dir():
+            project_root = candidate.resolve()
+            break
+    return argparse.Namespace(
+        project_root=str(project_root),
+        memlog=cli_option_value(arguments, "--memlog") or None,
+        as_of=cli_option_value(arguments, "--as-of") or None,
+        scenario=cli_option_value(arguments, "--scenario") or "global",
+    )
+
+
+def failure_envelope(
+    *,
+    status: str,
+    scenario: str,
+    recommended_workflows: list[str] | None = None,
+    error: str | None = None,
+    reason: str | None = None,
+    memlog: Path | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": False,
+        "status": status,
+        "scenario": scenario,
+        "outputs": {},
+        "recommended_workflows": list(dict.fromkeys(recommended_workflows or [])),
+    }
+    if error:
+        result["error"] = error
+    if reason:
+        result["reason"] = reason
+    if memlog is not None:
+        result["memlog"] = str(memlog)
+    result.update(details)
+    return result
+
+
+def main() -> int:
+    args = parse_args()
+    memlog: Path | None = None
+    try:
+        if args.headless:
+            requested_memlog = resolve_headless_memlog(args)
+            memlog = initialize_headless_memlog(args, requested_memlog)
+            memlog = record_headless_context(args, memlog)
+        result = run(args, memlog)
+    except Exception as exc:  # pragma: no cover - defensive CLI boundary
+        result = failure_envelope(
+            status="error",
+            scenario=args.scenario,
+            error=str(exc),
+            memlog=memlog,
+        )
+        if args.verbose:
+            print(f"audit failed: {exc}", file=sys.stderr)
+    try:
+        emit(result, args.output)
+    except OSError as exc:
+        result = failure_envelope(
+            status="error",
+            scenario=args.scenario,
+            error=f"failed to write run result: {exc}",
+            memlog=memlog,
+        )
+        emit(result, None)
+        return 2
+    if not result.get("ok"):
+        return 1 if result.get("status") == "blocked" else 2
+    return 0
+
+
+def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
+    project_root = Path(args.project_root).resolve()
+    if not project_root.exists() or not project_root.is_dir():
+        return failure_envelope(
+            status="error",
+            scenario=args.scenario,
+            error="project_root is not an existing directory",
+            memlog=memlog,
+            project_root=str(project_root),
+        )
+
+    try:
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+    except ValueError:
+        return failure_envelope(
+            status="error",
+            scenario=args.scenario,
+            error="as_of must use YYYY-MM-DD",
+            memlog=memlog,
+            project_root=str(project_root),
+        )
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    if args.prepass_json:
+        try:
+            prepass = load_json(Path(args.prepass_json))
+        except (OSError, json.JSONDecodeError) as exc:
+            return failure_envelope(
+                status="error",
+                scenario=args.scenario,
+                error=f"cannot read prepass JSON: {exc}",
+                recommended_workflows=["adp-agent-program-lead"],
+                memlog=memlog,
+                project_root=str(project_root),
+                memory_root=str(memory_root),
+            )
+        if not isinstance(prepass, dict):
+            return failure_envelope(
+                status="error",
+                scenario=args.scenario,
+                error="prepass JSON must contain an object",
+                recommended_workflows=["adp-agent-program-lead"],
+                memlog=memlog,
+                project_root=str(project_root),
+                memory_root=str(memory_root),
+            )
+        memory_root = Path(prepass.get("memory_root") or memory_root).resolve()
+    else:
+        prepass = run_prepass(args, project_root, as_of)
+
+    if not prepass.get("ok"):
+        return failure_envelope(
+            status="blocked",
+            scenario=args.scenario,
+            error=prepass.get("error", "prepass failed"),
+            recommended_workflows=[prepass.get("recommended_workflow") or "adp-project-kickoff"],
+            memlog=memlog,
+            project_root=str(project_root),
+            memory_root=str(memory_root),
+        )
+
+    if not memory_root.exists() or not memory_root.is_dir():
+        return failure_envelope(
+            status="blocked",
+            scenario=args.scenario,
+            error="ADP memory root is missing; run adp-project-kickoff or pass --memory-root",
+            recommended_workflows=["adp-project-kickoff"],
+            memlog=memlog,
+            project_root=str(project_root),
+            memory_root=str(memory_root),
+        )
+
+    prepass_errors = validate_prepass_contract(prepass)
+    if prepass_errors:
+        return failure_envelope(
+            status="blocked",
+            scenario=args.scenario,
+            error="prepass JSON lacks the typed gap contract required by adp-state-audit",
+            recommended_workflows=["adp-agent-program-lead"],
+            memlog=memlog,
+            details=prepass_errors[:10],
+            project_root=str(project_root),
+            memory_root=str(memory_root),
+        )
+
+    audit = build_audit(prepass, project_root, memory_root, args.scenario, as_of, args.max_age_days)
+    output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, args.scenario)
+    try:
+        output_paths = write_audit_outputs(audit, output_dir, as_of, args.scenario)
+    except OSError as exc:
+        return failure_envelope(
+            status="error",
+            scenario=args.scenario,
+            error=f"cannot write audit outputs: {exc}",
+            recommended_workflows=audit["recommended_workflows"],
+            memlog=memlog,
+            project_root=str(project_root),
+            memory_root=str(memory_root),
+        )
+    audit["outputs"] = output_paths
+    result = {
+        "ok": True,
+        "status": "complete",
+        "audit_schema_version": audit["audit_schema_version"],
+        "audit_status": audit["audit_status"],
+        "safe_to_generate": audit["safe_to_generate"],
+        "safe_to_generate_green_report": audit["safe_to_generate_green_report"],
+        "report_confidence": audit["report_confidence"],
+        "project_root": str(project_root),
+        "memory_root": str(memory_root),
+        "scenario": args.scenario,
+        "outputs": output_paths,
+        "counts": audit["counts"],
+        "recommended_workflows": audit["recommended_workflows"],
+    }
+    if memlog is not None:
+        result["memlog"] = str(memlog)
+    return result
+
+
+def resolve_headless_memlog(args: argparse.Namespace) -> Path:
+    project_root = Path(args.project_root).expanduser().resolve()
+    base = project_root if project_root.exists() and project_root.is_dir() else Path.cwd().resolve()
+    if args.memlog:
+        path = Path(args.memlog).expanduser()
+        return (path if path.is_absolute() else base / path).resolve()
+    try:
+        run_date = date.fromisoformat(args.as_of) if args.as_of else date.today()
+    except ValueError:
+        run_date = date.today()
+    run_folder = f"{run_date.isoformat()}-{slugify(args.scenario)}"
+    return (base / "_bmad-output" / "adp" / "audit-runs" / run_folder / ".memlog.md").resolve()
+
+
+def initialize_headless_memlog(args: argparse.Namespace, memlog: Path) -> Path:
+    project_root = Path(args.project_root).expanduser().resolve()
+    try:
+        helper = find_memlog_helper(project_root)
+        if not memlog.exists():
+            run_memlog_command(
+                helper,
+                "init",
+                "--path",
+                str(memlog),
+                "--field",
+                "topic=ADP state audit",
+                "--field",
+                "goal=Preserve headless audit assumptions and decisions",
+            )
+        if not memlog.is_file():
+            raise OSError(f"memlog is not a readable file: {memlog}")
+        return memlog
+    except Exception as exc:
+        return initialize_fallback_memlog(project_root, memlog, exc)
+
+
+def record_headless_context(args: argparse.Namespace, memlog: Path) -> Path:
+    project_root = Path(args.project_root).expanduser().resolve()
+
+    provided = set(getattr(args, "provided_options", set()))
+    defaults = [
+        name
+        for option, name in [
+            ("--scenario", "scenario=global"),
+            ("--as-of", f"as_of={date.today().isoformat()}"),
+            ("--max-age-days", "max_age_days=7"),
+            ("--memory-root", f"memory_root={DEFAULT_MEMORY_ROOT}"),
+            ("--output-dir", f"audit_output_path={DEFAULT_AUDIT_OUTPUT_PATH}"),
+            ("--run-folder-pattern", "run_folder_pattern=<empty>"),
+        ]
+        if option not in provided
+    ]
+    effective_as_of = args.as_of or date.today().isoformat()
+    effective_capability = args.capability or SCENARIO_CAPABILITIES[args.scenario]
+    effective_memory_root = resolve_memory_root(project_root, args.memory_root)
+    scope = {
+        "scenario": args.scenario,
+        "capability": effective_capability,
+        "workstreams": args.workstream or ["all"],
+        "memory_root": str(effective_memory_root),
+        "as_of": effective_as_of,
+        "max_age_days": args.max_age_days,
+    }
+    memlog = append_headless_memlog(
+        args,
+        memlog,
+        "assumption",
+        f"Resolved headless scope and effective audit parameters: {json.dumps(scope, ensure_ascii=False, sort_keys=True)}; defaults applied: {', '.join(defaults) or 'none'}.",
+    )
+
+    try:
+        output_as_of = date.fromisoformat(effective_as_of)
+        output_dir = resolve_output_dir(
+            args.output_dir,
+            effective_memory_root,
+            args.run_folder_pattern,
+            output_as_of,
+            args.scenario,
+        )
+        output_route = str(output_dir)
+    except ValueError as exc:
+        output_route = f"unresolved: {exc}"
+    decision = {
+        "execution_mode": args.execution_mode,
+        "executable": sys.executable,
+        "python_version": platform.python_version(),
+        "fallback_reason": "uv executable unavailable" if args.execution_mode == "python-fallback" else "not applicable",
+        "output_route": output_route,
+        "audit_output_path": args.output_dir or DEFAULT_AUDIT_OUTPUT_PATH,
+        "run_folder_pattern": args.run_folder_pattern,
+        "prepass": str(Path(args.prepass_json).resolve()) if args.prepass_json else "generate with ADP prepass",
+    }
+    memlog = append_headless_memlog(
+        args,
+        memlog,
+        "decision",
+        f"Resolved headless execution and output routing: {json.dumps(decision, ensure_ascii=False, sort_keys=True)}.",
+    )
+    return memlog
+
+
+def append_headless_memlog(
+    args: argparse.Namespace,
+    memlog: Path,
+    entry_type: str,
+    text: str,
+) -> Path:
+    project_root = Path(args.project_root).expanduser().resolve()
+    try:
+        helper = find_memlog_helper(project_root)
+        run_memlog_command(
+            helper,
+            "append",
+            "--path",
+            str(memlog),
+            "--type",
+            entry_type,
+            "--text",
+            text,
+        )
+        if not memlog.is_file():
+            raise OSError(f"memlog update did not leave a readable file: {memlog}")
+        return memlog
+    except Exception as exc:
+        try:
+            append_fallback_memlog(memlog, entry_type, text)
+            return memlog
+        except OSError:
+            fallback = initialize_fallback_memlog(project_root, memlog, exc)
+            append_fallback_memlog(fallback, entry_type, text)
+            return fallback
+
+
+def initialize_fallback_memlog(project_root: Path, requested: Path, error: Exception) -> Path:
+    message = f"Memlog helper initialization failed; using fallback trail: {error}"
+    try:
+        append_fallback_memlog(requested, "event", message)
+        return requested
+    except OSError:
+        base = project_root if project_root.exists() and project_root.is_dir() else Path.cwd().resolve()
+        try:
+            fallback_dir = Path(tempfile.mkdtemp(prefix="adp-state-audit-", dir=base))
+        except OSError:
+            fallback_dir = Path(tempfile.mkdtemp(prefix="adp-state-audit-"))
+        fallback = fallback_dir / ".memlog.md"
+        append_fallback_memlog(fallback, "event", message)
+        return fallback
+
+
+def append_fallback_memlog(path: Path, entry_type: str, text: str) -> None:
+    exists = path.exists()
+    if exists and not path.is_file():
+        raise OSError(f"memlog path is not a file: {path}")
+    needs_newline = exists and not path.read_text(encoding="utf-8").endswith("\n")
+    if not exists:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            "topic: ADP state audit\n"
+            "goal: Preserve headless audit assumptions and decisions\n"
+            f"updated: {datetime.now(timezone.utc).isoformat(timespec='minutes')}\n"
+            "---\n\n",
+            encoding="utf-8",
+        )
+    entry = " ".join(text.split())
+    with path.open("a", encoding="utf-8") as stream:
+        if needs_newline:
+            stream.write("\n")
+        stream.write(f"- ({entry_type}) {entry}\n")
+
+
+def find_memlog_helper(project_root: Path) -> Path:
+    candidates = [
+        project_root / "_bmad" / "scripts" / "memlog.py",
+        SCRIPT_ROOT.parents[1] / "_bmad" / "scripts" / "memlog.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    raise FileNotFoundError("standard _bmad/scripts/memlog.py helper is unavailable")
+
+
+def run_memlog_command(helper: Path, *arguments: str) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(helper), *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown memlog failure"
+        raise RuntimeError(f"headless memlog update failed: {detail}")
+
+
+def run_prepass(args: argparse.Namespace, project_root: Path, as_of: date) -> dict[str, Any]:
+    prepass_script = Path(args.prepass_script).resolve()
+    if not prepass_script.exists():
+        return {"ok": False, "error": f"prepass script not found: {prepass_script}"}
+    capability = args.capability or SCENARIO_CAPABILITIES[args.scenario]
+    command = [
+        sys.executable,
+        str(prepass_script),
+        str(project_root),
+        "--capability",
+        capability,
+        "--memory-root",
+        args.memory_root,
+        "--max-age-days",
+        str(args.max_age_days),
+        "--as-of",
+        as_of.isoformat(),
+    ]
+    for workstream in args.workstream:
+        command.extend(["--workstream", workstream])
+    completed = subprocess.run(command, capture_output=True)
+    stdout = decode_process_output(completed.stdout)
+    stderr = decode_process_output(completed.stderr)
+    try:
+        payload = json.loads(stdout or "{}")
+    except json.JSONDecodeError:
+        payload = {"ok": False, "error": (stderr or stdout or "prepass emitted invalid JSON").strip()}
+    if completed.returncode != 0 or payload.get("status") in {"blocked", "error"}:
+        payload["ok"] = False
+        payload.setdefault("error", stderr.strip() or f"prepass exited with status {payload.get('status') or completed.returncode}")
+    return payload
+
+
+def build_audit(
+    prepass: dict[str, Any],
+    project_root: Path,
+    memory_root: Path,
+    scenario: str,
+    as_of: date,
+    max_age_days: int,
+) -> dict[str, Any]:
+    sources = list(prepass.get("sources_read", []))
+    workstreams = list(prepass.get("workstreams", []))
+    ledger_actions = list(prepass.get("ledger_actions", []))
+    gaps = list(prepass.get("gaps", []))
+
+    freshness = audit_freshness(prepass, memory_root, as_of, max_age_days)
+    completeness = audit_completeness(prepass, memory_root, as_of, max_age_days)
+    consistency = audit_consistency(prepass, freshness)
+    closure = audit_closure(prepass, memory_root, as_of)
+    merge_quality = audit_merge_quality(prepass)
+
+    contract_findings = canonical_findings(
+        freshness,
+        completeness,
+        consistency,
+        closure,
+        merge_quality,
+    )
+    blocking_count = len(contract_findings["blocking_gaps"]) + len(contract_findings["conflicts"])
+    warning_count = sum(
+        len(contract_findings[group])
+        for group in ["warnings", "duplicate_candidates", "overlap_claims", "stale_items"]
+    )
+    audit_status = "blocked" if blocking_count else ("warning" if warning_count else "pass")
+    recommended = recommend_workflows(contract_findings, prepass)
+    source_inventory_items = canonical_source_inventory(sources, prepass.get("missing_sources", []))
+
+    return {
+        "ok": True,
+        "audit_schema_version": 1,
+        "schema_version": 1,
+        "prepass_schema_version": prepass.get("schema_version"),
+        "audit_status": audit_status,
+        "safe_to_generate": True,
+        "safe_to_generate_green_report": audit_status == "pass",
+        "report_confidence": {"pass": "high", "warning": "medium", "blocked": "low"}[audit_status],
+        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "scenario": scenario,
+        "project_root": str(project_root),
+        "memory_root": str(memory_root),
+        "prepass": {
+            "schema_version": prepass.get("schema_version"),
+            "capability": prepass.get("capability", ""),
+            "scope": prepass.get("scope", {}),
+            "counts": prepass.get("counts", {}),
+        },
+        "source_inventory": {
+            "sources_read": sources,
+            "missing_sources": list(prepass.get("missing_sources", [])),
+            "workstreams": [item.get("id", "") for item in workstreams],
+        },
+        "source_inventory_items": source_inventory_items,
+        **contract_findings,
+        "merge_review_evidence": {
+            "shared_references": merge_quality["shared_reference_evidence"],
+            "readiness_gap_pairs": merge_quality["readiness_gap_evidence"],
+        },
+        "findings": {
+            "freshness": freshness,
+            "completeness": completeness,
+            "consistency": consistency,
+            "closure": closure,
+            "merge_quality": merge_quality,
+        },
+        "counts": {
+            "sources_read": len(sources),
+            "missing_sources": len(prepass.get("missing_sources", [])),
+            "workstreams": len(workstreams),
+            "active_ledger_actions": sum(
+                str(item.get("status", "")).lower() in ACTIVE_ACTION_STATUSES
+                for item in ledger_actions
+            ),
+            "prepass_gaps": len(gaps),
+            "blocking_findings": blocking_count,
+            "warning_findings": warning_count,
+        },
+        "recommended_workflows": recommended,
+    }
+
+
+def audit_freshness(
+    prepass: dict[str, Any],
+    memory_root: Path,
+    as_of: date,
+    max_age_days: int,
+) -> dict[str, list[dict[str, Any]]]:
+    blocking_gaps: list[dict[str, Any]] = []
+    stale_workstreams: list[dict[str, Any]] = []
+    for gap in prepass_gaps(prepass, category="freshness"):
+        item = prepass_gap_finding(gap, "freshness")
+        (blocking_gaps if gap.get("blocking") else stale_workstreams).append(item)
+
+    stale_actions = []
+    for action in prepass.get("ledger_actions", []):
+        status = str(action.get("status", "")).lower()
+        if status not in ACTIVE_ACTION_STATUSES:
+            continue
+        last_updated = str(action.get("last_updated", "")).strip()
+        parsed = parse_date(last_updated)
+        reason = ""
+        if not is_meaningful(last_updated):
+            reason = "last updated is missing"
+        elif parsed is None:
+            reason = "last updated is unparseable"
+        elif (as_of - parsed).days > max_age_days:
+            reason = f"last updated is older than {max_age_days} days"
+        if reason:
+            stale_actions.append(action_item(action, reason, "freshness"))
+
+    views_requiring_refresh = audit_views_requiring_refresh(prepass, memory_root)
+    return {
+        "blocking_gaps": blocking_gaps,
+        "stale_sources": [],
+        "stale_workstreams": stale_workstreams,
+        "stale_actions": stale_actions,
+        "views_requiring_refresh": views_requiring_refresh,
+    }
+
+
+def audit_views_requiring_refresh(prepass: dict[str, Any], memory_root: Path) -> list[dict[str, Any]]:
+    sources = list(prepass.get("sources_read", []))
+    results: list[dict[str, Any]] = []
+    for source in sources:
+        rel = str(source.get("path", ""))
+        if not rel.startswith("views/"):
+            continue
+        path = resolve_contained_path(memory_root, rel)
+        reasons: list[str] = []
+        owner = VIEW_OWNER_WORKFLOWS.get(rel, "owning view workflow")
+        if path is None:
+            results.append(
+                {
+                    "path": rel,
+                    "reason": "view path escapes the ADP memory root",
+                    "recommended_workflow": owner,
+                    "category": "freshness",
+                }
+            )
+            continue
+        if path.exists() and view_has_explicit_placeholder(path):
+            reasons.append("view is still an ungenerated placeholder template")
+        if path.exists():
+            reasons.extend(view_lineage_gaps(path, rel, source, sources, memory_root))
+        if reasons:
+            results.append(
+                {
+                    "path": rel,
+                    "reason": "; ".join(reasons),
+                    "recommended_workflow": owner,
+                    "category": "freshness",
+                }
+            )
+    for rel in ["views/project-lead.md", "views/weekly-report.md"]:
+        path = memory_root / rel
+        if path.exists() and view_has_explicit_placeholder(path) and not any(item["path"] == rel for item in results):
+            results.append(
+                {
+                    "path": rel,
+                    "reason": "view is still an ungenerated placeholder template",
+                    "recommended_workflow": VIEW_OWNER_WORKFLOWS[rel],
+                    "category": "freshness",
+                }
+            )
+    return results
+
+
+def audit_completeness(
+    prepass: dict[str, Any],
+    memory_root: Path,
+    as_of: date,
+    max_age_days: int,
+) -> dict[str, list[dict[str, Any]]]:
+    blocking_gaps: list[dict[str, Any]] = []
+    non_blocking_gaps: list[dict[str, Any]] = []
+    missing_owner_items: list[dict[str, Any]] = []
+    missing_evidence_items: list[dict[str, Any]] = []
+
+    for gap in prepass_gaps(prepass):
+        category = str(gap.get("category", ""))
+        if category != "completeness":
+            continue
+        item = prepass_gap_finding(gap, category)
+        if bool(gap.get("blocking")):
+            blocking_gaps.append(item)
+        else:
+            non_blocking_gaps.append(item)
+        field_name = str(gap.get("field", ""))
+        if field_name in {"owner", "business_owner"}:
+            missing_owner_items.append(item)
+        if field_name in {"evidence", "readiness"}:
+            missing_evidence_items.append(item)
+
+    for source in prepass.get("missing_sources", []):
+        item = {"source": source, "gap": "expected ADP source file is missing", "category": "missing"}
+        blocking_gaps.append(item)
+
+    for action in prepass.get("ledger_actions", []):
+        for gap in action_field_gaps(action, as_of, max_age_days):
+            item = action_item(action, gap["gap"], "completeness")
+            item["field"] = gap["field"]
+            item["gap_type"] = gap["gap_type"]
+            blocking_gaps.append(item)
+            if gap["field"] == "owner":
+                missing_owner_items.append(item)
+
+    packet_gaps, packet_owner_gaps = business_packet_field_gaps(memory_root)
+    blocking_gaps.extend(packet_gaps)
+    missing_owner_items.extend(packet_owner_gaps)
+
+    return {
+        "blocking_gaps": blocking_gaps,
+        "non_blocking_gaps": non_blocking_gaps,
+        "missing_owner_items": missing_owner_items,
+        "missing_evidence_items": missing_evidence_items,
+    }
+
+
+def audit_consistency(prepass: dict[str, Any], freshness: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    warnings: list[dict[str, Any]] = []
+    disagreements: list[dict[str, Any]] = []
+    recommended_refreshes: list[dict[str, Any]] = []
+
+    for gap in prepass_gaps(prepass, category="consistency"):
+        item = prepass_gap_finding(gap, "consistency")
+        (disagreements if gap.get("blocking") else warnings).append(item)
+
+    for gap in prepass.get("cross_reference_gaps", []):
+        item = prepass_gap_finding(gap, "consistency")
+        item["relationship"] = gap.get("relationship", "")
+        item["target"] = gap.get("target", "")
+        (disagreements if gap.get("blocking") else warnings).append(item)
+
+    for evidence in prepass.get("action_cross_check", []):
+        for action_id in evidence.get("ledger_action_ids_without_wdr_reference", []):
+            disagreements.append(
+                {
+                    "workstream": evidence.get("workstream", ""),
+                    "action_id": action_id,
+                    "gap": "open ledger action is not referenced by WDR Next actions",
+                    "source": "actions/action-ledger.md",
+                    "recommended_workflow": "adp-status-sync",
+                    "category": "consistency",
+                }
+            )
+        for action_id in evidence.get("wdr_action_ids_without_open_ledger_reference", []):
+            disagreements.append(
+                {
+                    "workstream": evidence.get("workstream", ""),
+                    "action_id": action_id,
+                    "gap": "WDR Next actions references an action id that is not open in the ledger",
+                    "source": "workstreams/*/delivery-record.md",
+                    "recommended_workflow": "adp-status-sync",
+                    "category": "consistency",
+                }
+            )
+
+    for item in freshness.get("views_requiring_refresh", []):
+        recommended_refreshes.append(
+            {
+                "source": item.get("path", ""),
+                "gap": item.get("reason", ""),
+                "recommended_workflow": item.get("recommended_workflow", ""),
+                "category": "consistency",
+            }
+        )
+
+    return {
+        "consistency_warnings": warnings,
+        "source_disagreements": disagreements,
+        "recommended_refreshes": recommended_refreshes,
+    }
+
+
+def audit_closure(prepass: dict[str, Any], memory_root: Path, as_of: date) -> dict[str, list[dict[str, Any]]]:
+    blocking_gaps: list[dict[str, Any]] = []
+    non_blocking_gaps: list[dict[str, Any]] = []
+    for gap in prepass_gaps(prepass, category="closure"):
+        item = prepass_gap_finding(gap, "closure")
+        (blocking_gaps if gap.get("blocking") else non_blocking_gaps).append(item)
+
+    unconsumed = pending_status_sync_intakes(memory_root)
+    packets = business_packets(memory_root, as_of)
+    open_packets = [
+        public_packet(packet)
+        for packet in packets
+        if not decision_status_is_terminal(packet.get("status", ""))
+    ]
+    escalation = []
+    for packet in open_packets:
+        if packet.get("overdue"):
+            escalation.append(
+                {
+                    "source": packet["path"],
+                    "reason": "business decision packet is open past its deadline",
+                    "owner": packet.get("owner", "TBD"),
+                    "recommended_workflow": "adp-risk-dependency-change-review",
+                    "category": "closure",
+                }
+            )
+    for action in prepass.get("ledger_actions", []):
+        if str(action.get("status", "")).lower() == "blocked":
+            escalation.append(action_item(action, "blocked active action needs escalation path or owner confirmation", "closure"))
+
+    return {
+        "blocking_gaps": blocking_gaps,
+        "non_blocking_gaps": non_blocking_gaps,
+        "unclosed_meeting_items": [],
+        "open_business_packets": open_packets,
+        "unconsumed_intake_files": unconsumed,
+        "escalation_candidates": escalation,
+    }
+
+
+def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
+    root = memory_root / "intake" / "status-sync"
+    payloads: dict[Path, dict[str, Any]] = {}
+    for path in sorted(root.glob("*.json")):
+        try:
+            payload = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            payloads[path] = payload
+
+    results = []
+    for path, payload in payloads.items():
+        if not is_canonical_status_sync_intake(path, payload):
+            continue
+        lifecycle_status = intake_lifecycle_status(payload)
+        if lifecycle_status in TERMINAL_INTAKE_STATUSES:
+            continue
+        if lifecycle_status not in PENDING_INTAKE_STATUSES:
+            continue
+        if has_successful_intake_receipt(path, payload, payloads):
+            continue
+        results.append(
+            {
+                "path": rel_to_memory(memory_root, path),
+                "reason": "pending canonical status-sync intake has no successful durable receipt",
+                "recommended_workflow": "adp-status-sync",
+                "category": "closure",
+                "status": lifecycle_status or "pending",
+            }
+        )
+    return results
+
+
+def is_canonical_status_sync_intake(path: Path, payload: dict[str, Any]) -> bool:
+    name = path.stem.lower()
+    if re.search(r"(?:^|-)(?:dry-run-)?report$|(?:^|-)(?:plan|preview)$|migration-report$", name):
+        return False
+    if isinstance(payload.get("ok"), bool) and str(payload.get("mode", "")).lower() in {"update", "stale"}:
+        return False
+    updates = payload.get("updates")
+    return isinstance(updates, list) and bool(updates)
+
+
+def intake_lifecycle_status(payload: dict[str, Any]) -> str:
+    lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
+    status = payload.get("status") or lifecycle.get("status")
+    if payload.get("superseded") is True:
+        status = "superseded"
+    return normalize_status(status)
+
+
+def has_successful_intake_receipt(
+    intake_path: Path,
+    intake_payload: dict[str, Any],
+    payloads: dict[Path, dict[str, Any]],
+) -> bool:
+    receipt = intake_payload.get("receipt") if isinstance(intake_payload.get("receipt"), dict) else {}
+    if successful_receipt_payload(receipt, intake_path, intake_payload):
+        return True
+
+    report_path = receipt.get("report_path") or intake_payload.get("report_path")
+    if isinstance(report_path, str) and report_path.strip():
+        raw_candidate = Path(report_path)
+        candidates = [raw_candidate] if raw_candidate.is_absolute() else [
+            intake_path.parent / raw_candidate,
+            intake_path.parent / raw_candidate.name,
+        ]
+        for candidate in candidates:
+            report_payload = payloads.get(candidate.resolve())
+            if report_payload is None and candidate.exists():
+                try:
+                    report_payload = load_json(candidate)
+                except (OSError, json.JSONDecodeError):
+                    report_payload = None
+            if isinstance(report_payload, dict) and successful_receipt_payload(
+                report_payload, intake_path, intake_payload
+            ):
+                return True
+
+    for suffix in ("-report.json", "-receipt.json"):
+        candidate = intake_path.with_name(f"{intake_path.stem}{suffix}")
+        report_payload = payloads.get(candidate)
+        if isinstance(report_payload, dict) and successful_receipt_payload(report_payload, intake_path, intake_payload):
+            return True
+    intake_key = legacy_receipt_key(intake_path)
+    for candidate, report_payload in payloads.items():
+        if candidate == intake_path or legacy_receipt_key(candidate) != intake_key:
+            continue
+        if successful_receipt_payload(report_payload, intake_path, intake_payload):
+            return True
+    return False
+
+
+def legacy_receipt_key(path: Path) -> str:
+    stem = re.sub(r"-(?:dry-run-)?(?:report|receipt)$", "", path.stem.lower())
+    duplicate_date = re.match(r"^(\d{4}-\d{2}-\d{2})-\1-(.+)$", stem)
+    return f"{duplicate_date.group(1)}-{duplicate_date.group(2)}" if duplicate_date else stem
+
+
+def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intake_payload: dict[str, Any]) -> bool:
+    if not receipt or receipt.get("dry_run") is True:
+        return False
+    status = normalize_status(receipt.get("status") or receipt.get("lifecycle_status"))
+    succeeded = receipt.get("ok") is True or status == "applied" or bool(receipt.get("applied_at"))
+    if not succeeded:
+        return False
+    expected_hash = str(receipt.get("input_hash", "")).strip().lower()
+    if expected_hash:
+        canonical_hash = hashlib.sha256(
+            json.dumps(intake_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        raw_hash = hashlib.sha256(intake_path.read_bytes()).hexdigest()
+        if expected_hash.removeprefix("sha256:") not in {canonical_hash, raw_hash}:
+            return False
+    input_path = receipt.get("input_path") or receipt.get("updates_file")
+    if isinstance(input_path, str) and input_path.strip():
+        candidate = Path(input_path)
+        if candidate.name != intake_path.name and candidate.resolve() != intake_path.resolve():
+            return False
+    return True
+
+
+def audit_merge_quality(prepass: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    blocking_gaps: list[dict[str, Any]] = []
+    non_blocking_gaps: list[dict[str, Any]] = []
+    for gap in prepass_gaps(prepass, category="merge_quality"):
+        item = prepass_gap_finding(gap, "merge_quality")
+        (blocking_gaps if gap.get("blocking") else non_blocking_gaps).append(item)
+
+    actions = [
+        action
+        for action in prepass.get("ledger_actions", [])
+        if str(action.get("status", "")).lower() in ACTIVE_ACTION_STATUSES
+    ]
+    duplicate_candidates: list[dict[str, Any]] = []
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for action in actions:
+        key = "|".join(
+            normalize_text_key(str(action.get(field, "")))
+            for field in ["action", "owner", "due_or_trigger"]
+        )
+        if key.strip("|"):
+            grouped[key].append(action)
+    for group in grouped.values():
+        if len(group) < 2:
+            continue
+        duplicate_candidates.append(
+            {
+                "action_ids": [item.get("action_id", "") for item in group],
+                "owner": group[0].get("owner", ""),
+                "due_or_trigger": group[0].get("due_or_trigger", ""),
+                "action": group[0].get("action", ""),
+                "reason": "same normalized action + owner + due/trigger appears multiple times",
+                "recommended_workflow": "adp-status-sync",
+                "category": "duplicate",
+            }
+        )
+
+    return {
+        "blocking_gaps": blocking_gaps,
+        "non_blocking_gaps": non_blocking_gaps,
+        "duplicate_candidates": duplicate_candidates,
+        "overlap_candidates": [],
+        "conflict_candidates": [],
+        "shared_reference_evidence": shared_references_from_workstreams(prepass.get("workstreams", [])),
+        "readiness_gap_evidence": readiness_gaps_from_workstreams(prepass.get("workstreams", [])),
+    }
+
+
+def shared_references_from_workstreams(workstreams: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_l0: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    by_dependency: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for ws in workstreams:
+        ws_id = str(ws.get("id", ""))
+        links = ws.get("links", {}) if isinstance(ws.get("links"), dict) else {}
+        for ref in links.get("l0_references", []):
+            raw = str(ref).strip()
+            key = raw
+            if key:
+                by_l0[key].append((ws_id, raw))
+        raw_dependency = str(ws.get("dependencies", "")).strip()
+        if is_meaningful(raw_dependency):
+            key = normalize_text_key(raw_dependency)
+            if key:
+                by_dependency[key].append((ws_id, raw_dependency))
+
+    results: list[dict[str, Any]] = []
+    for label, grouped in [("l0_reference", by_l0), ("dependency_statement", by_dependency)]:
+        for key, matches in grouped.items():
+            unique_ids = sorted({ws_id for ws_id, _ in matches if ws_id})
+            if len(unique_ids) > 1:
+                results.append(
+                    {
+                        "evidence_type": label,
+                        "match_key": key,
+                        "raw_values": sorted({raw for _, raw in matches}),
+                        "workstreams": unique_ids,
+                    }
+                )
+    return results
+
+
+def readiness_gaps_from_workstreams(workstreams: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for ws in workstreams:
+        status = normalize_status(ws.get("status", ""))
+        gaps = [gap for gap in ws.get("gaps", []) if isinstance(gap, dict)]
+        if status == "ready" and gaps:
+            results.append(
+                {
+                    "workstream": ws.get("id", ""),
+                    "status": ws.get("status", ""),
+                    "typed_gaps": gaps,
+                }
+            )
+    return results
+
+
+def action_field_gaps(action: dict[str, Any], as_of: date, max_age_days: int) -> list[dict[str, str]]:
+    if str(action.get("status", "")).lower() not in ACTIVE_ACTION_STATUSES:
+        return []
+    gaps: list[dict[str, str]] = []
+    if is_missing_owner(str(action.get("owner", ""))):
+        gaps.append({"gap": "action owner is missing", "field": "owner", "gap_type": "missing"})
+    if not is_meaningful(action.get("source", "")):
+        gaps.append({"gap": "action source is missing", "field": "source", "gap_type": "missing"})
+    if is_missing_due(action.get("due_or_trigger", "")):
+        gaps.append({"gap": "action due trigger is missing", "field": "due_or_trigger", "gap_type": "missing"})
+    if is_missing_closure_criteria(action.get("closure_criteria", "")):
+        gaps.append({"gap": "action closure criteria is missing", "field": "closure_criteria", "gap_type": "missing"})
+    affected = str(action.get("affected_workstreams", "")).strip()
+    workstream = str(action.get("workstream", "")).strip().lower()
+    if workstream in {"program", "project", "adp-program"} and not is_meaningful(affected):
+        gaps.append({"gap": "program action affected workstreams are missing", "field": "affected_workstreams", "gap_type": "missing"})
+    return gaps
+
+
+def business_packet_field_gaps(memory_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    gaps: list[dict[str, Any]] = []
+    owner_gaps: list[dict[str, Any]] = []
+    for packet in business_packets(memory_root, date.max):
+        if decision_status_is_terminal(packet.get("status", "")):
+            continue
+        path = packet["path"]
+        text = packet.get("_text", "")
+        required = {
+            "background": section_text(text, "Background"),
+            "decision": section_text(text, "Decision Needed"),
+            "options": section_text(text, "Options"),
+            "recommendation": section_text(text, "Recommendation"),
+            "deadline": packet.get("deadline", ""),
+            "owner": packet.get("owner", ""),
+            "workstreams": packet.get("affected_workstreams", ""),
+        }
+        for field, value in required.items():
+            if is_meaningful(value):
+                continue
+            item = {
+                "source": path,
+                "gap": f"business decision packet {field} is missing or TBD",
+                "category": "missing",
+                "recommended_workflow": "adp-risk-dependency-change-review",
+            }
+            gaps.append(item)
+            if field == "owner":
+                owner_gaps.append(item)
+    return gaps, owner_gaps
+
+
+def business_packets(memory_root: Path, as_of: date) -> list[dict[str, Any]]:
+    results = []
+    root = memory_root / "decisions" / "business-decision-packets"
+    for path in sorted(root.glob("*.md")):
+        text = read_text(path)
+        status = extract_colon_field(text, "Status") or "open"
+        deadline = extract_colon_field(text, "Deadline / trigger")
+        owner = extract_colon_field(text, "Confirming owner") or extract_colon_field(text, "Confirmer")
+        affected = extract_colon_field(text, "Affected workstreams")
+        deadline_date = parse_date(deadline)
+        results.append(
+            {
+                "path": rel_to_memory(memory_root, path),
+                "status": status,
+                "deadline": deadline or "TBD",
+                "owner": owner or "TBD",
+                "affected_workstreams": affected or "TBD",
+                "overdue": bool(deadline_date and deadline_date < as_of and not decision_status_is_terminal(status)),
+                "category": "closure",
+                "recommended_workflow": "adp-risk-dependency-change-review",
+                "_text": text,
+            }
+        )
+    return results
+
+
+def public_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in packet.items() if not key.startswith("_")}
+
+
+def validate_prepass_contract(prepass: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if prepass.get("schema_version") != SUPPORTED_PREPASS_SCHEMA_VERSION:
+        errors.append(f"schema_version must be {SUPPORTED_PREPASS_SCHEMA_VERSION}")
+    for field in sorted(REQUIRED_PREPASS_COLLECTIONS):
+        if not isinstance(prepass.get(field), list):
+            errors.append(f"{field} must be an array")
+    gaps = prepass.get("gaps") if isinstance(prepass.get("gaps"), list) else []
+    cross_reference_gaps = (
+        prepass.get("cross_reference_gaps")
+        if isinstance(prepass.get("cross_reference_gaps"), list)
+        else []
+    )
+    workstreams = prepass.get("workstreams") if isinstance(prepass.get("workstreams"), list) else []
+    for index, gap in enumerate(gaps):
+        errors.extend(validate_gap_item(gap, f"gaps[{index}]"))
+    for index, gap in enumerate(cross_reference_gaps):
+        errors.extend(validate_gap_item(gap, f"cross_reference_gaps[{index}]"))
+    for ws_index, workstream in enumerate(workstreams):
+        if not isinstance(workstream, dict):
+            errors.append(f"workstreams[{ws_index}] must be an object")
+            continue
+        workstream_gaps = workstream.get("gaps", [])
+        if not isinstance(workstream_gaps, list):
+            errors.append(f"workstreams[{ws_index}].gaps must be an array")
+            continue
+        for gap_index, gap in enumerate(workstream_gaps):
+            errors.extend(validate_gap_item(gap, f"workstreams[{ws_index}].gaps[{gap_index}]"))
+    for field in ["sources_read", "action_cross_check", "ledger_actions"]:
+        values = prepass.get(field) if isinstance(prepass.get(field), list) else []
+        for index, value in enumerate(values):
+            if not isinstance(value, dict):
+                errors.append(f"{field}[{index}] must be an object")
+    return errors
+
+
+def validate_gap_item(gap: Any, location: str) -> list[str]:
+    if not isinstance(gap, dict):
+        return [f"{location} must be an object with typed fields"]
+    missing = sorted(field for field in REQUIRED_PREPASS_GAP_FIELDS if field not in gap)
+    errors = [f"{location} missing {', '.join(missing)}"] if missing else []
+    category = gap.get("category")
+    if category not in VALID_GAP_CATEGORIES:
+        errors.append(f"{location}.category must be one of {sorted(VALID_GAP_CATEGORIES)}")
+    if not isinstance(gap.get("blocking"), bool):
+        errors.append(f"{location}.blocking must be boolean")
+    return errors
+
+
+def prepass_gaps(prepass: dict[str, Any], category: str | None = None) -> list[dict[str, Any]]:
+    gaps = [gap for gap in prepass.get("gaps", []) if isinstance(gap, dict)]
+    if category is None:
+        return gaps
+    return [gap for gap in gaps if gap.get("category") == category]
+
+
+def prepass_gap_finding(gap: dict[str, Any], category: str) -> dict[str, Any]:
+    return {
+        "workstream": gap.get("workstream", ""),
+        "source": gap.get("source", ""),
+        "gap": gap.get("gap", ""),
+        "category": gap.get("category", category),
+        "gap_type": gap.get("gap_type", ""),
+        "field": gap.get("field", ""),
+        "blocking": bool(gap.get("blocking")),
+        "recommended_workflow": gap.get("recommended_workflow", ""),
+    }
+
+
+def canonical_source_inventory(sources: list[dict[str, Any]], missing_sources: Any) -> list[dict[str, Any]]:
+    items = [
+        {
+            "path": str(source.get("path", "")),
+            "kind": source_kind(str(source.get("path", ""))),
+            "modified": str(source.get("modified", "")),
+            "status": "read",
+        }
+        for source in sources
+        if isinstance(source, dict)
+    ]
+    items.extend(
+        {
+            "path": str(path),
+            "kind": source_kind(str(path)),
+            "modified": "",
+            "status": "missing",
+        }
+        for path in missing_sources
+    )
+    return items
+
+
+def canonical_findings(
+    freshness: dict[str, Any],
+    completeness: dict[str, Any],
+    consistency: dict[str, Any],
+    closure: dict[str, Any],
+    merge_quality: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    blocking = [
+        *canonicalize_items(freshness.get("blocking_gaps", []), "blocking", "freshness"),
+        *canonicalize_items(completeness.get("blocking_gaps", []), "blocking", "completeness"),
+        *canonicalize_items(consistency.get("source_disagreements", []), "blocking", "consistency"),
+        *canonicalize_items(closure.get("blocking_gaps", []), "blocking", "closure"),
+        *canonicalize_items(closure.get("unconsumed_intake_files", []), "blocking", "closure"),
+        *canonicalize_items(merge_quality.get("blocking_gaps", []), "blocking", "merge_quality"),
+    ]
+    warnings = [
+        *canonicalize_items(completeness.get("non_blocking_gaps", []), "warning", "completeness"),
+        *canonicalize_items(consistency.get("consistency_warnings", []), "warning", "consistency"),
+        *canonicalize_items(closure.get("non_blocking_gaps", []), "warning", "closure"),
+        *canonicalize_items(closure.get("open_business_packets", []), "warning", "closure"),
+        *canonicalize_items(closure.get("escalation_candidates", []), "warning", "closure"),
+        *canonicalize_items(merge_quality.get("non_blocking_gaps", []), "warning", "merge_quality"),
+    ]
+    stale_items = canonicalize_items(
+        [
+            *freshness.get("stale_workstreams", []),
+            *freshness.get("stale_actions", []),
+            *freshness.get("views_requiring_refresh", []),
+        ],
+        "warning",
+        "freshness",
+    )
+    return {
+        "blocking_gaps": blocking,
+        "warnings": warnings,
+        "duplicate_candidates": canonicalize_items(
+            merge_quality.get("duplicate_candidates", []), "warning", "duplicate"
+        ),
+        "overlap_claims": canonicalize_items(
+            merge_quality.get("overlap_candidates", []), "warning", "overlap"
+        ),
+        "conflicts": canonicalize_items(
+            merge_quality.get("conflict_candidates", []), "blocking", "conflict"
+        ),
+        "stale_items": stale_items,
+    }
+
+
+def canonicalize_items(items: Any, severity: str, kind: str) -> list[dict[str, Any]]:
+    return [canonical_finding(item, severity, kind) for item in items if isinstance(item, dict)]
+
+
+def canonical_finding(item: dict[str, Any], severity: str, kind: str) -> dict[str, Any]:
+    sources = finding_sources(item)
+    workstreams = finding_workstreams(item)
+    summary = str(
+        item.get("summary")
+        or item.get("gap")
+        or item.get("reason")
+        or item.get("normalized_claim")
+        or "review item"
+    )
+    identity = json.dumps(
+        {
+            "kind": kind,
+            "sources": sources,
+            "workstreams": workstreams,
+            "summary": summary,
+            "details": finding_identity_details(item),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    finding = {
+        "id": f"adp-{kind}-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}",
+        "severity": severity,
+        "kind": kind,
+        "source_type": finding_source_type(item, kind, sources),
+        "sources": sources,
+        "workstreams": workstreams,
+        "owner": str(item.get("owner") or "TBD"),
+        "summary": summary,
+        "category": str(item.get("category") or kind),
+        "gap_type": str(item.get("gap_type") or ""),
+        "recommended_workflow": str(item.get("recommended_workflow") or ""),
+    }
+    if kind == "conflict":
+        finding["details"] = {
+            "status": item.get("status", ""),
+            "gaps": item.get("gaps", []),
+        }
+    return finding
+
+
+def finding_identity_details(item: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "action_id",
+        "action_ids",
+        "action",
+        "normalized_claim",
+        "type",
+        "status",
+        "field",
+        "target",
+        "relationship",
+        "due_or_trigger",
+    )
+    return {key: item[key] for key in keys if key in item}
+
+
+def finding_sources(item: dict[str, Any]) -> list[str]:
+    raw_sources = item.get("sources")
+    sources = [str(value) for value in raw_sources if str(value).strip()] if isinstance(raw_sources, list) else []
+    for key in ("source", "path"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            sources.append(value.strip())
+    for gap in item.get("gaps", []) if isinstance(item.get("gaps"), list) else []:
+        if isinstance(gap, dict) and isinstance(gap.get("source"), str) and gap["source"].strip():
+            sources.append(gap["source"].strip())
+    return list(dict.fromkeys(sources))
+
+
+def finding_workstreams(item: dict[str, Any]) -> list[str]:
+    raw_workstreams = item.get("workstreams")
+    values = [str(value) for value in raw_workstreams if str(value).strip()] if isinstance(raw_workstreams, list) else []
+    workstream = item.get("workstream")
+    if isinstance(workstream, str) and workstream.strip():
+        values.append(workstream.strip())
+    affected = item.get("affected_workstreams")
+    if isinstance(affected, str):
+        values.extend(part.strip() for part in re.split(r"[,;]", affected) if part.strip())
+    elif isinstance(affected, list):
+        values.extend(str(part).strip() for part in affected if str(part).strip())
+    return list(dict.fromkeys(values))
+
+
+def finding_source_type(item: dict[str, Any], kind: str, sources: list[str]) -> str:
+    if kind == "duplicate":
+        return "structural"
+    if str(item.get("gap_type", "")).lower().startswith("missing") or str(item.get("category", "")) == "missing":
+        return "missing"
+    if any(source.startswith("views/") for source in sources):
+        return "derived"
+    return "fact"
+
+
+def source_kind(path: str) -> str:
+    if path.startswith("views/"):
+        return "derived-view"
+    if path.startswith("workstreams/"):
+        return "workstream-delivery-record"
+    if path.startswith("actions/"):
+        return "action-ledger"
+    if path.startswith("decisions/"):
+        return "decision"
+    if path.startswith("l0/"):
+        return "l0-reference"
+    if path.startswith("daily/"):
+        return "daily-log"
+    if path.startswith("meetings/"):
+        return "meeting-archive"
+    return "adp-source"
+
+
+def recommend_workflows(
+    findings: dict[str, list[dict[str, Any]]],
+    prepass: dict[str, Any],
+) -> list[str]:
+    workflows = [
+        str(item.get("recommended_workflow", "")).strip()
+        for group in findings.values()
+        for item in group
+        if str(item.get("recommended_workflow", "")).strip()
+    ]
+    if prepass.get("missing_sources"):
+        workflows.append("adp-project-kickoff")
+    return sorted(set(workflows))
+
+
+def write_audit_outputs(audit: dict[str, Any], output_dir: Path, as_of: date, scenario: str) -> dict[str, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{as_of.isoformat()}-{slugify(scenario)}-audit"
+    json_path = output_dir / f"{stem}.json"
+    markdown_path = output_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    markdown_path.write_text(render_markdown(audit), encoding="utf-8", newline="\n")
+    return {"json": str(json_path), "markdown": str(markdown_path)}
+
+
+def render_markdown(audit: dict[str, Any]) -> str:
+    findings = audit["findings"]
+    lines = [
+        "# ADP State Audit",
+        "",
+        f"Generated: {audit['generated_at']}",
+        f"Scenario: {audit['scenario']}",
+        f"Audit status: {audit['audit_status']}",
+        f"Safe to generate: {str(audit['safe_to_generate']).lower()}",
+        f"Safe to generate green report: {str(audit['safe_to_generate_green_report']).lower()}",
+        f"Report confidence: {audit['report_confidence']}",
+        f"Memory root: `{audit['memory_root']}`",
+        "",
+        "## Quality Gate",
+        "",
+        f"- Blocking gaps: {len(audit['blocking_gaps'])}",
+        f"- Conflicts: {len(audit['conflicts'])}",
+        f"- Warnings: {len(audit['warnings']) + len(audit['stale_items'])}",
+        "",
+        "## Source Inventory",
+        "",
+        f"- Sources read: {audit['counts']['sources_read']}",
+        f"- Missing sources: {audit['counts']['missing_sources']}",
+        f"- Workstreams: {audit['counts']['workstreams']}",
+        f"- Active ledger actions: {audit['counts']['active_ledger_actions']}",
+        "",
+    ]
+    if audit["source_inventory"]["missing_sources"]:
+        lines.extend(["| Missing source |", "| --- |"])
+        lines.extend(f"| {cell(item)} |" for item in audit["source_inventory"]["missing_sources"])
+        lines.append("")
+
+    add_table(lines, "Blocking Gaps", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings(findings["completeness"]["blocking_gaps"]))
+    add_table(lines, "Freshness", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["freshness"]["blocking_gaps"], *findings["freshness"]["stale_workstreams"], *findings["freshness"]["stale_actions"], *findings["freshness"]["views_requiring_refresh"]]))
+    add_table(lines, "Consistency", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["consistency"]["consistency_warnings"], *findings["consistency"]["source_disagreements"], *findings["consistency"]["recommended_refreshes"]]))
+    add_table(lines, "Closure", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["closure"]["blocking_gaps"], *findings["closure"]["non_blocking_gaps"], *findings["closure"]["unclosed_meeting_items"], *findings["closure"]["open_business_packets"], *findings["closure"]["unconsumed_intake_files"], *findings["closure"]["escalation_candidates"]]))
+    add_table(lines, "Merge Quality", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["merge_quality"]["blocking_gaps"], *findings["merge_quality"]["non_blocking_gaps"], *findings["merge_quality"]["duplicate_candidates"], *findings["merge_quality"]["overlap_candidates"], *findings["merge_quality"]["conflict_candidates"]]))
+
+    lines.extend(["## Recommended Workflows", ""])
+    if audit["recommended_workflows"]:
+        lines.extend(f"- `{workflow}`" for workflow in audit["recommended_workflows"])
+    else:
+        lines.append("- No follow-up workflow required by this audit.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def flatten_findings(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows = []
+    for item in items:
+        action_ids = item.get("action_ids")
+        gap = (
+            item.get("gap")
+            or item.get("reason")
+            or (f"duplicate action candidates: {', '.join(action_ids)}" if action_ids else "")
+            or item.get("normalized_claim")
+            or "review item"
+        )
+        rows.append(
+            {
+                "Source": str(item.get("source") or item.get("path") or item.get("action_id") or ""),
+                "Workstream": str(item.get("workstream") or ", ".join(item.get("workstreams", [])) if isinstance(item.get("workstreams"), list) else item.get("workstream", "")),
+                "Gap": str(gap),
+                "Recommended workflow": str(item.get("recommended_workflow", "")),
+            }
+        )
+    return rows
+
+
+def add_table(lines: list[str], title: str, headers: list[str], rows: list[dict[str, str]]) -> None:
+    lines.extend([f"## {title}", ""])
+    if not rows:
+        lines.extend(["No findings.", ""])
+        return
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+    for row in rows:
+        lines.append("| " + " | ".join(cell(row.get(header, "")) for header in headers) + " |")
+    lines.append("")
+
+
+def view_has_explicit_placeholder(path: Path) -> bool:
+    text = read_text(path)
+    metadata = view_metadata(text)
+    template_status = normalize_status(metadata.get("template_status"))
+    if template_status == "placeholder":
+        return True
+    if template_status in {"generated", "complete"} or parse_datetime(str(metadata.get("generated_at", ""))):
+        return False
+    return not view_has_data_rows(text)
+
+
+def view_lineage_gaps(
+    path: Path,
+    rel: str,
+    view_source: dict[str, Any],
+    sources: list[dict[str, Any]],
+    memory_root: Path,
+) -> list[str]:
+    metadata = view_metadata(read_text(path))
+    reasons: list[str] = []
+    source_paths = metadata.get("source_paths", [])
+    relevant = relevant_view_sources(rel, source_paths, sources)
+    view_time = parse_datetime(str(metadata.get("generated_at", ""))) or parse_datetime(
+        str(view_source.get("modified", ""))
+    )
+    source_times = [parse_datetime(str(source.get("modified", ""))) for source in relevant]
+    latest_source = max((value for value in source_times if value), default=None)
+    if latest_source and view_time and latest_source > view_time:
+        reasons.append("view is older than one or more lineage source records")
+
+    missing_lineage_sources: set[str] = set()
+    for source_path in source_paths:
+        source_file = resolve_contained_path(memory_root, source_path)
+        if source_file is None:
+            reasons.append(f"lineage source path escapes memory root: {source_path}")
+            missing_lineage_sources.add(source_path)
+        elif not source_file.exists():
+            reasons.append(f"lineage source is missing: {source_path}")
+            missing_lineage_sources.add(source_path)
+    for source_path, expected_hash in metadata.get("source_hashes", {}).items():
+        source_file = resolve_contained_path(memory_root, source_path)
+        if source_file is None:
+            if source_path not in missing_lineage_sources:
+                reasons.append(f"lineage source path escapes memory root: {source_path}")
+            continue
+        if not source_file.exists():
+            if source_path not in missing_lineage_sources:
+                reasons.append(f"lineage source is missing: {source_path}")
+            continue
+        actual_hash = hashlib.sha256(source_file.read_bytes()).hexdigest()
+        if str(expected_hash).lower().removeprefix("sha256:") != actual_hash:
+            reasons.append(f"lineage source hash changed: {source_path}")
+    return reasons
+
+
+def relevant_view_sources(
+    rel: str,
+    explicit_paths: Any,
+    sources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if isinstance(explicit_paths, list) and explicit_paths:
+        selected = {str(path) for path in explicit_paths}
+        return [source for source in sources if str(source.get("path", "")) in selected]
+    patterns = VIEW_SOURCE_PATTERNS.get(rel, ())
+    return [
+        source
+        for source in sources
+        if any(source_path_matches(str(source.get("path", "")), pattern) for pattern in patterns)
+    ]
+
+
+def source_path_matches(path: str, pattern: str) -> bool:
+    if "/**/" in pattern:
+        prefix, suffix = pattern.split("/**/", 1)
+        return path.startswith(f"{prefix}/") and Path(path).match(f"**/{suffix}")
+    return Path(path).match(pattern)
+
+
+def view_metadata(text: str) -> dict[str, Any]:
+    fields: dict[str, str] = {}
+    labels = {
+        "generated": "generated_at",
+        "generated_at": "generated_at",
+        "template status": "template_status",
+        "template_status": "template_status",
+        "source paths": "source_paths",
+        "source_paths": "source_paths",
+        "source hashes": "source_hashes",
+        "source_hashes": "source_hashes",
+    }
+    for line in text.splitlines():
+        match = re.match(r"^\s*(?:-\s*)?([A-Za-z_ ]+)\s*:\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        key = labels.get(match.group(1).strip().lower())
+        if key:
+            fields[key] = match.group(2).strip()
+    return {
+        "generated_at": fields.get("generated_at", ""),
+        "template_status": fields.get("template_status", ""),
+        "source_paths": parse_string_list(fields.get("source_paths", "")),
+        "source_hashes": parse_string_map(fields.get("source_hashes", "")),
+    }
+
+
+def parse_string_list(value: str) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = [part.strip() for part in value.split(",")]
+    if not isinstance(parsed, list):
+        return []
+    return [str(part).strip() for part in parsed if str(part).strip()]
+
+
+def parse_string_map(value: str) -> dict[str, str]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(item) for key, item in parsed.items()}
+
+
+def view_has_data_rows(text: str) -> bool:
+    in_table = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("|") and line.endswith("|"):
+            cells = [part.strip() for part in line.strip("|").split("|")]
+            if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+                in_table = True
+                continue
+            if in_table and any(is_meaningful(cell) for cell in cells):
+                return True
+            continue
+        in_table = False
+    return False
+
+
+def action_item(action: dict[str, Any], reason: str, category: str) -> dict[str, Any]:
+    return {
+        "action_id": action.get("action_id", ""),
+        "status": action.get("status", ""),
+        "owner": action.get("owner", ""),
+        "workstream": action.get("workstream", ""),
+        "source": action.get("source", "actions/action-ledger.md"),
+        "action": action.get("action", ""),
+        "gap": reason,
+        "recommended_workflow": "adp-status-sync",
+        "category": category,
+    }
+
+
+def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
+    path = Path(raw_memory_root)
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
+def resolve_contained_path(root: Path, raw_path: str) -> Path | None:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return None
+    resolved_root = root.resolve()
+    resolved = (resolved_root / path).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def resolve_output_dir(
+    raw_output_dir: str | None,
+    memory_root: Path,
+    run_folder_pattern: str,
+    as_of: date,
+    scenario: str,
+) -> Path:
+    if not raw_output_dir:
+        path = memory_root / "audits"
+    else:
+        path = Path(raw_output_dir)
+        if not path.is_absolute():
+            path = memory_root / path
+    path = path.resolve()
+    run_folder = format_run_folder(run_folder_pattern, as_of, scenario)
+    if run_folder:
+        resolved_run_folder = resolve_contained_path(path, run_folder)
+        if resolved_run_folder is None:
+            raise ValueError("run_folder_pattern must resolve inside the audit output directory")
+        path = resolved_run_folder
+    return path
+
+
+def format_run_folder(pattern: str, as_of: date, scenario: str) -> str:
+    text = str(pattern or "").strip().strip("/\\")
+    if not text:
+        return ""
+    return (
+        text.replace("{date}", as_of.isoformat())
+        .replace("{scenario}", slugify(scenario))
+        .replace("{scenario_raw}", scenario)
+        .strip("/\\")
+    )
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
+def rel_to_memory(memory_root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(memory_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def parse_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for candidate in [text, text.replace("Z", "+00:00")]:
+        try:
+            return datetime.fromisoformat(candidate).date()
+        except ValueError:
+            pass
+    match = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", text)
+    if not match:
+        return None
+    year, month, day = (int(part) for part in match.groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def parse_datetime(value: str) -> datetime | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def extract_colon_field(text: str, label: str) -> str:
+    pattern = re.compile(rf"^\s*{re.escape(label)}\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+    match = pattern.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def section_text(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    marker = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.IGNORECASE)
+    start = None
+    for index, line in enumerate(lines):
+        if marker.match(line.strip()):
+            start = index + 1
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def is_meaningful(value: Any) -> bool:
+    text = str(value or "").strip().strip("`")
+    text = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", text).strip().strip("`")
+    return text.lower() not in PLACEHOLDERS
+
+
+def is_missing_due(value: Any) -> bool:
+    return not is_meaningful(value)
+
+
+def is_missing_owner(value: str) -> bool:
+    return not is_meaningful(value)
+
+
+def is_missing_closure_criteria(value: Any) -> bool:
+    return not is_meaningful(value)
+
+
+def normalize_status(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return "cancelled" if normalized == "canceled" else normalized
+
+
+def decision_status_is_terminal(value: Any) -> bool:
+    return normalize_status(value) in TERMINAL_DECISION_STATUSES
+
+
+def normalize_text_key(value: str) -> str:
+    text = str(value or "").lower()
+    text = re.sub(r"[\W_]+", " ", text, flags=re.UNICODE)
+    return " ".join(text.split())
+
+
+def slugify(value: str) -> str:
+    value = normalize_text_key(value).replace(" ", "-")
+    return value[:80] or "item"
+
+
+def cell(value: Any) -> str:
+    return str(value or "").replace("\n", " ").replace("|", "\\|")
+
+
+def emit(result: dict[str, Any], output: str | None) -> None:
+    payload = json.dumps(result, ensure_ascii=False, indent=2)
+    if output:
+        Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
+    else:
+        sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
+
+
+def decode_process_output(raw: bytes) -> str:
+    if not raw:
+        return ""
+    for encoding in ["utf-8-sig", locale.getpreferredencoding(False), "mbcs"]:
+        try:
+            return raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

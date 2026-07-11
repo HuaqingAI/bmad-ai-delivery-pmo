@@ -92,10 +92,31 @@ def load_json_file(path: str) -> dict:
         return json.load(f)
 
 
+def fail(message: str, exit_code: int = 1) -> None:
+    print(json.dumps({"status": "error", "error": message}, indent=2))
+    sys.exit(exit_code)
+
+
 # Keys that live at config root (shared across all modules)
 _CORE_KEYS = frozenset(
     {"user_name", "communication_language", "document_output_language", "output_folder"}
 )
+
+
+def answer_validation_errors(module_yaml: dict, answers: dict) -> list[str]:
+    allowed = {"core": _CORE_KEYS, "module": frozenset(module_variable_names(module_yaml))}
+    errors: list[str] = []
+    for scope, values in answers.items():
+        if scope not in allowed:
+            errors.append(f"Unknown answer scope: {scope}")
+            continue
+        if not isinstance(values, dict):
+            errors.append(f"Answer scope '{scope}' must be an object")
+            continue
+        unknown_keys = sorted(set(values) - allowed[scope])
+        if unknown_keys:
+            errors.append(f"Unknown {scope} answer keys: {', '.join(unknown_keys)}")
+    return errors
 
 
 def load_legacy_values(
@@ -252,6 +273,10 @@ def merge_config(
     if not module_code:
         print("Error: module.yaml must have a 'code' field", file=sys.stderr)
         sys.exit(1)
+
+    validation_errors = answer_validation_errors(module_yaml, answers)
+    if validation_errors:
+        fail("; ".join(validation_errors), 1)
 
     # Migrate legacy core: section to root
     if "core" in config and isinstance(config["core"], dict):

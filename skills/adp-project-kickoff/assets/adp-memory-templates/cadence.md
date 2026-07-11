@@ -14,7 +14,15 @@ Default cadence: {{DEFAULT_CADENCE}}
 - Output file: `views/weekly-report.md`
 - Required content: status summary, blocked workstreams, risk/dependency changes, decisions needed, readiness gaps, next actions
 
+## State Audit
+
+- Source files: WDRs, action ledger, decisions, daily logs, L0 summaries, and derived views.
+- Output folder: `audits/`
+- Required before: meeting packs, weekly report, project lead readout, and roadmap rendering.
+
 ## Meeting Closure
+
+Meeting packs live under `views/meeting-packs/` and are not source records. Generate them before the meeting; after the meeting, sync the actual notes and outcomes.
 
 Every project meeting, offline sync, or supplemental note should become at least one of:
 

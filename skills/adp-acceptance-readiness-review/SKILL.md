@@ -63,6 +63,8 @@ Generic delivery dimensions are scope clarity, acceptance clarity, BMM artifact 
 
 Acceptance ready and cutover ready are different states. A line can have acceptance evidence and still be cutover no-go because data reconciliation, freeze window, rollback rehearsal, monitoring, or business confirmation is missing.
 
+Assign each acceptance and cutover result a canonical `roadmap_status`: `done` only when the reviewed gate is complete, `blocked` when work cannot progress, `at-risk` when work can progress but the gate is threatened, and `planned` otherwise. This is a readiness judgment, not a renderer inference.
+
 ## Gaps
 
 Every gap needs a dimension, severity, owner, closing action, and due date or trigger. Use `TBD` only when the source files genuinely do not identify the fact, and make the missing owner/action itself a gap.
@@ -90,7 +92,7 @@ The renderer consumes one JSON object. Required top-level field: `workstreams`, 
 Each workstream object should include:
 
 - `id`, `name`, and `owner`
-- `acceptance` object with `score`, `max_score`, `status`, `dimensions`, and `gaps`
+- `acceptance` object with `score`, `max_score`, `status`, `roadmap_status`, `dimensions`, and `gaps`
 - `cutover` object with the same shape plus `go_no_go` when cutover applies
 - `evidence` array with `criterion`, `proof`, `status`, and `gap`
 - `confirmations` array with `item`, `owner`, `status`, and `action`

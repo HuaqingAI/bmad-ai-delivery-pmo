@@ -31,7 +31,14 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertTrue((memory_root / "schemas" / "action-ledger.md").exists())
             self.assertTrue((memory_root / "l0" / "reference-index.md").exists())
             self.assertTrue((memory_root / "actions" / "action-ledger.md").exists())
+            self.assertTrue((memory_root / "audits").is_dir())
+            self.assertTrue((memory_root / "audits" / "README.md").exists())
+            self.assertTrue((memory_root / "views" / "meeting-packs" / "fde-morning").is_dir())
+            self.assertTrue((memory_root / "views" / "meeting-packs" / "business-biweekly").is_dir())
+            self.assertTrue((memory_root / "views" / "meeting-packs" / "README.md").exists())
             self.assertTrue((memory_root / "views" / "weekly-report.md").exists())
+            self.assertTrue((memory_root / "views" / "roadmap.md").exists())
+            self.assertTrue((memory_root / "views" / "roadmap.json").exists())
 
     def test_second_run_preserves_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -281,6 +288,22 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertTrue(keep_legacy["ok"])
             self.assertTrue(keep_legacy["legacy_memory"]["using_legacy_memory_root"])
             self.assertEqual((legacy / "project-charter.md").read_text(encoding="utf-8"), "legacy memory\n")
+
+    def test_dry_run_reports_audit_meeting_pack_and_roadmap_starter_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self.run_script(Path(temp_dir), "--dry-run")
+            memory_root = Path(result["memory_root"])
+
+            self.assertTrue(result["ok"])
+            self.assertIn(str(memory_root / "audits" / "README.md"), result["files_created"])
+            self.assertIn(
+                str(memory_root / "views" / "meeting-packs" / "README.md"),
+                result["files_created"],
+            )
+            self.assertIn(str(memory_root / "views" / "roadmap.md"), result["files_created"])
+            self.assertIn(str(memory_root / "views" / "roadmap.json"), result["files_created"])
+            self.assertFalse((memory_root / "audits" / "README.md").exists())
+            self.assertFalse((memory_root / "views" / "roadmap.md").exists())
 
 
 if __name__ == "__main__":

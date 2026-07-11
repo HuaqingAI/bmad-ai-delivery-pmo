@@ -15,7 +15,14 @@ The plan root is a JSON object with `meeting` and `items`. The script validates 
     "raw_evidence_label": "transcription",
     "participants": ["Name"],
     "participant_gaps": ["Unresolved speaker label or uncertain participant, when applicable"],
-    "summary": "One paragraph"
+    "summary": "One paragraph",
+    "lineage": {
+      "meeting_pack_id": "Stable id from the meeting-pack distillate",
+      "meeting_pack_path": "Path to the source meeting pack Markdown",
+      "scenario": "fde-morning or business-biweekly",
+      "audit_path": "Path to the audit consumed by the meeting pack",
+      "roadmap_version": "Roadmap generated_at value, unavailable, or not-applicable"
+    }
   },
   "items": [
     {
@@ -53,6 +60,7 @@ The plan root is a JSON object with `meeting` and `items`. The script validates 
 Rules:
 
 - Every item needs `id`, `classification`, and `text`.
+- `meeting.lineage` is optional for standalone syncs. When present, all five lineage fields are required and must be copied from the meeting-pack distillate without reinterpretation.
 - `no_op` needs `no_op_reason`.
 - `business_decision_needed` needs `packet.decision_needed`.
 - `action` needs a specific owner, affected workstream route, due trigger, and observable `closure_criteria`; generic owners such as `TBD`, `各条线 FDE owner`, or `参会人员` stay as gaps and do not become open ledger actions.

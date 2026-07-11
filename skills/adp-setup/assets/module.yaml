@@ -1,7 +1,7 @@
 code: adp
 name: "AI Delivery PMO"
 description: "帮助多条 FDE 工作线用统一状态模型、交付节奏和 AI 协作方式推进复杂交付项目。"
-module_version: 1.0.0
+module_version: 1.1.0
 default_selected: false
 module_greeting: >
   AI Delivery PMO 已安装。建议先运行 adp-project-kickoff 初始化共享项目记忆，

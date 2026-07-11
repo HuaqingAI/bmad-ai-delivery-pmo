@@ -1,0 +1,22 @@
+# DO NOT EDIT -- overwritten on every update.
+#
+# Workflow customization surface for adp-state-audit.
+# Team overrides:     {project-root}/_bmad/custom/adp-state-audit.toml
+# Personal overrides: {project-root}/_bmad/custom/adp-state-audit.user.toml
+#
+# Merge order: base, team, personal. Scalars override; arrays append.
+
+[workflow]
+
+# --- Universal defaults. Merge: scalars override, arrays append. ---
+activation_steps_prepend = []
+activation_steps_append = []
+persistent_facts = ["file:{project-root}/**/project-context.md"]
+# Override for post-audit routing or notification; runs after complete, blocked, and error outcomes.
+on_complete = ""
+
+# Override when audit artifacts belong in an organization-owned destination; relative paths resolve under ADP memory.
+audit_output_path = "audits"
+
+# Override to isolate repeated or parallel audits in per-run folders; supports date and scenario tokens.
+run_folder_pattern = ""

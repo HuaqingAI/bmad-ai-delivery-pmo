@@ -5,7 +5,7 @@ description: Bootstraps shared ADP project memory. Use when the user says "adp-p
 
 ## Overview
 
-This workflow initializes an AI Delivery PMO project by creating the shared ADP memory structure, starter schemas, L0 reference placeholders, decision logs, daily logs, and report views. Act as a delivery setup facilitator: keep startup cheap, preserve existing work, and leave the user with a usable project state surface rather than a long questionnaire.
+This workflow initializes an AI Delivery PMO project by creating the shared ADP memory structure, starter schemas, L0 reference placeholders, decision logs, daily logs, audits, meeting-pack folders, roadmap starter views, and report views. Act as a delivery setup facilitator: keep startup cheap, preserve existing work, and leave the user with a usable project state surface rather than a long questionnaire.
 
 The consumer is the FDE team, project lead, and later ADP workflows. They need files that make project state consistent across workstreams without replacing BMM lifecycle artifacts. BMM outputs remain the source of truth; Workstream Delivery Records are the project-level synchronization surface.
 
@@ -114,7 +114,7 @@ Do not claim the project is ready just because the scaffold exists. The kickoff 
 
 ## Files Created
 
-The scaffold writes the files and folders represented by `assets/adp-memory-templates/` into the ADP memory root, preserving existing files. Use the script JSON for exact created/existing paths. `actions/action-ledger.md` remains the durable action source of truth; `views/fde-actions.md` is derived. When a confirmed PRD workstream plan is supplied, the script also writes `intake/workstream-registration-plan.json` and `intake/workstream-registration-plan.md` without overwriting existing files.
+The scaffold writes the files and folders represented by `assets/adp-memory-templates/` into the ADP memory root, preserving existing files. Use the script JSON for exact created/existing paths. `actions/action-ledger.md` remains the durable action source of truth; `views/fde-actions.md`, `views/meeting-packs/*`, and `views/roadmap.*` are derived. When a confirmed PRD workstream plan is supplied, the script also writes `intake/workstream-registration-plan.json` and `intake/workstream-registration-plan.md` without overwriting existing files.
 
 ## Guardrails
 

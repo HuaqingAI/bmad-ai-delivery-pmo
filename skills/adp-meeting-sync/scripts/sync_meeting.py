@@ -31,6 +31,14 @@ DECISION_TYPE_DEFAULTS = {
     "business_decision_needed": "Business decision",
 }
 
+MEETING_LINEAGE_FIELDS = (
+    "meeting_pack_id",
+    "meeting_pack_path",
+    "scenario",
+    "audit_path",
+    "roadmap_version",
+)
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -197,6 +205,14 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         item["packet"] = item.get("packet") if isinstance(item.get("packet"), dict) else {}
         normalized_items.append(item)
 
+    raw_lineage = meeting.get("lineage") if isinstance(meeting.get("lineage"), dict) else {}
+    lineage = {
+        field: string_value(raw_lineage.get(field) or meeting.get(field))
+        for field in MEETING_LINEAGE_FIELDS
+    }
+    if not any(lineage.values()):
+        lineage = {}
+
     return {
         "meeting": {
             "date": string_value(meeting.get("date")),
@@ -208,6 +224,7 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "participants": normalize_people(meeting.get("participants")),
             "participant_gaps": normalize_gap_list(meeting.get("participant_gaps")),
             "summary": string_value(meeting.get("summary")) or "TBD",
+            "lineage": lineage,
         },
         "items": normalized_items,
     }
@@ -218,6 +235,11 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
     meeting = plan["meeting"]
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", meeting["date"]):
         errors.append("meeting.date must use YYYY-MM-DD")
+    lineage = meeting.get("lineage", {})
+    if lineage:
+        missing_lineage = [field for field in MEETING_LINEAGE_FIELDS if not lineage.get(field)]
+        if missing_lineage:
+            errors.append("meeting.lineage is missing: " + ", ".join(missing_lineage))
 
     item_ids: set[str] = set()
     for item in plan["items"]:
@@ -303,6 +325,9 @@ def apply_plan(
             "ITEM_DETAILS": "\n\n".join(item_details),
         },
     )
+    lineage_block = render_meeting_lineage(meeting)
+    if lineage_block:
+        meeting_content = meeting_content.rstrip() + "\n\n" + lineage_block + "\n"
     write_file(meeting_path, meeting_content, dry_run)
     touched["meeting_archives"].append(str(meeting_path))
 
@@ -565,12 +590,17 @@ def render_daily_block(
                 text=cell(item["text"]),
             ),
         )
+    lineage_lines = [
+        f"- {field.replace('_', ' ').title()}: `{value}`"
+        for field, value in meeting.get("lineage", {}).items()
+    ]
     return "\n".join(
         [
             f"## Meeting Sync: {meeting['title']}",
             "",
             f"- Type: {meeting['type']}",
             f"- Source: {meeting['source']}",
+            *lineage_lines,
             f"- Raw evidence: {meeting.get('raw_evidence', 'TBD')}",
             f"- Archive: `{rel_to_memory(memory_root, meeting_path)}`",
             f"- Participants: {', '.join(meeting['participants']) or 'TBD'}",
@@ -582,6 +612,19 @@ def render_daily_block(
             *rows,
             "",
         ],
+    )
+
+
+def render_meeting_lineage(meeting: dict[str, Any]) -> str:
+    lineage = meeting.get("lineage", {})
+    if not lineage:
+        return ""
+    return "\n".join(
+        [
+            "## Meeting Pack Lineage",
+            "",
+            *[f"- {field}: `{lineage[field]}`" for field in MEETING_LINEAGE_FIELDS],
+        ]
     )
 
 
@@ -887,14 +930,17 @@ def build_status_sync_intake(
     audit["ledger_ready_actions"] = sum(len(update["actions"]) for update in updates_by_workstream.values())
     if not updates_by_workstream:
         return {}, audit
+    meeting_payload = {
+        "date": meeting["date"],
+        "title": meeting["title"],
+        "source": meeting["source"],
+        "archive": rel_to_memory(memory_root, meeting_path),
+    }
+    if meeting.get("lineage"):
+        meeting_payload["lineage"] = dict(meeting["lineage"])
     return {
         "generated_by": "adp-meeting-sync",
-        "meeting": {
-            "date": meeting["date"],
-            "title": meeting["title"],
-            "source": meeting["source"],
-            "archive": rel_to_memory(memory_root, meeting_path),
-        },
+        "meeting": meeting_payload,
         "action_quality_audit": audit,
         "updates": list(updates_by_workstream.values()),
     }, audit

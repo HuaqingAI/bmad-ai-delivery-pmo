@@ -45,3 +45,5 @@ For `migration-cutover` profile, also expose:
 ## Output Rule
 
 Readiness output must include a score, dimension-level gaps, owners, and next actions. Red/yellow/green alone is not enough.
+
+Each acceptance and cutover result must also persist `roadmap_status` as exactly one of `planned`, `at-risk`, `done`, or `blocked`; the readiness review owns that evidence-backed judgment.

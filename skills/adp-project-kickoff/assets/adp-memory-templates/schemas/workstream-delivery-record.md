@@ -60,6 +60,20 @@ A Workstream Delivery Record is the minimum project-level status surface for one
 - Evidence links:
 - Customer/business confirmations:
 
+### Roadmap
+
+Optional source-backed milestones for `adp-roadmap-sync`. Use this only for verifiable milestone events; ordinary next actions and action due dates stay in the action ledger.
+
+| Milestone | Type | Status | Planned | Forecast | Actual | Owner | Confidence | Depends On | Source |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TBD | checkpoint | planned | TBD | TBD | TBD | TBD | low | TBD | TBD |
+
+Allowed `Type`: `checkpoint`, `business-decision`, `readiness-gate`, `cutover-gate`, `dependency-release`, `delivery-window`.
+
+Allowed `Status`: `planned`, `at-risk`, `done`, `blocked`.
+
+`Planned`, `Forecast`, and `Actual` must come from WDR owner updates, checkpoint evidence, decision closure, or another explicit source. If the source does not give a date, write `TBD`.
+
 ## State Semantics
 
 - `draft`: usable but incomplete; known gaps are acceptable.

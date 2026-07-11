@@ -49,6 +49,8 @@ Load member hints when present from the project charter, workstream records, reg
 
 Use raw meeting evidence as the source of truth: transcript text, chat excerpts, offline notes, or a file path containing that raw content. Third-party AI summaries, including DingTalk AI Minutes summaries, may help identify the meeting and display candidate metadata, but they are not reliable enough for ADP classification because they may omit project context. Do not build the sync plan from a summary alone; ask for raw content when raw evidence is missing.
 
+When the meeting follows an `adp-meeting-pack` readout, copy the distillate's `meeting_pack_id`, `meeting_pack_path`, `scenario`, `audit_path`, and `roadmap_version` into `meeting.lineage`. Preserve those values unchanged so the archive, daily log, and status-sync intake remain traceable to the exact pack and quality gate.
+
 When the user has not provided raw content and DingTalk access is available, run the intake pre-pass instead of hand-listing minutes:
 
 ```bash

@@ -35,13 +35,14 @@ CAPABILITY_FILES = {
         "actions",
         "daily",
         "decisions",
+        "checkpoints",
         "l0",
         "views",
     },
     "fde action list": {"core", "workstreams", "actions", "daily"},
     "acceptance readiness view": {"core", "workstreams", "l0", "views"},
     "risk and dependency synthesis": {"core", "workstreams", "decisions", "l0", "views"},
-    "weekly report generation": {"core", "workstreams", "daily", "decisions", "l0", "views"},
+    "weekly report generation": {"core", "workstreams", "actions", "daily", "decisions", "l0", "views"},
     "gap-driven coaching": {"core", "workstreams"},
     "l0 impact sweep": {"core", "workstreams", "l0"},
     "decision closure review": {"core", "workstreams", "daily", "decisions", "meetings"},
@@ -63,9 +64,11 @@ VIEW_FILES = [
     "project-lead.md",
     "fde-actions.md",
     "acceptance-readiness.md",
+    "cutover-readiness.md",
     "risk-matrix.md",
     "dependency-map.md",
     "weekly-report.md",
+    "roadmap.md",
 ]
 ACTION_LEDGER_REL = Path("actions") / "action-ledger.md"
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
@@ -93,7 +96,7 @@ class Workstream:
     files: dict[str, str] = field(default_factory=dict)
     missing_files: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
-    gaps: list[str] = field(default_factory=list)
+    gaps: list[dict[str, Any]] = field(default_factory=list)
     actions: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -140,6 +143,25 @@ def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
 def is_meaningful(value: Any) -> bool:
     text = str(value or "").strip().strip("`")
     return text.lower() not in PLACEHOLDERS
+
+
+def gap_item(
+    message: str,
+    *,
+    category: str,
+    gap_type: str,
+    blocking: bool,
+    field_name: str,
+    recommended_workflow: str = "adp-status-sync",
+) -> dict[str, Any]:
+    return {
+        "gap": message,
+        "category": category,
+        "gap_type": gap_type,
+        "blocking": blocking,
+        "field": field_name,
+        "recommended_workflow": recommended_workflow,
+    }
 
 
 def read_text(path: Path) -> str:
@@ -379,47 +401,151 @@ def scan_workstream_sidecars(ws: Workstream, memory_root: Path) -> None:
 
 def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> None:
     required = {
-        "owner": ws.owner,
-        "status": ws.status,
-        "phase": ws.phase,
-        "progress": ws.progress,
-        "next action": ws.next_actions,
+        "owner": ("owner", ws.owner),
+        "status": ("status", ws.status),
+        "phase": ("phase", ws.phase),
+        "progress": ("progress", ws.progress),
+        "next action": ("next_action", ws.next_actions),
     }
-    for label, value in required.items():
+    for label, (field_name, value) in required.items():
         if not is_meaningful(value):
-            ws.gaps.append(f"{label} is missing or TBD")
+            ws.gaps.append(
+                gap_item(
+                    f"{label} is missing or TBD",
+                    category="completeness",
+                    gap_type="missing",
+                    blocking=True,
+                    field_name=field_name,
+                )
+            )
     if not is_meaningful(ws.blockers):
-        ws.gaps.append("blocker status is missing or TBD")
+        ws.gaps.append(
+            gap_item(
+                "blocker status is missing or TBD",
+                category="completeness",
+                gap_type="missing",
+                blocking=True,
+                field_name="blockers",
+            )
+        )
     if not is_meaningful(ws.risks):
-        ws.gaps.append("risk exposure is missing or TBD")
+        ws.gaps.append(
+            gap_item(
+                "risk exposure is missing or TBD",
+                category="completeness",
+                gap_type="missing",
+                blocking=True,
+                field_name="risks",
+            )
+        )
     if not is_meaningful(ws.dependencies) and not ws.depends_on and not ws.impacts:
-        ws.gaps.append("dependencies are missing or TBD")
+        ws.gaps.append(
+            gap_item(
+                "dependencies are missing or TBD",
+                category="completeness",
+                gap_type="missing",
+                blocking=True,
+                field_name="dependencies",
+            )
+        )
     if "evidence.md" in ws.missing_files:
-        ws.gaps.append("evidence.md is missing")
+        ws.gaps.append(
+            gap_item(
+                "evidence.md is missing",
+                category="completeness",
+                gap_type="missing_file",
+                blocking=True,
+                field_name="evidence",
+            )
+        )
     elif ws.counts["evidence_lines"] == 0:
-        ws.gaps.append("evidence has no meaningful entries")
+        ws.gaps.append(
+            gap_item(
+                "evidence has no meaningful entries",
+                category="completeness",
+                gap_type="empty",
+                blocking=True,
+                field_name="evidence",
+            )
+        )
     if "readiness.md" in ws.missing_files:
-        ws.gaps.append("readiness.md is missing")
+        ws.gaps.append(
+            gap_item(
+                "readiness.md is missing",
+                category="completeness",
+                gap_type="missing_file",
+                blocking=True,
+                field_name="readiness",
+            )
+        )
     elif ws.counts["readiness_lines"] == 0:
-        ws.gaps.append("readiness has no meaningful entries")
+        ws.gaps.append(
+            gap_item(
+                "readiness has no meaningful entries",
+                category="completeness",
+                gap_type="empty",
+                blocking=True,
+                field_name="readiness",
+            )
+        )
     if "decisions.md" in ws.missing_files:
-        ws.gaps.append("decisions.md is missing")
+        ws.gaps.append(
+            gap_item(
+                "decisions.md is missing",
+                category="completeness",
+                gap_type="missing_file",
+                blocking=True,
+                field_name="decisions",
+            )
+        )
     if not ws.l0_references:
-        ws.gaps.append("L0 references are missing or TBD")
+        ws.gaps.append(
+            gap_item(
+                "L0 references are missing or TBD",
+                category="completeness",
+                gap_type="missing",
+                blocking=True,
+                field_name="l0_references",
+            )
+        )
     add_staleness_gap(ws, as_of, max_age_days)
 
 
 def add_staleness_gap(ws: Workstream, as_of: date, max_age_days: int) -> None:
     if not is_meaningful(ws.last_status_sync):
-        ws.gaps.append("last status sync is missing")
+        ws.gaps.append(
+            gap_item(
+                "last status sync is missing",
+                category="freshness",
+                gap_type="missing",
+                blocking=False,
+                field_name="last_status_sync",
+            )
+        )
         return
     parsed = parse_date(ws.last_status_sync)
     if parsed is None:
-        ws.gaps.append("last status sync is unparseable")
+        ws.gaps.append(
+            gap_item(
+                "last status sync is unparseable",
+                category="freshness",
+                gap_type="unparseable",
+                blocking=False,
+                field_name="last_status_sync",
+            )
+        )
         return
     age_days = (as_of - parsed).days
     if age_days > max_age_days:
-        ws.gaps.append(f"last status sync is older than {max_age_days} days")
+        ws.gaps.append(
+            gap_item(
+                f"last status sync is older than {max_age_days} days",
+                category="freshness",
+                gap_type="stale",
+                blocking=False,
+                field_name="last_status_sync",
+            )
+        )
 
 
 def parse_date(value: str) -> date | None:
@@ -463,6 +589,7 @@ def file_item(path: Path, memory_root: Path) -> dict[str, Any]:
         "path": rel_to_memory(memory_root, path),
         "bytes": stat.st_size,
         "modified": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
+        "modified_ns": stat.st_mtime_ns,
     }
 
 
@@ -486,10 +613,17 @@ def collect_files(memory_root: Path, requested_groups: set[str]) -> tuple[list[d
         sources.extend(file_item(path, memory_root) for path in sorted((memory_root / "meetings").glob("*.md")))
     if "decisions" in requested_groups:
         decisions_root = memory_root / "decisions"
+        decision_log = decisions_root / "decision-log.md"
+        add_optional_file(decision_log, memory_root, sources, missing)
         for path in sorted(decisions_root.glob("*.md")):
+            if path == decision_log:
+                continue
             sources.append(file_item(path, memory_root))
         packets = decisions_root / "business-decision-packets"
         sources.extend(file_item(path, memory_root) for path in sorted(packets.glob("*.md")))
+    if "checkpoints" in requested_groups:
+        candidates = memory_root / "intake" / "bmm-checkpoints" / "candidates"
+        sources.extend(file_item(path, memory_root) for path in sorted(candidates.glob("CHK-*.json")))
     return sources, missing
 
 
@@ -512,9 +646,9 @@ def requested_groups(capability: str) -> set[str]:
     return {"core", "workstreams", "daily", "decisions", "l0", "views"}
 
 
-def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, str]]:
+def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, Any]]:
     known = {ws.workstream_id for ws in workstreams}
-    gaps: list[dict[str, str]] = []
+    gaps: list[dict[str, Any]] = []
     for ws in workstreams:
         for relationship, targets in [("depends_on", ws.depends_on), ("impacts", ws.impacts)]:
             for target in targets:
@@ -526,6 +660,11 @@ def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, str]]:
                             "relationship": relationship,
                             "target": target,
                             "gap": "referenced workstream was not found in scanned WDRs",
+                            "category": "consistency",
+                            "gap_type": "missing_reference",
+                            "blocking": False,
+                            "field": relationship,
+                            "recommended_workflow": "adp-status-sync",
                         }
                     )
     return gaps
@@ -714,12 +853,25 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     wdr_actions = [action for ws in workstreams for action in ws.actions]
     actions = merge_actions(ledger_actions, wdr_actions)
     gaps = [
-        {"workstream": ws.workstream_id, "gap": gap, "source": ws.files.get("delivery_record", rel_to_memory(memory_root, ws.path))}
+        {
+            **gap,
+            "workstream": ws.workstream_id,
+            "source": ws.files.get("delivery_record", rel_to_memory(memory_root, ws.path)),
+        }
         for ws in workstreams
         for gap in ws.gaps
     ]
     gaps.extend(
-        {"workstream": item, "gap": "requested workstream was not found", "source": "workstreams/"}
+        {
+            "workstream": item,
+            "gap": "requested workstream was not found",
+            "source": "workstreams/",
+            "category": "completeness",
+            "gap_type": "missing_workstream",
+            "blocking": True,
+            "field": "workstream",
+            "recommended_workflow": "adp-project-kickoff",
+        }
         for item in missing_workstreams
     )
     xref_gaps = cross_reference_gaps(workstreams)

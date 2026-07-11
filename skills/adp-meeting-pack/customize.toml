@@ -1,0 +1,19 @@
+# DO NOT EDIT -- overwritten on every update.
+#
+# Workflow customization surface for adp-meeting-pack.
+# Team overrides:     {project-root}/_bmad/custom/adp-meeting-pack.toml
+# Personal overrides: {project-root}/_bmad/custom/adp-meeting-pack.user.toml
+
+[workflow]
+
+# Universal defaults. Merge: scalars override, arrays append.
+activation_steps_prepend = []
+activation_steps_append = []
+persistent_facts = ["file:{project-root}/**/project-context.md"]
+on_complete = ""
+
+# Artifact destination. Tokens are resolved by scripts/render_meeting_pack.py.
+# Override when packs must live outside the default ADP memory view tree.
+meeting_pack_output_path = "{memory_root}/views/meeting-packs"
+# Override when the organization needs a different per-run grouping convention.
+run_folder_pattern = "{scenario}"

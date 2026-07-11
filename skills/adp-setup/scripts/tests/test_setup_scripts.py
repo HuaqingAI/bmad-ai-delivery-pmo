@@ -60,6 +60,28 @@ def write_module_yaml(path: Path, include_required: bool = False) -> None:
 
 
 class AdpSetupScriptTests(unittest.TestCase):
+    def test_module_help_registers_derived_readout_workflows(self) -> None:
+        header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
+        skill_index = header.index("skill")
+        output_index = header.index("output-location")
+        row_by_skill = {row[skill_index]: row for row in rows}
+
+        for skill in ("adp-state-audit", "adp-meeting-pack", "adp-roadmap-sync"):
+            self.assertIn(skill, row_by_skill)
+
+        self.assertEqual(
+            row_by_skill["adp-state-audit"][output_index],
+            "{project-root}/_bmad-output/adp/memory/audits",
+        )
+        self.assertEqual(
+            row_by_skill["adp-meeting-pack"][output_index],
+            "{project-root}/_bmad-output/adp/memory/views/meeting-packs",
+        )
+        self.assertEqual(
+            row_by_skill["adp-roadmap-sync"][output_index],
+            "{project-root}/_bmad-output/adp/memory/views",
+        )
+
     def test_inspect_install_state_computes_defaults_and_missing_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -132,6 +154,61 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertTrue(validated["headless_ready"])
             self.assertEqual(validated["missing_required_inputs"], [])
             self.assertEqual(validated["validated_answers"]["module"]["required_value"], "provided")
+
+    def test_scripts_reject_unknown_answer_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module_yaml = root / "module.yaml"
+            answers = root / "answers.json"
+            write_module_yaml(module_yaml)
+            answers.write_text(
+                json.dumps(
+                    {
+                        "core": {"unknown_core": "ignored"},
+                        "module": {"delivery_rooot": "typo"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            inspected = run_script(
+                INSPECT_STATE,
+                str(root),
+                "--module-yaml",
+                str(module_yaml),
+                "--answers",
+                str(answers),
+                check=False,
+            )
+            inspect_result = json.loads(inspected.stdout)
+
+            self.assertEqual(inspected.returncode, 1)
+            self.assertEqual(inspect_result["status"], "error")
+            self.assertIn("unknown_core", inspect_result["error"])
+            self.assertIn("delivery_rooot", inspect_result["error"])
+
+            config_path = root / "_bmad" / "config.yaml"
+            user_config_path = root / "_bmad" / "config.user.yaml"
+            merged = run_script(
+                MERGE_CONFIG,
+                "--config-path",
+                str(config_path),
+                "--user-config-path",
+                str(user_config_path),
+                "--module-yaml",
+                str(module_yaml),
+                "--answers",
+                str(answers),
+                check=False,
+            )
+            merge_result = json.loads(merged.stdout)
+
+            self.assertEqual(merged.returncode, 1)
+            self.assertEqual(merge_result["status"], "error")
+            self.assertIn("unknown_core", merge_result["error"])
+            self.assertIn("delivery_rooot", merge_result["error"])
+            self.assertFalse(config_path.exists())
+            self.assertFalse(user_config_path.exists())
 
     def test_module_yaml_user_facing_fields_are_readable_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

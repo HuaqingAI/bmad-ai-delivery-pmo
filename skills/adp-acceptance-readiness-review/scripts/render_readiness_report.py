@@ -19,6 +19,7 @@ REPORT_TITLES = {
     "acceptance": "Acceptance Readiness Report",
     "cutover": "Cutover Readiness Report",
 }
+VALID_ROADMAP_STATUSES = {"planned", "at-risk", "done", "blocked"}
 GENERATED_START = "<!-- ADP readiness generated: start -->"
 GENERATED_END = "<!-- ADP readiness generated: end -->"
 
@@ -74,6 +75,19 @@ def load_packet(path: Path) -> dict[str, Any]:
             raise ValueError(f"workstreams[{index}] must be an object")
         if not text(workstream.get("id"), ""):
             raise ValueError(f"workstreams[{index}] must include id")
+        for report_type in ["acceptance", "cutover"]:
+            section = workstream.get(report_type)
+            if section is None and report_type == "cutover":
+                continue
+            if not isinstance(section, dict):
+                raise ValueError(f"workstreams[{index}].{report_type} must be an object")
+            roadmap_status = text(section.get("roadmap_status"), "")
+            if roadmap_status not in VALID_ROADMAP_STATUSES:
+                allowed = ", ".join(sorted(VALID_ROADMAP_STATUSES))
+                display = roadmap_status or "<missing>"
+                raise ValueError(
+                    f"workstreams[{index}].{report_type}.roadmap_status {display!r} is invalid; allowed: {allowed}"
+                )
     return packet
 
 
@@ -144,8 +158,8 @@ def render_markdown(packet: dict[str, Any], report_type: str) -> str:
         "",
         "## Workstreams",
         "",
-        "| Workstream | Owner | Score | Status | Primary gap |",
-        "| --- | --- | --- | --- | --- |",
+        "| Workstream | Owner | Score | Status | Roadmap Status | Primary gap |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for workstream in packet["workstreams"]:
         section = workstream.get(report_type) if isinstance(workstream.get(report_type), dict) else {}
@@ -157,6 +171,7 @@ def render_markdown(packet: dict[str, Any], report_type: str) -> str:
                     escape_md(workstream.get("owner")),
                     escape_md(score_text(section)),
                     escape_md(section.get("status")),
+                    escape_md(section.get("roadmap_status")),
                     escape_md(primary_gap(section)),
                 ],
             )
@@ -172,6 +187,7 @@ def render_markdown(packet: dict[str, Any], report_type: str) -> str:
                 f"- Owner: {text(workstream.get('owner'))}",
                 f"- Score: {score_text(section)}",
                 f"- Status: {text(section.get('status'))}",
+                f"- Roadmap status: {text(section.get('roadmap_status'))}",
             ],
         )
         if report_type == "cutover":
@@ -246,12 +262,14 @@ def render_readiness_block(workstream: dict[str, Any]) -> str:
         f"- Owner: {text(workstream.get('owner'))}",
         f"- Acceptance score: {score_text(acceptance)}",
         f"- Acceptance status: {text(acceptance.get('status'))}",
+        f"- Acceptance roadmap status: {text(acceptance.get('roadmap_status'))}",
     ]
     if cutover:
         lines.extend(
             [
                 f"- Cutover score: {score_text(cutover)}",
                 f"- Cutover status: {text(cutover.get('status'))}",
+                f"- Cutover roadmap status: {text(cutover.get('roadmap_status'))}",
                 f"- Go/no-go: {text(cutover.get('go_no_go'))}",
             ],
         )

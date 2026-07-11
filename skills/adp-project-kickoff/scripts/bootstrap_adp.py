@@ -77,8 +77,12 @@ DIRECTORIES = [
     "intake",
     "intake/status-sync",
     "actions",
+    "audits",
     "workstreams",
     "views",
+    "views/meeting-packs",
+    "views/meeting-packs/fde-morning",
+    "views/meeting-packs/business-biweekly",
     "daily",
 ]
 
@@ -92,6 +96,7 @@ TEMPLATE_FILES = [
     "schemas/meeting-sync.md",
     "schemas/decision-taxonomy.md",
     "schemas/action-ledger.md",
+    "audits/README.md",
     "l0/reference-index.md",
     "l0/extracted-freeze-model.md",
     "l0/extracted-contract-inventory.md",
@@ -109,6 +114,9 @@ TEMPLATE_FILES = [
     "views/risk-matrix.md",
     "views/dependency-map.md",
     "views/weekly-report.md",
+    "views/meeting-packs/README.md",
+    "views/roadmap.md",
+    "views/roadmap.json",
 ]
 
 

@@ -259,6 +259,24 @@ def overlay_answers(
     return overlaid
 
 
+def answer_validation_errors(
+    answers: dict[str, Any], variables: dict[str, dict[str, Any]]
+) -> list[str]:
+    allowed = {"core": CORE_KEYS, "module": frozenset(variables)}
+    errors: list[str] = []
+    for scope, values in answers.items():
+        if scope not in allowed:
+            errors.append(f"Unknown answer scope: {scope}")
+            continue
+        if not isinstance(values, dict):
+            errors.append(f"Answer scope '{scope}' must be an object")
+            continue
+        unknown_keys = sorted(set(values) - allowed[scope])
+        if unknown_keys:
+            errors.append(f"Unknown {scope} answer keys: {', '.join(unknown_keys)}")
+    return errors
+
+
 def remaining_missing_inputs(
     missing: list[dict[str, str]], answers: dict[str, dict[str, Any]]
 ) -> list[dict[str, str]]:
@@ -414,6 +432,9 @@ def main() -> None:
         variables, current_core, current_module, legacy_core, legacy_module
     )
     provided_answers = load_json_file(Path(args.answers)) if args.answers else {}
+    validation_errors = answer_validation_errors(provided_answers, variables)
+    if validation_errors:
+        fail("; ".join(validation_errors), 1)
     validated_answers = overlay_answers(defaults, provided_answers)
     remaining_missing = remaining_missing_inputs(missing, validated_answers)
     metadata = extract_module_metadata(module_yaml)

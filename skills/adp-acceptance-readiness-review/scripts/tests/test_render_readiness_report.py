@@ -24,6 +24,7 @@ class RenderReadinessReportTests(unittest.TestCase):
                         "score": 18,
                         "max_score": 24,
                         "status": "gap",
+                        "roadmap_status": "at-risk",
                         "dimensions": [
                             {
                                 "dimension": "Evidence completeness",
@@ -51,6 +52,7 @@ class RenderReadinessReportTests(unittest.TestCase):
                         "score": 12,
                         "max_score": 21,
                         "status": "no-go",
+                        "roadmap_status": "blocked",
                         "go_no_go": "No-go",
                         "dimensions": [],
                         "gaps": [],
@@ -93,7 +95,10 @@ class RenderReadinessReportTests(unittest.TestCase):
             self.assertIn(root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md", paths)
             self.assertIn(root / "_bmad-output" / "adp" / "memory" / "views" / "cutover-readiness.html", paths)
             acceptance = root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md"
-            self.assertIn("Payment proof missing", acceptance.read_text(encoding="utf-8"))
+            content = acceptance.read_text(encoding="utf-8")
+            self.assertIn("Payment proof missing", content)
+            self.assertIn("Roadmap Status", content)
+            self.assertIn("at-risk", content)
 
     def test_second_run_reports_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -133,6 +138,31 @@ class RenderReadinessReportTests(unittest.TestCase):
             self.assertIn("Manual note stays.", content)
             self.assertIn("<!-- ADP readiness generated: start -->", content)
             self.assertIn("Payment proof missing", content)
+
+    def test_rejects_missing_or_invalid_roadmap_status(self) -> None:
+        for value in [None, "delayed"]:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                packet_path = self.write_packet(root)
+                packet = json.loads(packet_path.read_text(encoding="utf-8"))
+                if value is None:
+                    del packet["workstreams"][0]["acceptance"]["roadmap_status"]
+                else:
+                    packet["workstreams"][0]["acceptance"]["roadmap_status"] = value
+                packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+                completed = subprocess.run(
+                    [sys.executable, str(SCRIPT), str(root), "--input", str(packet_path), "--mode", "acceptance"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                result = json.loads(completed.stdout)
+
+                self.assertEqual(completed.returncode, 2)
+                self.assertFalse(result["ok"])
+                self.assertIn("acceptance.roadmap_status", result["error"])
 
 
 if __name__ == "__main__":

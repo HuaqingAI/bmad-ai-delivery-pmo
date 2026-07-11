@@ -147,6 +147,57 @@ class SyncMeetingTests(unittest.TestCase):
             )
             self.assertIn("Meeting Sync Update", record)
 
+    def test_meeting_pack_lineage_is_preserved_in_all_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-10",
+                    "type": "business biweekly",
+                    "title": "Roadmap decisions",
+                    "source": "meeting pack",
+                    "participants": ["Biz-A", "FDE-A"],
+                    "summary": "Close the current roadmap decisions.",
+                    "lineage": {
+                        "meeting_pack_id": "2026-07-10-business-biweekly",
+                        "meeting_pack_path": "views/meeting-packs/business-biweekly/2026-07-10.md",
+                        "scenario": "business-biweekly",
+                        "audit_path": "audits/2026-07-10-business-biweekly-audit.json",
+                        "roadmap_version": "2026-07-10T08:00:00+08:00",
+                    },
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "action",
+                        "text": "Publish the accepted launch window.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "owner": "FDE-A",
+                        "due": "2026-07-11",
+                        "closure_criteria": "Launch window is linked from the WDR.",
+                    }
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+
+            expected_lineage = {
+                "meeting_pack_id": "2026-07-10-business-biweekly",
+                "meeting_pack_path": "views/meeting-packs/business-biweekly/2026-07-10.md",
+                "scenario": "business-biweekly",
+                "audit_path": "audits/2026-07-10-business-biweekly-audit.json",
+                "roadmap_version": "2026-07-10T08:00:00+08:00",
+            }
+            self.assertEqual(result["meeting"]["lineage"], expected_lineage)
+            archive = Path(result["touched"]["meeting_archives"][0]).read_text(encoding="utf-8")
+            daily = (memory_root / "daily" / "2026-07-10.md").read_text(encoding="utf-8")
+            self.assertIn("## Meeting Pack Lineage", archive)
+            self.assertIn("2026-07-10-business-biweekly", archive)
+            self.assertIn("2026-07-10-business-biweekly", daily)
+            intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(intake["meeting"]["lineage"], expected_lineage)
+
     def test_sync_preserves_raw_evidence_reports_gaps_and_cleans_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -256,7 +307,10 @@ class SyncMeetingTests(unittest.TestCase):
             plan_path.write_text(
                 json.dumps(
                     {
-                        "meeting": {"date": "2026-07-01"},
+                        "meeting": {
+                            "date": "2026-07-01",
+                            "lineage": {"meeting_pack_id": "2026-07-01-fde-morning"},
+                        },
                         "items": [{"id": "M-001", "classification": "no_op", "text": "skip"}],
                     },
                 ),
@@ -284,7 +338,9 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 2)
             result = json.loads(completed.stdout)
             self.assertFalse(result["ok"])
-            self.assertIn("no_op requires no_op_reason", "\n".join(result["validation_errors"]))
+            errors = "\n".join(result["validation_errors"])
+            self.assertIn("no_op requires no_op_reason", errors)
+            self.assertIn("meeting.lineage is missing", errors)
 
     def test_sync_without_actions_does_not_write_status_intake(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

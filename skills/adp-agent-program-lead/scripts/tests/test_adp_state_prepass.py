@@ -75,7 +75,10 @@ class AdpStatePrepassTests(unittest.TestCase):
     def test_extracts_workstream_state_actions_and_cross_reference_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            self.scaffold(project_root)
+            memory_root = self.scaffold(project_root)
+            candidate = memory_root / "intake" / "bmm-checkpoints" / "candidates" / "CHK-L1.json"
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text("{}\n", encoding="utf-8")
 
             completed = self.run_script(
                 project_root,
@@ -94,6 +97,11 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertEqual(targets, {"l2-payments", "l3-settlement"})
             self.assertNotIn("workflow_triggers", result)
             self.assertEqual(result["recommended_workflow"], "")
+            self.assertIn(
+                "intake/bmm-checkpoints/candidates/CHK-L1.json",
+                {item["path"] for item in result["sources_read"]},
+            )
+            self.assertIn("decisions/decision-log.md", result["missing_sources"])
 
     def test_parses_only_labeled_wdr_due_or_trigger(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -141,6 +149,16 @@ class AdpStatePrepassTests(unittest.TestCase):
             gaps = [item["gap"] for item in result["gaps"]]
             self.assertIn("last status sync is older than 7 days", gaps)
             self.assertIn("requested workstream was not found", gaps)
+            stale_gap = next(item for item in result["gaps"] if item["gap"] == "last status sync is older than 7 days")
+            self.assertEqual(stale_gap["category"], "freshness")
+            self.assertEqual(stale_gap["gap_type"], "stale")
+            self.assertFalse(stale_gap["blocking"])
+            self.assertEqual(stale_gap["field"], "last_status_sync")
+            missing_gap = next(item for item in result["gaps"] if item["gap"] == "requested workstream was not found")
+            self.assertEqual(missing_gap["category"], "completeness")
+            self.assertEqual(missing_gap["gap_type"], "missing_workstream")
+            self.assertTrue(missing_gap["blocking"])
+            self.assertEqual(missing_gap["recommended_workflow"], "adp-project-kickoff")
             self.assertNotIn("workflow_triggers", result)
 
     def test_fde_action_list_reads_action_ledger_before_wdr_next_actions(self) -> None:
