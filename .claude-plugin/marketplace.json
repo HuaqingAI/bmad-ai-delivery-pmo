@@ -12,6 +12,9 @@
       "skills": [
         "./skills/adp-setup",
         "./skills/adp-project-kickoff",
+        "./skills/adp-state-audit",
+        "./skills/adp-meeting-pack",
+        "./skills/adp-roadmap-sync",
         "./skills/adp-workstream-register",
         "./skills/adp-bmm-checkpoint-sync",
         "./skills/adp-meeting-sync",
@@ -26,6 +29,9 @@
   "skills": [
     "./skills/adp-setup",
     "./skills/adp-project-kickoff",
+    "./skills/adp-state-audit",
+    "./skills/adp-meeting-pack",
+    "./skills/adp-roadmap-sync",
     "./skills/adp-workstream-register",
     "./skills/adp-bmm-checkpoint-sync",
     "./skills/adp-meeting-sync",

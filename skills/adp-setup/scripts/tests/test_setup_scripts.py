@@ -60,6 +60,20 @@ def write_module_yaml(path: Path, include_required: bool = False) -> None:
 
 
 class AdpSetupScriptTests(unittest.TestCase):
+    def test_marketplace_registers_all_adp_skills(self) -> None:
+        repo_root = SKILL_ROOT.parents[1]
+        marketplace = json.loads(
+            (repo_root / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+        )
+        expected = sorted(
+            f"./skills/{path.name}"
+            for path in SKILL_ROOT.parent.glob("adp-*")
+            if (path / "SKILL.md").is_file()
+        )
+
+        self.assertEqual(sorted(marketplace["skills"]), expected)
+        self.assertEqual(sorted(marketplace["plugins"][0]["skills"]), expected)
+
     def test_module_help_registers_derived_readout_workflows(self) -> None:
         header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
         skill_index = header.index("skill")
