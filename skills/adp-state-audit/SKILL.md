@@ -21,6 +21,8 @@ The consumer is `adp-program-status`, `adp-agent-program-lead`, `adp-meeting-pac
 
 Resolve `{workflow.*}` with `uv run {project-root}/_bmad/scripts/resolve_customization.py --skill {skill-root} --key workflow`. If the resolver is unavailable, read and merge `customize.toml`, `{project-root}/_bmad/custom/adp-state-audit.toml`, and `{project-root}/_bmad/custom/adp-state-audit.user.toml` in order: the last scalar wins, tables deep-merge, table-array entries replace or append by `code`/`id`, and other arrays append. Load `{workflow.persistent_facts}` as standing context and execute `{workflow.activation_steps_prepend}` before applying the state boundary. Run the audit with user-supplied scope flags, `{workflow.audit_output_path}` as the default artifact destination, and `{workflow.run_folder_pattern}` when non-empty; execute `{workflow.activation_steps_append}` immediately before the audit call.
 
+Before user-facing output, resolve the shared ADP effective config through the installed `adp-plan-baseline` `scripts/adp_effective_config.py`. Conversation and status text follow `communication_language`; audit Markdown follows `document_output_language`. Surface resolver warnings and explicit English fallback. Language switching localizes system copy only: JSON keys, canonical enums, paths, lineage, and source facts remain unchanged.
+
 If the script or ADP prepass cannot run, or returns `blocked`/`error`, stop with the blocked/error Output Contract. Manual inspection is allowed only as non-gating triage and cannot satisfy the audit contract. When the audit reaches a terminal complete, blocked, or error state, execute `{workflow.on_complete}` if non-empty.
 
 ## State Boundary
@@ -68,4 +70,4 @@ Treat `audit_state.py` output as the canonical finding set. Report severity and 
 
 ## Output Contract
 
-Interactive use reports phase, audit status, execution disposition, output paths, findings, confidence, and recovery workflows. Headless use passes `--headless` and returns the script result JSON unchanged. Never invent output or memlog paths on blocked/error results. Keep artifact validation separate from generated artifacts, and route follow-up only from returned recommendations.
+Interactive use reports phase, audit status, execution disposition, output paths, findings, confidence, language fallbacks, config warnings, and recovery workflows in the resolved communication language. Headless use passes `--headless` and returns the script result JSON unchanged. Never invent output or memlog paths on blocked/error results. Keep artifact validation separate from generated artifacts, and route follow-up only from returned recommendations.

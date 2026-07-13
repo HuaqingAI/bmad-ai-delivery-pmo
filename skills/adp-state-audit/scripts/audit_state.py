@@ -26,11 +26,12 @@ SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_ROOT = SCRIPT_ROOT.parent
 DEFAULT_PREPASS_SCRIPT = SKILLS_ROOT / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
 DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
+DEFAULT_LOCALE_CATALOG_PATH = SKILLS_ROOT / "adp-plan-baseline" / "assets" / "locale-catalog.json"
 DEFAULT_BASELINE_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "baseline.py"
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_AUDIT_OUTPUT_PATH = "audits"
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
-GENERATOR_VERSION = "2.0.0"
+GENERATOR_VERSION = "2.1.0"
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 TERMINAL_DECISION_STATUSES = {"accepted", "closed", "done", "cancelled", "rejected", "superseded"}
 TERMINAL_INTAKE_STATUSES = {"applied", "superseded"}
@@ -419,7 +420,13 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
     )
     output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, args.scenario)
     try:
-        output_paths = write_audit_outputs(audit, output_dir, as_of, args.scenario)
+        output_paths = write_audit_outputs(
+            audit,
+            output_dir,
+            as_of,
+            args.scenario,
+            Path(args.config_script).resolve().parent.parent / "assets" / "locale-catalog.json",
+        )
     except OSError as exc:
         return failure_envelope(
             status="error",
@@ -442,6 +449,10 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
         "safe_to_generate": audit["safe_to_generate"],
         "safe_to_generate_green_report": audit["safe_to_generate_green_report"],
         "report_confidence": audit["report_confidence"],
+        "communication_locale": audit["effective_config"]["communication_locale"],
+        "document_locale": audit["locale"],
+        "language_fallbacks": audit["effective_config"]["fallbacks"],
+        "config_warnings": audit["effective_config"]["warnings"],
         "project_root": str(project_root),
         "memory_root": str(memory_root),
         "scenario": args.scenario,
@@ -517,7 +528,13 @@ def run_artifact_validation(
     )
     output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, effective_scenario)
     try:
-        output_paths = write_audit_outputs(validation, output_dir, as_of, effective_scenario)
+        output_paths = write_audit_outputs(
+            validation,
+            output_dir,
+            as_of,
+            effective_scenario,
+            Path(args.config_script).resolve().parent.parent / "assets" / "locale-catalog.json",
+        )
     except OSError as exc:
         return artifact_failure_envelope(
             effective_scenario,
@@ -536,6 +553,10 @@ def run_artifact_validation(
         "audit_status": validation["audit_status"],
         "execution_disposition": validation["execution_disposition"],
         "safe_to_publish": validation["safe_to_publish"],
+        "communication_locale": validation["effective_config"]["communication_locale"],
+        "document_locale": validation["locale"],
+        "language_fallbacks": validation["effective_config"]["fallbacks"],
+        "config_warnings": validation["effective_config"]["warnings"],
         "scenario": effective_scenario,
         "outputs": output_paths,
         "counts": validation["counts"],
@@ -589,6 +610,22 @@ def build_artifact_validation(
     expected_audit_id = str(input_audit.get("input_audit_id"))
     expected_revision = input_audit.get("baseline_revision")
     expected_locale = str(input_audit.get("locale") or "en")
+    input_effective_config = input_audit.get("effective_config")
+    if not isinstance(input_effective_config, dict):
+        input_effective_config = {}
+    effective_config = {
+        "document_locale": str(input_effective_config.get("document_locale") or expected_locale),
+        "communication_locale": str(input_effective_config.get("communication_locale") or expected_locale),
+        "fallbacks": list(input_effective_config.get("fallbacks", []))
+        if isinstance(input_effective_config.get("fallbacks"), list)
+        else [],
+        "value_sources": dict(input_effective_config.get("value_sources", {}))
+        if isinstance(input_effective_config.get("value_sources"), dict)
+        else {},
+        "warnings": list(input_effective_config.get("warnings", []))
+        if isinstance(input_effective_config.get("warnings"), list)
+        else [],
+    }
     expected_fingerprints = input_audit.get("source_fingerprints") if isinstance(input_audit.get("source_fingerprints"), dict) else {}
     try:
         locale_catalog = load_json(locale_catalog_path)
@@ -918,6 +955,7 @@ def build_artifact_validation(
         "input_audit_path": str(input_audit_path),
         "baseline_revision": expected_revision,
         "locale": expected_locale,
+        "effective_config": effective_config,
         "audit_status": audit_status,
         "execution_disposition": disposition,
         "safe_to_generate": disposition != "blocked",
@@ -1585,6 +1623,7 @@ def public_effective_config(config: dict[str, Any]) -> dict[str, Any]:
         "communication_locale": str(config.get("communication_locale") or "en"),
         "fallbacks": list(config.get("fallbacks", [])) if isinstance(config.get("fallbacks"), list) else [],
         "value_sources": dict(config.get("value_sources", {})) if isinstance(config.get("value_sources"), dict) else {},
+        "warnings": list(config.get("warnings", [])) if isinstance(config.get("warnings"), list) else [],
     }
 
 
@@ -2752,7 +2791,13 @@ def recommend_workflows(
     return sorted(set(workflows))
 
 
-def write_audit_outputs(audit: dict[str, Any], output_dir: Path, as_of: date, scenario: str) -> dict[str, str]:
+def write_audit_outputs(
+    audit: dict[str, Any],
+    output_dir: Path,
+    as_of: date,
+    scenario: str,
+    locale_catalog_path: Path = DEFAULT_LOCALE_CATALOG_PATH,
+) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     if audit.get("audit_type") == "artifact":
         audit_id = str(audit["artifact_validation_id"])
@@ -2782,10 +2827,10 @@ def write_audit_outputs(audit: dict[str, Any], output_dir: Path, as_of: date, sc
             raise OSError(f"immutable audit content failed integrity validation: {json_path}")
         render_source = existing
     if markdown_path.exists():
-        if read_text(markdown_path) != render_markdown(render_source):
+        if read_text(markdown_path) != render_markdown(render_source, locale_catalog_path):
             raise OSError(f"immutable audit Markdown failed integrity validation: {markdown_path}")
     json_text = json.dumps(audit, ensure_ascii=False, indent=2) + "\n"
-    markdown_text = render_markdown(render_source)
+    markdown_text = render_markdown(render_source, locale_catalog_path)
     if not json_exists and not markdown_exists:
         atomic_write_pair(json_path, json_text, markdown_path, markdown_text)
     elif not markdown_exists:
@@ -2829,97 +2874,156 @@ def write_temp_text(path: Path, text: str) -> str:
         return handle.name
 
 
-def render_markdown(audit: dict[str, Any]) -> str:
+def load_render_catalog(path: Path) -> dict[str, dict[str, str]]:
+    try:
+        value = load_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OSError(f"cannot load shared locale catalog {path}: {exc}") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("en"), dict):
+        raise OSError(f"shared locale catalog is invalid: {path}")
+    return value
+
+
+def render_message(catalog: dict[str, dict[str, str]], locale_value: str, key: str, **values: Any) -> str:
+    selected = catalog.get(locale_value) if isinstance(catalog.get(locale_value), dict) else catalog["en"]
+    template = selected.get(key) or catalog["en"].get(key) or key
+    return str(template).format(**values)
+
+
+def render_enum(
+    catalog: dict[str, dict[str, str]],
+    locale_value: str,
+    enum_name: str,
+    canonical_value: Any,
+) -> str:
+    value = str(canonical_value)
+    key = f"enum.{enum_name}.{value}"
+    rendered = render_message(catalog, locale_value, key)
+    return value if rendered == key else rendered
+
+
+def render_markdown(
+    audit: dict[str, Any],
+    locale_catalog_path: Path = DEFAULT_LOCALE_CATALOG_PATH,
+) -> str:
+    catalog = load_render_catalog(locale_catalog_path)
     if audit.get("audit_type") == "artifact":
-        return render_artifact_validation_markdown(audit)
+        return render_artifact_validation_markdown(audit, catalog)
+    locale_value = str(audit.get("locale") or "en")
+    text = lambda key: render_message(catalog, locale_value, key)
+    yes_no = lambda value: text("value.yes") if value else text("value.no")
+    finding_headers = ["Source", "Workstream", "Gap", "Recommended workflow"]
+    finding_header_labels = [
+        text("common.source"),
+        text("common.workstream"),
+        text("common.gap"),
+        text("audit.label.recommended_workflow"),
+    ]
+    no_findings = text("audit.value.no_findings")
+    review_item = text("audit.value.review_item")
     findings = audit["findings"]
     lines = [
-        "# ADP State Audit",
+        f"# {text('audit.title.state')}",
         "",
-        f"Generated: {audit['generated_at']}",
-        f"Input audit ID: {audit['input_audit_id']}",
-        f"Scenario: {audit['scenario']}",
-        f"Audit status: {audit['audit_status']}",
-        f"Execution disposition: {audit['execution_disposition']}",
-        f"Safe to generate: {str(audit['safe_to_generate']).lower()}",
-        f"Safe to generate green report: {str(audit['safe_to_generate_green_report']).lower()}",
-        f"Report confidence: {audit['report_confidence']}",
-        f"Baseline revision: {audit['baseline_revision'] if audit['baseline_revision'] is not None else 'missing'}",
-        f"Locale: {audit['locale']}",
-        f"Locale fallback: {str(audit['locale_fallback']).lower()}",
-        f"Generator version: {audit['generator_version']}",
-        f"Memory root: `{audit['memory_root']}`",
+        f"{text('common.generated')}: {audit['generated_at']}",
+        f"{text('status.input_audit_id')}: {audit['input_audit_id']}",
+        f"{text('audit.label.scenario')}: {audit['scenario']}",
+        f"{text('audit.label.audit_status')}: {render_enum(catalog, locale_value, 'audit_status', audit['audit_status'])}",
+        f"{text('audit.label.execution_disposition')}: {render_enum(catalog, locale_value, 'execution_disposition', audit['execution_disposition'])}",
+        f"{text('audit.label.safe_to_generate')}: {yes_no(audit['safe_to_generate'])}",
+        f"{text('audit.label.safe_to_generate_green')}: {yes_no(audit['safe_to_generate_green_report'])}",
+        f"{text('status.confidence')}: {render_enum(catalog, locale_value, 'report_confidence', audit['report_confidence'])}",
+        f"{text('status.baseline_revision')}: {audit['baseline_revision'] if audit['baseline_revision'] is not None else text('audit.value.missing')}",
+        f"{text('audit.label.locale')}: {audit['locale']}",
+        f"{text('audit.label.locale_fallback')}: {yes_no(audit['locale_fallback'])}",
+        f"{text('status.generator_version')}: {audit['generator_version']}",
+        f"{text('audit.label.memory_root')}: `{audit['memory_root']}`",
         "",
-        "## Quality Gate",
+        f"## {text('audit.section.quality_gate')}",
         "",
-        f"- Blocking gaps: {len(audit['blocking_gaps'])}",
-        f"- Conflicts: {len(audit['conflicts'])}",
-        f"- Warnings: {len(audit['warnings']) + len(audit['stale_items'])}",
+        f"- {text('audit.metric.blocking_gaps')}: {len(audit['blocking_gaps'])}",
+        f"- {text('audit.metric.conflicts')}: {len(audit['conflicts'])}",
+        f"- {text('audit.metric.warnings')}: {len(audit['warnings']) + len(audit['stale_items'])}",
         "",
-        "## Source Inventory",
+        f"## {text('audit.section.source_inventory')}",
         "",
-        f"- Sources read: {audit['counts']['sources_read']}",
-        f"- Missing sources: {audit['counts']['missing_sources']}",
-        f"- Workstreams: {audit['counts']['workstreams']}",
-        f"- Active ledger actions: {audit['counts']['active_ledger_actions']}",
+        f"- {text('audit.metric.sources_read')}: {audit['counts']['sources_read']}",
+        f"- {text('audit.metric.missing_sources')}: {audit['counts']['missing_sources']}",
+        f"- {text('common.workstreams')}: {audit['counts']['workstreams']}",
+        f"- {text('audit.metric.active_actions')}: {audit['counts']['active_ledger_actions']}",
         "",
     ]
     if audit["source_inventory"]["missing_sources"]:
-        lines.extend(["| Missing source |", "| --- |"])
+        lines.extend([f"| {text('audit.label.missing_source')} |", "| --- |"])
         lines.extend(f"| {cell(item)} |" for item in audit["source_inventory"]["missing_sources"])
         lines.append("")
 
-    add_table(lines, "Blocking Gaps", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings(findings["completeness"]["blocking_gaps"]))
-    add_table(lines, "Freshness", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["freshness"]["blocking_gaps"], *findings["freshness"]["stale_workstreams"], *findings["freshness"]["stale_actions"], *findings["freshness"]["views_requiring_refresh"]]))
-    add_table(lines, "Consistency", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["consistency"]["consistency_warnings"], *findings["consistency"]["source_disagreements"], *findings["consistency"]["recommended_refreshes"]]))
-    add_table(lines, "Closure", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["closure"]["blocking_gaps"], *findings["closure"]["non_blocking_gaps"], *findings["closure"]["unclosed_meeting_items"], *findings["closure"]["open_business_packets"], *findings["closure"]["unconsumed_intake_files"], *findings["closure"]["escalation_candidates"]]))
-    add_table(lines, "Merge Quality", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings([*findings["merge_quality"]["blocking_gaps"], *findings["merge_quality"]["non_blocking_gaps"], *findings["merge_quality"]["duplicate_candidates"], *findings["merge_quality"]["overlap_candidates"], *findings["merge_quality"]["conflict_candidates"]]))
+    add_table(lines, text("audit.section.blocking_gaps"), finding_headers, flatten_findings(findings["completeness"]["blocking_gaps"], review_item), finding_header_labels, no_findings)
+    add_table(lines, text("audit.section.freshness"), finding_headers, flatten_findings([*findings["freshness"]["blocking_gaps"], *findings["freshness"]["stale_workstreams"], *findings["freshness"]["stale_actions"], *findings["freshness"]["views_requiring_refresh"]], review_item), finding_header_labels, no_findings)
+    add_table(lines, text("audit.section.consistency"), finding_headers, flatten_findings([*findings["consistency"]["consistency_warnings"], *findings["consistency"]["source_disagreements"], *findings["consistency"]["recommended_refreshes"]], review_item), finding_header_labels, no_findings)
+    add_table(lines, text("audit.section.closure"), finding_headers, flatten_findings([*findings["closure"]["blocking_gaps"], *findings["closure"]["non_blocking_gaps"], *findings["closure"]["unclosed_meeting_items"], *findings["closure"]["open_business_packets"], *findings["closure"]["unconsumed_intake_files"], *findings["closure"]["escalation_candidates"]], review_item), finding_header_labels, no_findings)
+    add_table(lines, text("audit.section.merge_quality"), finding_headers, flatten_findings([*findings["merge_quality"]["blocking_gaps"], *findings["merge_quality"]["non_blocking_gaps"], *findings["merge_quality"]["duplicate_candidates"], *findings["merge_quality"]["overlap_candidates"], *findings["merge_quality"]["conflict_candidates"]], review_item), finding_header_labels, no_findings)
 
-    lines.extend(["## Recommended Workflows", ""])
+    lines.extend([f"## {text('audit.section.recommended_workflows')}", ""])
     if audit["recommended_workflows"]:
         lines.extend(f"- `{workflow}`" for workflow in audit["recommended_workflows"])
     else:
-        lines.append("- No follow-up workflow required by this audit.")
+        lines.append(f"- {text('audit.value.no_audit_follow_up')}")
     lines.append("")
     return "\n".join(lines)
 
 
-def render_artifact_validation_markdown(validation: dict[str, Any]) -> str:
+def render_artifact_validation_markdown(
+    validation: dict[str, Any],
+    catalog: dict[str, dict[str, str]],
+) -> str:
+    locale_value = str(validation.get("locale") or "en")
+    text = lambda key: render_message(catalog, locale_value, key)
+    yes_no = lambda value: text("value.yes") if value else text("value.no")
+    finding_headers = ["Source", "Workstream", "Gap", "Recommended workflow"]
+    finding_header_labels = [
+        text("common.source"),
+        text("common.workstream"),
+        text("common.gap"),
+        text("audit.label.recommended_workflow"),
+    ]
+    no_findings = text("audit.value.no_findings")
+    review_item = text("audit.value.review_item")
     lines = [
-        "# ADP Artifact Validation",
+        f"# {text('audit.title.artifact_validation')}",
         "",
-        f"Generated: {validation['generated_at']}",
-        f"Artifact validation ID: {validation['artifact_validation_id']}",
-        f"Input audit ID: {validation['input_audit_id']}",
-        f"Scenario: {validation['scenario']}",
-        f"Audit status: {validation['audit_status']}",
-        f"Execution disposition: {validation['execution_disposition']}",
-        f"Safe to publish: {str(validation['safe_to_publish']).lower()}",
-        f"Report confidence: {validation['report_confidence']}",
-        f"Baseline revision: {validation['baseline_revision']}",
-        f"Locale: {validation['locale']}",
-        f"Generator version: {validation['generator_version']}",
+        f"{text('common.generated')}: {validation['generated_at']}",
+        f"{text('audit.label.artifact_validation_id')}: {validation['artifact_validation_id']}",
+        f"{text('status.input_audit_id')}: {validation['input_audit_id']}",
+        f"{text('audit.label.scenario')}: {validation['scenario']}",
+        f"{text('audit.label.audit_status')}: {render_enum(catalog, locale_value, 'audit_status', validation['audit_status'])}",
+        f"{text('audit.label.execution_disposition')}: {render_enum(catalog, locale_value, 'execution_disposition', validation['execution_disposition'])}",
+        f"{text('audit.label.safe_to_publish')}: {yes_no(validation['safe_to_publish'])}",
+        f"{text('status.confidence')}: {render_enum(catalog, locale_value, 'report_confidence', validation['report_confidence'])}",
+        f"{text('status.baseline_revision')}: {validation['baseline_revision']}",
+        f"{text('audit.label.locale')}: {validation['locale']}",
+        f"{text('status.generator_version')}: {validation['generator_version']}",
         "",
-        "## Validated Artifacts",
+        f"## {text('audit.section.validated_artifacts')}",
         "",
     ]
     if validation["artifacts"]:
         lines.extend(f"- `{item['path']}` ({item['fingerprint']})" for item in validation["artifacts"])
     else:
-        lines.append("- No readable artifacts.")
+        lines.append(f"- {text('audit.value.no_readable_artifacts')}")
     lines.append("")
-    add_table(lines, "Blocking Gaps", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings(validation["blocking_gaps"]))
-    add_table(lines, "Warnings", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings(validation["warnings"]))
-    lines.extend(["## Recommended Workflows", ""])
+    add_table(lines, text("audit.section.blocking_gaps"), finding_headers, flatten_findings(validation["blocking_gaps"], review_item), finding_header_labels, no_findings)
+    add_table(lines, text("audit.metric.warnings"), finding_headers, flatten_findings(validation["warnings"], review_item), finding_header_labels, no_findings)
+    lines.extend([f"## {text('audit.section.recommended_workflows')}", ""])
     if validation["recommended_workflows"]:
         lines.extend(f"- `{workflow}`" for workflow in validation["recommended_workflows"])
     else:
-        lines.append("- No follow-up workflow required by this validation.")
+        lines.append(f"- {text('audit.value.no_validation_follow_up')}")
     lines.append("")
     return "\n".join(lines)
 
 
-def flatten_findings(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+def flatten_findings(items: list[dict[str, Any]], review_item: str = "review item") -> list[dict[str, str]]:
     rows = []
     for item in items:
         action_ids = item.get("action_ids")
@@ -2928,7 +3032,7 @@ def flatten_findings(items: list[dict[str, Any]]) -> list[dict[str, str]]:
             or item.get("reason")
             or (f"duplicate action candidates: {', '.join(action_ids)}" if action_ids else "")
             or item.get("normalized_claim")
-            or "review item"
+            or review_item
         )
         rows.append(
             {
@@ -2941,12 +3045,19 @@ def flatten_findings(items: list[dict[str, Any]]) -> list[dict[str, str]]:
     return rows
 
 
-def add_table(lines: list[str], title: str, headers: list[str], rows: list[dict[str, str]]) -> None:
+def add_table(
+    lines: list[str],
+    title: str,
+    headers: list[str],
+    rows: list[dict[str, str]],
+    header_labels: list[str] | None = None,
+    empty_message: str = "No findings.",
+) -> None:
     lines.extend([f"## {title}", ""])
     if not rows:
-        lines.extend(["No findings.", ""])
+        lines.extend([empty_message, ""])
         return
-    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join(header_labels or headers) + " |")
     lines.append("| " + " | ".join("---" for _ in headers) + " |")
     for row in rows:
         lines.append("| " + " | ".join(cell(row.get(header, "")) for header in headers) + " |")

@@ -15,6 +15,7 @@ SCENARIO_CAPABILITIES = SCRIPT_GLOBALS["SCENARIO_CAPABILITIES"]
 STABLE_INPUT_AUDIT_ID = SCRIPT_GLOBALS["stable_input_audit_id"]
 AUDIT_CONTENT_HASH = SCRIPT_GLOBALS["audit_content_hash"]
 VALIDATE_RENDER_CONTRACT = SCRIPT_GLOBALS["validate_render_contract"]
+RENDER_MARKDOWN = SCRIPT_GLOBALS["render_markdown"]
 PREPASS_SCRIPT = SCRIPT.parents[2] / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
 LOCALE_CATALOG_PATH = SCRIPT.parents[2] / "adp-plan-baseline" / "assets" / "locale-catalog.json"
 LOCALE_CATALOG = json.loads(LOCALE_CATALOG_PATH.read_text(encoding="utf-8"))
@@ -515,6 +516,75 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertEqual(result["execution_disposition"], "degraded")
             self.assertTrue(audit["locale_fallback"])
             self.assertIn("locale.fallback", {item.get("code") for item in audit["warnings"]})
+
+    def test_chinese_config_localizes_input_audit_markdown_and_result_language(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root)
+            config = project_root / "_bmad" / "adp" / "config.yaml"
+            config.write_text(
+                "communication_language: Chinese\ndocument_output_language: Chinese\n",
+                encoding="utf-8",
+            )
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            completed = self.run_script(
+                project_root,
+                "--memory-root",
+                str(memory_root),
+                "--prepass-json",
+                str(prepass),
+                "--as-of",
+                "2026-07-10",
+            )
+            result = json.loads(completed.stdout)
+            markdown = Path(result["outputs"]["markdown"]).read_text(encoding="utf-8")
+
+            self.assertEqual(result["communication_locale"], "zh")
+            self.assertEqual(result["document_locale"], "zh")
+            self.assertNotIn("communication_language", result["language_fallbacks"])
+            self.assertNotIn("document_output_language", result["language_fallbacks"])
+            self.assertIn("# ADP 状态审计", markdown)
+            self.assertIn("## 质量门禁", markdown)
+            self.assertIn("审计状态:", markdown)
+            self.assertNotIn("# ADP State Audit", markdown)
+
+    def test_chinese_locale_localizes_artifact_validation_markdown(self) -> None:
+        validation = {
+            "audit_type": "artifact",
+            "generated_at": "2026-07-10T09:00:00+08:00",
+            "artifact_validation_id": "AV-TEST",
+            "input_audit_id": "IA-TEST",
+            "scenario": "global",
+            "audit_status": "pass",
+            "execution_disposition": "ready",
+            "safe_to_publish": True,
+            "report_confidence": "high",
+            "baseline_revision": 1,
+            "locale": "zh",
+            "generator_version": "2.1.0",
+            "artifacts": [],
+            "blocking_gaps": [],
+            "warnings": [],
+            "recommended_workflows": [],
+        }
+
+        markdown = RENDER_MARKDOWN(validation)
+
+        self.assertIn("# ADP 产物校验", markdown)
+        self.assertIn("审计状态: 通过", markdown)
+        self.assertIn("可发布: 是", markdown)
+        self.assertIn("## 已校验产物", markdown)
+        self.assertNotIn("# ADP Artifact Validation", markdown)
+
+    def test_skill_declares_communication_and_document_language_contract(self) -> None:
+        skill_text = (SCRIPT.parents[1] / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("communication_language", skill_text)
+        self.assertIn("document_output_language", skill_text)
+        self.assertIn("adp_effective_config.py", skill_text)
 
     def test_artifact_validation_detects_stale_snapshot_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
