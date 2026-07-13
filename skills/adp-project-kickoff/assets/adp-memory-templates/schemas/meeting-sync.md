@@ -36,6 +36,16 @@ For each item, record:
 
 When the meeting starts from `adp-meeting-pack`, preserve `meeting_pack_id`, `meeting_pack_path`, `scenario`, `audit_path`, and `roadmap_version` from the pack distillate in the meeting archive, daily log, and any status-sync intake.
 
+For vNext meeting packs, also preserve `program_status_snapshot_id`, `baseline_revision`, `source_fingerprints`, `input_audit_id`, and `generator_version`, plus the actual meeting `started_at` and `ended_at`. The actual meeting has a stable `meeting_instance_id` and canonical `plan_fingerprint`.
+
+## Replay and Cursor Contract
+
+- `meetings/receipts/<meeting-instance-id>.json` is the durable write receipt. `applied` means every classified destination was written or replay-safely confirmed.
+- Same instance plus same plan fingerprint is a no-op or resume. Same instance plus a different fingerprint is a conflict.
+- `meetings/cursors/<scenario>.json` points only to the latest successfully applied actual meeting. Generating a meeting pack or running meeting-sync dry-run never advances it.
+- Append destinations carry meeting-instance operation markers so interrupted executions can resume without duplicating daily, WDR, or workstream-decision blocks.
+- Source-backed milestone status/forecast/actual handoffs use the exact baseline milestone ID, one affected workstream, evidence, and baseline revision. Invalid mappings remain visible gaps and never create implicit baseline entries.
+
 ## Required Output
 
 A meeting sync is incomplete if any item remains unclassified without an explicit reason.

@@ -1,10 +1,42 @@
 code: adp
 name: "AI Delivery PMO"
 description: "帮助多条 FDE 工作线用统一状态模型、交付节奏和 AI 协作方式推进复杂交付项目。"
-module_version: 1.1.0
+module_version: 1.2.0
 default_selected: false
 module_greeting: >
-  AI Delivery PMO 已安装。建议先运行 adp-project-kickoff 初始化共享项目记忆，
-  然后登记工作线，并随着交付推进同步 BMM checkpoint、会议、状态、风险依赖和验收 readiness。
+  AI Delivery PMO 已安装。新项目先运行 adp-project-kickoff 初始化共享项目记忆，
+  再用 adp-plan-baseline 确认计划基线；升级项目请先查看 setup 的升级报告。
 agents:
-  - {code: adp-agent-program-lead, name: "ADP Program Lead", title: "AI Delivery PMO Program Lead", icon: "📊", description: "Synthesizes ADP workstream state into project readouts, FDE actions, readiness gaps, risk/dependency judgment, and workflow routing."}
+  - {code: adp-agent-program-lead, name: "ADP Program Lead", title: "AI Delivery PMO Program Lead", icon: "📊", description: "Consumes canonical ADP program status, audit, roadmap, and meeting views for source-backed readouts, recovery routing, and delivery decisions.", agent_type: stateless}
+
+default_reporting_cadence:
+  prompt: "ADP 默认以什么节奏形成项目状态周期？"
+  default: weekly
+  type: string
+  choices: [weekly, biweekly, custom]
+status_stale_after_days:
+  prompt: "Workstream 状态多少天未更新后标记为陈旧？"
+  default: 7
+  type: integer
+  minimum: 1
+  maximum: 90
+schedule_variance_tolerance_days:
+  prompt: "Forecast 晚于 baseline 多少天后判定 off-plan？"
+  default: 0
+  type: integer
+  minimum: 0
+  maximum: 90
+meeting_pack_item_limit:
+  prompt: "每个会议主板块最多展示多少条事项？"
+  default: 10
+  type: integer
+  minimum: 3
+  maximum: 30
+
+shared_resources:
+  - owner_skill: adp-plan-baseline
+    path: scripts/adp_effective_config.py
+    purpose: shared effective-config and locale resolver
+  - owner_skill: adp-plan-baseline
+    path: assets/locale-catalog.json
+    purpose: Chinese and English system-text catalog

@@ -1,0 +1,11 @@
+{
+  "artifact_status": "not_generated",
+  "owner_skill": "adp-program-status",
+  "reason": "A canonical program status has not been generated.",
+  "recovery_workflows": [
+    "adp-plan-baseline",
+    "adp-status-sync",
+    "adp-state-audit",
+    "adp-program-status"
+  ]
+}

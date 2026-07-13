@@ -39,7 +39,7 @@ Read only the records needed for the requested sync. Do not scan every PRD, arch
 
 ## Sync
 
-Accept concise owner notes, batch updates, or outputs from `adp-meeting-sync`. If the input is natural language, first identify only the facts the user actually supplied: workstream id, current ADP status, progress, blockers, risks, dependency changes, scope/change notes, next actions, owner, due date, and source. Ask for the missing workstream id or owner only when it cannot be inferred safely.
+Accept concise owner notes, batch updates, or outputs from `adp-meeting-sync`. If the input is natural language, first identify only the facts the user actually supplied: workstream id, current ADP status, progress, blockers, risks, dependency changes, scope/change notes, next actions, milestone id/status/forecast/actual/evidence, owner, due date, and source. Ask for a missing stable milestone or workstream id when it cannot be inferred safely.
 
 Run the deterministic writer after the status delta is clear:
 
@@ -59,6 +59,10 @@ Add only fields that are reliable:
 - `--dependency "<dependency change>"`
 - `--change-note "<scope/change note>"`
 - `--next-action "<owner/action/due>"`
+- `--milestone-id <baseline-milestone-id>` with `--milestone-status <planned|at-risk|done|blocked>`
+- `--milestone-forecast YYYY-MM-DD` and/or `--milestone-actual YYYY-MM-DD`
+- `--milestone-evidence "<traceable source>"`; repeat as needed
+- `--baseline-revision <expected-revision>` to reject stale updates
 - `--source "<owner update|meeting-sync|daily sync|other>"`
 - `--memory-root <path>` for non-default ADP memory
 - `--dry-run` to preview without writing
@@ -69,7 +73,7 @@ For multiple workstreams or workflow-produced action intake, prefer a JSON updat
 uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --updates-file <path>
 ```
 
-The updates file may include structured `actions` alongside legacy `next_actions`:
+The updates file may include baseline-mapped `milestones` and structured `actions` alongside legacy `next_actions`:
 
 ```json
 {
@@ -77,6 +81,14 @@ The updates file may include structured `actions` alongside legacy `next_actions
     {
       "id": "l1-checkout",
       "next_actions": ["FDE-A add checkout validation evidence"],
+      "milestones": [
+        {
+          "milestone_id": "MS-CHECKOUT-COMPLETE",
+          "status": "at-risk",
+          "forecast": "2026-10-20",
+          "evidence": ["workstreams/l1-checkout/evidence.md#forecast-20261020"]
+        }
+      ],
       "actions": [
         {
           "owner": "FDE-A",
@@ -96,9 +108,11 @@ The updates file may include structured `actions` alongside legacy `next_actions
 }
 ```
 
+For milestone updates, the script reads `plans/program-baseline.md` and validates the current revision, exact case-sensitive milestone ID, and owning workstream before any write. Unknown milestones never become implicit plan entries. It writes forecast, actual, status, evidence, and baseline lineage to the targeted WDR `Roadmap` row; planned date, name, owner, and dependencies continue to come from the baseline. Every milestone update requires traceable evidence. The baseline itself is never modified.
+
 For one Source + Action that affects many workstreams, send one canonical action with `workstream: "program"` and `affected_workstreams`; do not repeat the same action under every workstream unless owner, due trigger, or deliverable differs. `program` actions update the ledger and daily log without requiring a `workstreams/program/delivery-record.md`.
 
-The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, upserts `actions/action-ledger.md`, and returns JSON with changed fields, action ledger path, actions registered/updated/closed, unresolved gaps, and action candidates. Legacy `next_actions` remain supported; structured `actions` are the durable source for the FDE action list.
+The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, upserts `actions/action-ledger.md`, and returns JSON with changed fields, milestone IDs, baseline revision/path, action results, unresolved gaps, and action candidates. Any milestone mapping failure blocks the whole command before WDR, daily-log, or action-ledger writes. Legacy `next_actions` remain supported; structured `actions` are the durable source for the FDE action list.
 
 ## Staleness
 
@@ -126,6 +140,7 @@ After a sync, report:
 
 - workstreams updated or found stale
 - fields changed and fields intentionally left untouched
+- milestones updated with the baseline revision and evidence lineage
 - action ledger path and actions registered, updated, or closed
 - action candidates grouped by owner when available
 - unresolved questions that block a reliable update
@@ -136,6 +151,7 @@ Do not call a workstream ready because its status field was refreshed. Readiness
 ## Guardrails
 
 - Update only volatile project-status fields unless the user explicitly asks for deeper review.
+- `adp-plan-baseline` is the only baseline writer. Status sync records actual-state facts and never changes planned facts.
 - BMM artifacts remain the source of truth; status sync stores links and short management-level deltas only.
 - `actions/action-ledger.md` is the ADP action source of truth. `views/fde-actions.md` is a derived view, and WDR `Next actions` is a merged active-action summary.
 - Preserve existing user content outside the targeted WDR fields and daily-log append.

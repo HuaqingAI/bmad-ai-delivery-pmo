@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "baseline_id": "PROGRAM-BASELINE",
+  "confirmation_status": "candidate",
+  "project": {
+    "name": "Example project",
+    "owner": "Program owner",
+    "target_date": "2026-12-31",
+    "source": {
+      "type": "charter",
+      "reference": "docs/project-charter.md#target-date",
+      "confirmed_by": "Program owner"
+    }
+  },
+  "default_tolerance_days": 0,
+  "gates": [
+    {
+      "id": "GATE-DESIGN-APPROVED",
+      "name": "Design approved",
+      "planned_date": "2026-09-01",
+      "owner": "Architecture owner",
+      "confirmation_status": "candidate",
+      "source": {
+        "type": "decision",
+        "reference": "docs/decision-log.md#design-gate",
+        "confirmed_by": "Architecture owner"
+      },
+      "dependencies": [],
+      "critical_path": true
+    }
+  ],
+  "milestones": [
+    {
+      "id": "MS-CHECKOUT-COMPLETE",
+      "name": "Checkout migration complete",
+      "workstream_id": "checkout",
+      "planned_date": "2026-10-15",
+      "owner": "Checkout FDE",
+      "confirmation_status": "candidate",
+      "source": {
+        "type": "approved-plan",
+        "reference": "docs/delivery-plan.md#checkout",
+        "confirmed_by": "Checkout FDE"
+      },
+      "dependencies": ["GATE-DESIGN-APPROVED"],
+      "critical_path": true,
+      "completion_criteria": "Approved acceptance evidence is linked."
+    }
+  ],
+  "critical_path": ["GATE-DESIGN-APPROVED", "MS-CHECKOUT-COMPLETE"],
+  "weighting": {
+    "enabled": false,
+    "completion_measure": null,
+    "source": null
+  }
+}

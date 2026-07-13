@@ -29,7 +29,7 @@ Load BMad configuration from the target project in this order:
 3. `{project-root}/_bmad/core/config.yaml`
 4. `{project-root}/_bmad/bmm/config.yaml` or `{project-root}/_bmad/bmb/config.yaml` as compatibility fallbacks
 
-Use `communication_language` for all conversation and status output. Use `document_output_language` for generated project documents and report text. If no config file exists, say that explicitly and fall back to English.
+Use `communication_language` for all conversation and status output. The writer resolves the shared ADP effective config and uses `document_output_language` for generated project documents and report text; `--language` is a one-run override. Surface resolver warnings and explicit English fallback. Language switching localizes system copy only: source facts, canonical enum values, fact-layer field names, and lineage stay unchanged.
 
 ## On Activation
 

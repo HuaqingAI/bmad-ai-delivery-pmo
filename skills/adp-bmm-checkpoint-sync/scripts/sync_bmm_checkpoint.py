@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -22,6 +23,8 @@ from checkpoint_discovery import run_discovery
 from checkpoint_registry import CandidateRegistry, parse_override_value
 
 
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 CHECKPOINTS = {"prd", "architecture", "epic-story", "implementation", "validation", "baseline"}
 ARTIFACT_LABELS = {
     "prd": "PRD",
@@ -143,6 +146,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Report planned writes without changing files.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    add_language_args(parser)
     args = parser.parse_args(argv)
     args.command = "legacy-sync"
     args.candidate_id = ""
@@ -168,6 +172,7 @@ def parse_discover_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="Report planned candidate writes without changing files.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    add_language_args(parser)
     args = parser.parse_args(argv)
     args.command = "discover"
     return args
@@ -194,6 +199,7 @@ def parse_confirm_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="Report planned confirmation without changing files.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    add_language_args(parser)
     args = parser.parse_args(argv)
     args.command = "confirm"
     return args
@@ -211,9 +217,15 @@ def parse_candidate_sync_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Report planned writes without changing files.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+    add_language_args(parser)
     args = parser.parse_args(argv)
     args.command = "candidate-sync"
     return args
+
+
+def add_language_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--language", help="Override document_output_language for review output.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
 
 
 def print_top_level_help() -> None:
@@ -1648,6 +1660,15 @@ def emit(result: dict, output: Path | None, *, summary_only: bool = False) -> No
 def main() -> int:
     configure_stdio()
     args = parse_command_line()
+    project_root = Path(args.project_root).resolve()
+    config_module = load_module(Path(args.config_script), "adp_checkpoint_effective_config")
+    overrides = {"document_output_language": args.language} if args.language else None
+    config_code, config = config_module.resolve_effective_config(project_root, overrides)
+    if config_code != 0 or not config.get("ok"):
+        result = {"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}
+        emit(result, Path(args.output).resolve() if args.output else None)
+        return 2
+    locale = str(config.get("document_locale") or "en")
     if args.command == "discover":
         code, result = run_discovery(args)
     elif args.command == "confirm":
@@ -1656,10 +1677,35 @@ def main() -> int:
         code, result = run_candidate_sync(args)
     else:
         code, result = run_legacy_sync(args)
+    result["language"] = language_metadata(config, locale)
+    result["display"] = {
+        "outcome": config_module.message("checkpoint.outcome.ok" if result.get("ok") else "checkpoint.outcome.failed", locale),
+        "recommended_next_step": config_module.message(
+            f"checkpoint.next.{result.get('recommended_next_step')}", locale
+        ) if result.get("recommended_next_step") else "",
+    }
     report_path = output_report_path(args, result)
     annotate_output_contract(args, result, report_path)
     emit(result, report_path, summary_only=bool(getattr(args, "dry_run", False)))
     return code
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load shared ADP config module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def language_metadata(config: dict[str, Any], locale: str) -> dict[str, Any]:
+    return {
+        "locale": locale,
+        "document_output_language": config.get("values", {}).get("document_output_language", "English"),
+        "fallback": "document_output_language" in config.get("fallbacks", []),
+        "warnings": config.get("warnings", []),
+    }
 
 
 if __name__ == "__main__":

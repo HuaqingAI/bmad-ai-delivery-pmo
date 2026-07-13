@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -19,6 +20,8 @@ from typing import Any
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +50,8 @@ def parse_args() -> argparse.Namespace:
         help="Command used to invoke dws. On Windows, the default resolves dws.cmd; quoted/backslash paths are supported.",
     )
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    parser.add_argument("--language", help="Override document_output_language for intake guidance.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
 
@@ -77,16 +82,24 @@ def main() -> int:
         )
         return 2
 
+    config_module = load_module(Path(args.config_script), "adp_dingtalk_effective_config")
+    overrides = {"document_output_language": args.language} if args.language else None
+    config_code, config = config_module.resolve_effective_config(project_root, overrides)
+    if config_code != 0 or not config.get("ok"):
+        emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
+        return 2
+    locale = str(config.get("document_locale") or "en")
+
     if args.raw_evidence:
         result = preserve_supplied_raw_evidence(project_root, memory_root, args.raw_evidence, args.raw_evidence_label)
+        localize_result(result, config, locale, config_module)
         emit(result, args.output)
         return 0 if result["ok"] else 2
 
     try:
         result = run_dingtalk_intake(args, project_root, memory_root)
     except DwsError as exc:
-        emit(
-            {
+        result = {
                 "ok": False,
                 "mode": "dingtalk",
                 "error": str(exc),
@@ -94,13 +107,14 @@ def main() -> int:
                 "candidates": [],
                 "gaps": ["DingTalk intake failed; use supplied raw evidence instead."],
                 "next_actions": ["Ask the user for raw transcript, chat excerpt, offline notes, or a raw evidence path."],
-            },
-            args.output,
-        )
+            }
+        localize_result(result, config, locale, config_module)
+        emit(result, args.output)
         return 1
 
     if args.verbose:
         print(f"DingTalk intake mode: {result['mode']}", file=sys.stderr)
+    localize_result(result, config, locale, config_module)
     emit(result, args.output)
     return 0 if result["ok"] else 1
 
@@ -690,6 +704,41 @@ def emit(result: dict[str, Any], output: str | None) -> None:
         Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
     else:
         sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
+
+
+INTAKE_COPY_KEYS = {
+    "DingTalk intake failed; use supplied raw evidence instead.": "meeting_intake.failed_gap",
+    "Ask the user for raw transcript, chat excerpt, offline notes, or a raw evidence path.": "meeting_intake.ask_raw",
+    "Use raw_evidence_path in the meeting sync plan.": "meeting_intake.use_raw_path",
+    "No unprocessed DingTalk candidates found.": "meeting_intake.no_candidates",
+    "Choose an unprocessed taskUuid and rerun with --task-uuid.": "meeting_intake.choose_candidate",
+    "DingTalk transcription returned no transcript text.": "meeting_intake.no_transcript",
+    "DingTalk transcription is incomplete; next token remained after pagination.": "meeting_intake.incomplete_transcript",
+    "Use raw_evidence_path and selected metadata in the meeting sync plan.": "meeting_intake.use_selected",
+    "Ask the user for raw meeting content instead of classifying from DingTalk summary.": "meeting_intake.ask_meeting_content",
+}
+
+
+def localize_result(result: dict[str, Any], config: dict[str, Any], locale: str, config_module) -> None:
+    for field in ("gaps", "next_actions"):
+        values = result.get(field)
+        if isinstance(values, list):
+            result[field] = [config_module.message(INTAKE_COPY_KEYS.get(value, value), locale) for value in values]
+    result["language"] = {
+        "locale": locale,
+        "document_output_language": config.get("values", {}).get("document_output_language", "English"),
+        "fallback": "document_output_language" in config.get("fallbacks", []),
+        "warnings": config.get("warnings", []),
+    }
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load shared ADP config module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class DwsError(RuntimeError):

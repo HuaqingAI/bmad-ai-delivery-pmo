@@ -116,6 +116,27 @@ class RegisterWorkstreamTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("missing_core_files", result)
 
+    def test_language_golden_localizes_patch_plan_without_changing_wdr_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.seed_memory(project_root)
+            first = self.run_script(
+                project_root, "--id", "L1 Checkout", "--name", "Checkout Migration", "--owner", "FDE-A", "--language", "English"
+            )
+            record = Path(first["workstream_root"]) / "delivery-record.md"
+            canonical_before = record.read_text(encoding="utf-8")
+
+            second = self.run_script(
+                project_root, "--id", "L1 Checkout", "--name", "Checkout Migration", "--owner", "FDE-A", "--language", "Chinese"
+            )
+            patch = Path(second["patch_plan"]).read_text(encoding="utf-8")
+
+            self.assertEqual(second["language"]["locale"], "zh")
+            self.assertIn("# 工作线注册补丁计划", patch)
+            self.assertIn("Checkout Migration", patch)
+            self.assertEqual(record.read_text(encoding="utf-8"), canonical_before)
+            self.assertIn("## Identity", canonical_before)
+
 
 if __name__ == "__main__":
     unittest.main()

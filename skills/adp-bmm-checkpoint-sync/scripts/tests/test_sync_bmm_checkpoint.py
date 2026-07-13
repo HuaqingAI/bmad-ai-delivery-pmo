@@ -665,6 +665,35 @@ class SyncBmmCheckpointTests(unittest.TestCase):
         self.assertIn("sync <project-root> --candidate-id", completed.stdout)
         self.assertIn("packet-sync", completed.stdout)
 
+    def test_language_golden_adds_localized_display_without_changing_checkpoint_facts(self) -> None:
+        def run(language: str) -> tuple[dict, str]:
+            temp = tempfile.TemporaryDirectory()
+            self.addCleanup(temp.cleanup)
+            project_root = Path(temp.name)
+            setup = self.register_workstream(project_root)
+            result = self.run_script(
+                project_root,
+                "--workstream-id", "l1-checkout",
+                "--checkpoint", "prd",
+                "--summary", "Checkout PRD is ready for review.",
+                "--artifact", "prd=docs/prd.md",
+                "--language", language,
+            )
+            record = (Path(setup["workstream_root"]) / "delivery-record.md").read_text(encoding="utf-8")
+            return result, record
+
+        chinese, chinese_record = run("Chinese")
+        english, english_record = run("English")
+        self.assertEqual(chinese["language"]["locale"], "zh")
+        self.assertEqual(chinese["checkpoint"], "prd")
+        self.assertEqual(chinese["display"]["outcome"], "检查点操作已完成。")
+        self.assertIn("Checkout PRD is ready for review.", chinese_record)
+        self.assertIn("## BMM Artifact Index", chinese_record)
+        self.assertEqual(english["language"]["locale"], "en")
+        self.assertEqual(english["checkpoint"], "prd")
+        self.assertEqual(english["display"]["outcome"], "Checkpoint operation completed.")
+        self.assertIn("Checkout PRD is ready for review.", english_record)
+
 
 if __name__ == "__main__":
     unittest.main()

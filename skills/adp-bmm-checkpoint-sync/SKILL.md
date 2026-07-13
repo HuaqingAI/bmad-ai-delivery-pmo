@@ -22,13 +22,7 @@ The consumers are the FDE owner, project lead, readiness reviewer, risk/dependen
 
 Resolve the target `{project-root}` before any user-facing output. This is the project where ADP is installed or being run, not the module build repository.
 
-Resolve BMad language configuration with:
-
-```bash
-uv run "{skill-root}/scripts/resolve_bmad_config.py" "{project-root}"
-```
-
-Use the JSON `communication_language` for conversation and status output, `document_output_language` for generated project documents and report text, and surface any resolver warnings.
+The sync entrypoint resolves the shared ADP effective config. Use `communication_language` for conversation and status output and `document_output_language` for review output; `--language` is a one-run override. Surface resolver warnings and explicit English fallback. Language switching changes only the display layer: checkpoint facts, WDR field names, canonical statuses, candidate authority, and source lineage stay unchanged.
 
 On Windows, set `PYTHONIOENCODING=utf-8` before running the sync script. For dry-runs, prefer `-o` when the caller needs a specific review path; otherwise the script writes a default dry-run report under ADP memory and prints only a short stdout summary.
 

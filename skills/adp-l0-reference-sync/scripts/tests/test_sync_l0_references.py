@@ -162,6 +162,28 @@ class SyncL0ReferencesTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("contracts[1] missing required field: contract", payload["error"])
 
+    def test_language_golden_localizes_system_copy_and_preserves_l0_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            plan_path = self.write_plan(
+                project_root,
+                {"contracts": [{"contract": "Checkout API", "owner": "L0", "stability": "candidate"}]},
+            )
+
+            chinese = self.run_script(project_root, "--plan", str(plan_path), "--language", "Chinese")
+            contract_path = Path(chinese["l0_root"]) / "extracted-contract-inventory.md"
+            chinese_text = contract_path.read_text(encoding="utf-8")
+            self.assertEqual(chinese["language"]["locale"], "zh")
+            self.assertIn("# 提取的契约清单", chinese_text)
+            self.assertIn("Checkout API", chinese_text)
+            self.assertIn("candidate", chinese_text)
+
+            english = self.run_script(project_root, "--plan", str(plan_path), "--language", "English")
+            english_text = contract_path.read_text(encoding="utf-8")
+            self.assertEqual(english["language"]["locale"], "en")
+            self.assertIn("# Extracted Contract Inventory", english_text)
+            self.assertIn("Checkout API", english_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,12 +7,18 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 
 
 PLACEHOLDERS = {
@@ -75,6 +81,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--packet-deadline", default="", help="Deadline or trigger.")
     parser.add_argument("--packet-owner", default="", help="Requested decision owner.")
     parser.add_argument("--packet-workstream", action="append", default=[], help="Affected workstream id. Repeatable.")
+    parser.add_argument("--language", help="Override document_output_language for derived views.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
 
@@ -378,13 +386,13 @@ def make_dependency(ws: Workstream, relationship: str, target: str) -> dict[str,
     }
 
 
-def render_risk_matrix(entries: list[dict[str, str]], gaps: list[str], generated_at: str) -> str:
+def render_risk_matrix(entries: list[dict[str, str]], gaps: list[str], generated_at: str, message) -> str:
     rows = [
-        "# ADP Risk Matrix",
+        f"# {message('risk.title.matrix')}",
         "",
-        f"Generated: {generated_at}",
+        f"{message('common.generated')}: {generated_at}",
         "",
-        "| ID | Workstream | Type | Description | Severity | Likelihood | Owner | Affected | Next Action | Escalation |",
+        "| " + " | ".join(message(key) for key in ["common.id", "common.workstream", "common.type", "common.description", "common.severity", "risk.likelihood", "common.owner", "risk.affected", "risk.next_action", "common.escalation"]) + " |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     if entries:
@@ -408,23 +416,23 @@ def render_risk_matrix(entries: list[dict[str, str]], gaps: list[str], generated
                 + " |",
             )
     else:
-        rows.append("| TBD | TBD | gap | No explicit risk entries found | TBD | TBD | TBD | TBD | Review WDR risk fields | TBD |")
+        rows.append(f"| TBD | TBD | gap | {message('risk.no_entries')} | TBD | TBD | TBD | TBD | {message('risk.review_wdr')} | TBD |")
 
-    rows.extend(["", "## Review Gaps", ""])
+    rows.extend(["", f"## {message('risk.review_gaps')}", ""])
     if gaps:
         rows.extend(f"- {gap}" for gap in gaps)
     else:
-        rows.append("- No structural review gaps found.")
+        rows.append(f"- {message('risk.no_structural_gaps')}")
     return "\n".join(rows) + "\n"
 
 
-def render_dependency_map(entries: list[dict[str, str]], generated_at: str) -> str:
+def render_dependency_map(entries: list[dict[str, str]], generated_at: str, message) -> str:
     rows = [
-        "# ADP Dependency Map",
+        f"# {message('risk.title.dependencies')}",
         "",
-        f"Generated: {generated_at}",
+        f"{message('common.generated')}: {generated_at}",
         "",
-        "| Source Workstream | Relationship | Target / Reference | Owner | Status | Next Action |",
+        "| " + " | ".join(message(key) for key in ["risk.source_workstream", "risk.relationship", "risk.target_reference", "common.owner", "common.status", "risk.next_action"]) + " |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
     if entries:
@@ -444,12 +452,12 @@ def render_dependency_map(entries: list[dict[str, str]], generated_at: str) -> s
                 + " |",
             )
     else:
-        rows.append("| TBD | gap | No explicit dependencies found | TBD | open | Confirm dependency fields in WDRs |")
+        rows.append(f"| TBD | gap | {message('risk.no_dependencies')} | TBD | open | {message('risk.confirm_dependencies')} |")
     return "\n".join(rows) + "\n"
 
 
-def render_packet(args: argparse.Namespace, generated_at: str) -> str:
-    title = args.packet_title or args.packet_question or "Business Decision"
+def render_packet(args: argparse.Namespace, generated_at: str, message) -> str:
+    title = args.packet_title or args.packet_question or message("risk.business_decision")
     options = args.packet_option or ["TBD"]
     impacts = args.packet_impact or ["TBD"]
     workstreams = args.packet_workstream or ["TBD"]
@@ -457,43 +465,43 @@ def render_packet(args: argparse.Namespace, generated_at: str) -> str:
         [
             f"# {title}",
             "",
-            f"Generated: {generated_at}",
+            f"{message('common.generated')}: {generated_at}",
             "",
-            "## Background",
+            f"## {message('risk.background')}",
             "",
             args.packet_background or "TBD",
             "",
-            "## Decision Needed",
+            f"## {message('risk.decision_needed')}",
             "",
             args.packet_question or "TBD",
             "",
-            "## Options",
+            f"## {message('risk.options')}",
             "",
             *[f"- {item}" for item in options],
             "",
-            "## Impacts",
+            f"## {message('risk.impacts')}",
             "",
             *[f"- {item}" for item in impacts],
             "",
-            "## Recommendation",
+            f"## {message('risk.recommendation')}",
             "",
             args.packet_recommendation or "TBD",
             "",
-            "## Deadline or Trigger",
+            f"## {message('risk.deadline_trigger')}",
             "",
             args.packet_deadline or "TBD",
             "",
-            "## Affected Workstreams",
+            f"## {message('risk.affected_workstreams')}",
             "",
             *[f"- {item}" for item in workstreams],
             "",
-            "## Requested Decision Owner",
+            f"## {message('risk.requested_owner')}",
             "",
             args.packet_owner or "TBD",
             "",
-            "## Closure Rule",
+            f"## {message('risk.closure_rule')}",
             "",
-            "Record the final decision in the project decision log and update affected WDR change or risk fields.",
+            message("risk.closure_instruction"),
             "",
         ],
     )
@@ -533,6 +541,14 @@ def main() -> int:
     if not memory_root.exists():
         emit({"ok": False, "error": "ADP memory root does not exist", "memory_root": str(memory_root)}, args.output)
         return 2
+    config_module = load_module(Path(args.config_script), "adp_risk_effective_config")
+    overrides = {"document_output_language": args.language} if args.language else None
+    config_code, config = config_module.resolve_effective_config(project_root, overrides)
+    if config_code != 0 or not config.get("ok"):
+        emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
+        return 2
+    locale = str(config.get("document_locale") or "en")
+    message = lambda key: config_module.message(key, locale)
 
     records, missing = discover_records(memory_root, args.workstream)
     workstreams = [parse_workstream(path) for path in records]
@@ -542,15 +558,15 @@ def main() -> int:
 
     risk_path = memory_root / "views" / "risk-matrix.md"
     dependency_path = memory_root / "views" / "dependency-map.md"
-    write_text(risk_path, render_risk_matrix(risks, gaps, generated_at), args.dry_run)
-    write_text(dependency_path, render_dependency_map(dependencies, generated_at), args.dry_run)
+    write_text(risk_path, render_risk_matrix(risks, gaps, generated_at, message), args.dry_run)
+    write_text(dependency_path, render_dependency_map(dependencies, generated_at, message), args.dry_run)
 
     packet_path = None
     if args.packet_title or args.packet_question:
         title = args.packet_title or args.packet_question
         packet_name = f"{generated_at[:10]}-{slugify(title)}.md"
         packet = unique_path(memory_root / "decisions" / "business-decision-packets" / packet_name)
-        write_text(packet, render_packet(args, generated_at), args.dry_run)
+        write_text(packet, render_packet(args, generated_at, message), args.dry_run)
         packet_path = str(packet)
 
     result = {
@@ -570,13 +586,32 @@ def main() -> int:
         },
         "review_gaps": gaps,
         "next_actions": [
-            "Review risk matrix entries for missing owner, impact, mitigation, and escalation.",
-            "Review dependency map for unresolved cross-line or L0 closure conditions.",
-            "Create Business Decision Packets for issues FDE cannot decide alone.",
+            message("risk.next.review_matrix"),
+            message("risk.next.review_dependencies"),
+            message("risk.next.create_packets"),
         ],
+        "language": language_metadata(config, locale),
     }
     emit(result, args.output)
     return 0
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load shared ADP config module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def language_metadata(config: dict[str, Any], locale: str) -> dict[str, Any]:
+    return {
+        "locale": locale,
+        "document_output_language": config.get("values", {}).get("document_output_language", "English"),
+        "fallback": "document_output_language" in config.get("fallbacks", []),
+        "warnings": config.get("warnings", []),
+    }
 
 
 def emit(result: dict, output: str | None) -> None:
@@ -584,7 +619,7 @@ def emit(result: dict, output: str | None) -> None:
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
     else:
-        print(payload)
+        sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

@@ -83,13 +83,14 @@ class AdpStatePrepassTests(unittest.TestCase):
             completed = self.run_script(
                 project_root,
                 "--capability",
-                "Global Project Readout",
+                "global-project-readout",
                 "--as-of",
                 "2026-07-02",
             )
             result = json.loads(completed.stdout)
 
             self.assertTrue(result["ok"])
+            self.assertEqual(result["schema_version"], 2)
             self.assertEqual(result["counts"]["workstreams"], 1)
             self.assertEqual(result["workstreams"][0]["owner"], "FDE-A")
             self.assertEqual(result["actions"][0]["due_or_trigger"], "TBD")
@@ -102,6 +103,8 @@ class AdpStatePrepassTests(unittest.TestCase):
                 {item["path"] for item in result["sources_read"]},
             )
             self.assertIn("decisions/decision-log.md", result["missing_sources"])
+            self.assertTrue(all(isinstance(item.get("blocking"), bool) for item in result["gaps"]))
+            self.assertTrue(all(isinstance(item.get("blocking"), bool) for item in result["cross_reference_gaps"]))
 
     def test_parses_only_labeled_wdr_due_or_trigger(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -154,10 +157,12 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertEqual(stale_gap["gap_type"], "stale")
             self.assertFalse(stale_gap["blocking"])
             self.assertEqual(stale_gap["field"], "last_status_sync")
+            self.assertEqual(stale_gap["policy_rule_id"], "wdr-last-status-sync-freshness")
             missing_gap = next(item for item in result["gaps"] if item["gap"] == "requested workstream was not found")
             self.assertEqual(missing_gap["category"], "completeness")
             self.assertEqual(missing_gap["gap_type"], "missing_workstream")
             self.assertTrue(missing_gap["blocking"])
+            self.assertEqual(missing_gap["policy_rule_id"], "requested-workstream-exists")
             self.assertEqual(missing_gap["recommended_workflow"], "adp-project-kickoff")
             self.assertNotIn("workflow_triggers", result)
 
@@ -187,7 +192,7 @@ class AdpStatePrepassTests(unittest.TestCase):
             completed = self.run_script(
                 project_root,
                 "--capability",
-                "FDE Action List",
+                "fde-action-list",
                 "--as-of",
                 "2026-07-02",
             )
@@ -225,7 +230,7 @@ class AdpStatePrepassTests(unittest.TestCase):
             completed = self.run_script(
                 project_root,
                 "--capability",
-                "FDE Action List",
+                "fde-action-list",
                 "--as-of",
                 "2026-07-05",
             )
@@ -236,6 +241,48 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertEqual(result["ledger_actions"][0]["affected_workstreams"], "l1-checkout; l2-payments")
             self.assertEqual(result["action_cross_check"][0]["workstream"], "l1-checkout")
             self.assertEqual(result["action_cross_check"][0]["ledger_open_actions"][0]["action_id"], "ACT-20260705-001")
+
+    def test_activation_resolves_config_precedence_and_memory_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            (project_root / "_bmad" / "adp").mkdir(parents=True)
+            (project_root / "_bmad" / "config.user.yaml").write_text(
+                "communication_language: French\ndocument_output_language: German\n",
+                encoding="utf-8",
+            )
+            (project_root / "_bmad" / "adp" / "config.yaml").write_text(
+                "communication_language: Chinese\nadp_memory_root: '{project-root}/state/adp'\n",
+                encoding="utf-8",
+            )
+
+            completed = self.run_script(project_root, "--activation")
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(result["mode"], "activation")
+            self.assertEqual(result["resolved"]["communication_language"], "Chinese")
+            self.assertEqual(result["resolved"]["document_output_language"], "German")
+            self.assertEqual(Path(result["resolved"]["adp_state_root"]), project_root / "state" / "adp")
+            self.assertTrue(result["config_found"])
+            self.assertEqual(result["configuration_errors"], [])
+            self.assertFalse(result["state_exists"])
+
+            overridden = json.loads(
+                self.run_script(project_root, "--activation", "--memory-root", "explicit-memory").stdout
+            )
+            self.assertEqual(Path(overridden["resolved"]["adp_state_root"]), project_root / "explicit-memory")
+            self.assertEqual(overridden["value_sources"]["adp_state_root"], "cli --memory-root")
+
+    def test_capability_rejects_noncanonical_wording(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            completed = self.run_script(
+                Path(temp_dir),
+                "--capability",
+                "short action list",
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("invalid choice", completed.stderr)
 
 
 if __name__ == "__main__":

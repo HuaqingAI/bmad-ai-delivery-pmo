@@ -1,3 +1,4 @@
+import hashlib
 import json
 import runpy
 import subprocess
@@ -55,11 +56,11 @@ L0 references:
 
 ### Roadmap
 
-| Milestone | Type | Status | Planned | Forecast | Actual | Owner | Confidence | Depends On | Source |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Checkout validation complete | checkpoint | planned | 2026-07-15 | TBD | TBD | FDE-A | medium | l2-payments | workstreams/l1-checkout/delivery-record.md#roadmap |
-| Theme launch window | delivery-window | planned | TBD | TBD | TBD | FDE-A | low | TBD | workstreams/l1-checkout/delivery-record.md#roadmap |
-| Unsourced launch guess | delivery-window | planned | 2026-07-20 | TBD | TBD | FDE-A | low | TBD | TBD |
+| Milestone ID | Milestone | Type | Status | Planned | Forecast | Actual | Owner | Confidence | Depends On | Source | Baseline Revision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MS-CHECKOUT | Checkout validation complete | checkpoint | planned | 2026-07-15 | 2026-07-17 | TBD | FDE-A | medium | l2-payments | workstreams/l1-checkout/delivery-record.md#roadmap | 1 |
+| TBD | Theme launch window | delivery-window | planned | TBD | TBD | TBD | FDE-A | low | TBD | workstreams/l1-checkout/delivery-record.md#roadmap | TBD |
+| TBD | Unbaselined launch guess | delivery-window | planned | 2026-07-20 | TBD | TBD | FDE-A | low | TBD | workstreams/l1-checkout/delivery-record.md#launch-guess | TBD |
 """
 
 
@@ -98,7 +99,62 @@ class RenderRoadmapTests(unittest.TestCase):
             "workstreams/l1-checkout",
         ]:
             (memory_root / rel).mkdir(parents=True, exist_ok=True)
+        config = project_root / "_bmad" / "adp" / "config.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "communication_language: English\ndocument_output_language: English\n",
+            encoding="utf-8",
+        )
+        baseline = {
+            "schema_version": "1.0",
+            "baseline_id": "PROGRAM-BASELINE",
+            "revision": 1,
+            "confirmation_status": "approved",
+            "project": {
+                "name": "Roadmap test",
+                "owner": "PMO",
+                "target_date": "2026-12-31",
+                "source": {
+                    "type": "charter",
+                    "reference": "project-charter.md#target",
+                    "confirmed_by": "PMO",
+                },
+            },
+            "default_tolerance_days": 0,
+            "gates": [],
+            "milestones": [
+                {
+                    "id": "MS-CHECKOUT",
+                    "name": "Checkout validation complete",
+                    "workstream_id": "l1-checkout",
+                    "planned_date": "2026-07-15",
+                    "owner": "FDE-A",
+                    "confirmation_status": "approved",
+                    "source": {
+                        "type": "approved-plan",
+                        "reference": "plans/program-baseline.md#MS-CHECKOUT",
+                        "confirmed_by": "PMO",
+                    },
+                    "dependencies": [],
+                    "baseline_revision": 1,
+                    "critical_path": True,
+                }
+            ],
+            "critical_path": ["MS-CHECKOUT"],
+            "weighting": {"enabled": False, "completion_measure": None, "source": None},
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+        baseline_path = memory_root / "plans" / "program-baseline.md"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(
+            "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+            + json.dumps(baseline, indent=2)
+            + "\n```\n",
+            encoding="utf-8",
+        )
         (memory_root / "workstreams" / "l1-checkout" / "delivery-record.md").write_text(RECORD, encoding="utf-8")
+        self.write_program_status(memory_root, baseline, "2026-07-10")
         (memory_root / "actions" / "action-ledger.md").write_text(
             "\n".join(
                 [
@@ -183,6 +239,99 @@ class RenderRoadmapTests(unittest.TestCase):
         )
         return memory_root
 
+    def write_program_status(self, memory_root: Path, baseline: dict, as_of: str) -> Path:
+        baseline_path = memory_root / "plans" / "program-baseline.md"
+        record_path = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+        snapshot_id = "ps-roadmap-fixture"
+        source_fingerprints = {
+            "_bmad-output/adp/memory/plans/program-baseline.md": hashlib.sha256(
+                baseline_path.read_bytes()
+            ).hexdigest(),
+            "_bmad-output/adp/memory/workstreams/l1-checkout/delivery-record.md": hashlib.sha256(
+                record_path.read_bytes()
+            ).hexdigest(),
+        }
+        planned = baseline["milestones"][0]["planned_date"]
+        forecast = (date.fromisoformat(planned) + timedelta(days=2)).isoformat()
+        model = {
+            "schema_version": "1.0",
+            "snapshot_id": snapshot_id,
+            "generated_at": f"{as_of}T12:00:00Z",
+            "as_of": as_of,
+            "reporting_period": {"start": as_of, "end": as_of},
+            "baseline_revision": baseline["revision"],
+            "baseline_id": baseline["baseline_id"],
+            "source_inventory": [],
+            "source_fingerprints": source_fingerprints,
+            "input_audit_id": "audit-program-status-fixture",
+            "input_audit_disposition": "ready",
+            "generator_version": "1.0.0",
+            "locale": "en",
+            "overall_status": "indeterminate",
+            "overall_status_label": "Indeterminate",
+            "overall_rule_id": "PS-OVERALL-FIXTURE",
+            "report_confidence": "high",
+            "report_confidence_label": "High",
+            "confidence_reasons": ["fixture"],
+            "rule_ids": ["PS-MS-FORECAST-OVER-TOLERANCE", "PS-OVERALL-FIXTURE"],
+            "project": {
+                "name": baseline["project"]["name"],
+                "owner": baseline["project"]["owner"],
+                "target_date": baseline["project"]["target_date"],
+                "target_assessment": {
+                    "constraint_type": "project",
+                    "id": "PROJECT-TARGET",
+                    "name": baseline["project"]["name"],
+                    "critical": True,
+                    "planned_date": baseline["project"]["target_date"],
+                    "forecast_date": None,
+                    "actual_date": None,
+                    "tolerance_days": 0,
+                    "variance_days": None,
+                    "source_status": None,
+                    "status": "on-plan",
+                    "rule_id": "PS-PROJECT-TARGET-FUTURE",
+                    "source_references": [baseline["project"]["source"]["reference"]],
+                },
+            },
+            "progress": {"weighted_completion_percent": None},
+            "milestones": [
+                {
+                    "constraint_type": "milestone",
+                    "id": "MS-CHECKOUT",
+                    "name": "Checkout validation complete",
+                    "workstream_id": "l1-checkout",
+                    "critical": True,
+                    "planned_date": planned,
+                    "forecast_date": forecast,
+                    "actual_date": None,
+                    "tolerance_days": 0,
+                    "variance_days": 2,
+                    "source_status": "planned",
+                    "status": "off-plan",
+                    "rule_id": "PS-MS-FORECAST-OVER-TOLERANCE",
+                    "source_references": [
+                        "plans/program-baseline.md#MS-CHECKOUT",
+                        "workstreams/l1-checkout/delivery-record.md#roadmap",
+                    ],
+                }
+            ],
+            "gates": [],
+            "critical_path": [],
+            "signals": [],
+            "variances": [],
+            "findings": [],
+            "audit_summary": {},
+            "period_delta": {"comparison_status": "no-previous-snapshot"},
+        }
+        view_path = memory_root / "views" / "program-status.json"
+        snapshot_path = memory_root / "snapshots" / "program-status" / f"{snapshot_id}.json"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(model, indent=2) + "\n"
+        view_path.write_text(text, encoding="utf-8")
+        snapshot_path.write_text(text, encoding="utf-8")
+        return view_path
+
     def write_audit(
         self,
         memory_root: Path,
@@ -195,7 +344,14 @@ class RenderRoadmapTests(unittest.TestCase):
         scope_workstreams: list[str] | None = None,
         inventory_workstreams: list[str] | None = None,
         as_of: str | None = None,
+        sync_program_status: bool = True,
     ) -> Path:
+        audit_as_of = as_of or date.today().isoformat()
+        baseline_path = memory_root / "plans" / "program-baseline.md"
+        if sync_program_status and baseline_path.is_file():
+            baseline_text = baseline_path.read_text(encoding="utf-8")
+            baseline = json.loads(baseline_text.split("```json", 1)[1].split("```", 1)[0])
+            self.write_program_status(memory_root, baseline, audit_as_of)
         audit_root = memory_root / "audits"
         audit_root.mkdir(parents=True, exist_ok=True)
         audit_path = audit_root / f"fixture-{status}.json"
@@ -221,11 +377,11 @@ class RenderRoadmapTests(unittest.TestCase):
             "report_confidence": {"pass": "high", "warning": "medium", "blocked": "low"}.get(status, "low"),
             "prepass": {
                 "schema_version": 2,
-                "capability": "Global Project Readout",
+                "capability": "global-project-readout",
                 "scope": {
                     "workstreams_requested": scope_workstreams or [],
                     "groups_scanned": ["actions", "checkpoints", "core", "decisions", "l0", "views", "workstreams"],
-                    "as_of": as_of or date.today().isoformat(),
+                    "as_of": audit_as_of,
                     "max_age_days": 7,
                 },
                 "counts": {
@@ -270,6 +426,9 @@ class RenderRoadmapTests(unittest.TestCase):
             ),
             date.today().isoformat(),
         )
+        baseline_text = (memory_root / "plans" / "program-baseline.md").read_text(encoding="utf-8")
+        baseline = json.loads(baseline_text.split("```json", 1)[1].split("```", 1)[0])
+        self.write_program_status(memory_root, baseline, as_of)
         available = sorted(path.parent.name for path in memory_root.glob("workstreams/*/delivery-record.md"))
         audit_path = self.write_audit(
             memory_root,
@@ -295,10 +454,12 @@ class RenderRoadmapTests(unittest.TestCase):
             excluded_items = {item["item"] for item in roadmap["excluded_items"]}
 
             self.assertIn("Checkout validation complete", timeline_names)
-            self.assertIn("Payment signoff owner confirmed", timeline_names)
-            self.assertIn("Validation checkpoint: Validation evidence baseline synced", timeline_names)
+            unmapped_names = {item["milestone"] for item in roadmap["unmapped_items"]}
+            self.assertIn("Payment signoff owner confirmed", unmapped_names)
+            self.assertIn("Validation checkpoint: Validation evidence baseline synced", unmapped_names)
             self.assertIn("Theme launch window", unscheduled_names)
-            self.assertIn("Unsourced launch guess", excluded_items)
+            self.assertIn("Unbaselined launch guess", unmapped_names)
+            self.assertNotIn("Checkout validation complete", unmapped_names)
             self.assertIn("Confirm callback owner", excluded_items)
             self.assertTrue(roadmap["blocked_by_decisions"])
             self.assertNotIn("blocked_by_dependencies", roadmap)
@@ -307,17 +468,174 @@ class RenderRoadmapTests(unittest.TestCase):
             )
             checkpoint = next(
                 item
-                for item in roadmap["milestone_timeline"]
+                for item in roadmap["unmapped_items"]
                 if item["source_type"] == "checkpoint-candidate"
             )
             decision = next(
-                item for item in roadmap["milestone_timeline"] if item["source_type"] == "decision-log"
+                item for item in roadmap["unmapped_items"] if item["source_type"] == "decision-log"
             )
             self.assertEqual(checkpoint["confidence"], "TBD")
             self.assertEqual(decision["confidence"], "TBD")
             markdown = (memory_root / "views" / "roadmap.md").read_text(encoding="utf-8")
             self.assertIn("Source Type", markdown)
-            self.assertIn("wdr-roadmap", markdown)
+            self.assertIn("program-baseline", markdown)
+
+    def test_canonical_timeline_uses_baseline_and_program_status_without_rejudging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+
+            completed = self.run_with_pass_audit(project_root, memory_root, "--as-of", "2026-07-13")
+            result = json.loads(completed.stdout)
+            roadmap = result.get("preview", {}).get("roadmap") or json.loads(
+                (memory_root / "views" / "roadmap.json").read_text(encoding="utf-8")
+            )
+            milestone = next(item for item in roadmap["milestone_timeline"] if item["id"] == "MS-CHECKOUT")
+
+            self.assertEqual(roadmap["program_status"]["overall_status"], "indeterminate")
+            self.assertEqual(roadmap["baseline_revision"], 1)
+            self.assertEqual(milestone["planned"], "2026-07-15")
+            self.assertEqual(milestone["forecast"], "2026-07-17")
+            self.assertEqual(milestone["variance_days"], 2)
+            self.assertEqual(milestone["status"], "off-plan")
+            self.assertEqual(milestone["planned_source"], "plans/program-baseline.md#MS-CHECKOUT")
+            self.assertEqual(
+                milestone["forecast_source"],
+                "snapshots/program-status/ps-roadmap-fixture.json#MS-CHECKOUT",
+            )
+            self.assertNotEqual(milestone["planned_source"], milestone["forecast_source"])
+            sources = {item["path"]: item for item in roadmap["source_inventory"]["sources_read"]}
+            for source_path in [
+                "plans/program-baseline.md",
+                "views/program-status.json",
+                "snapshots/program-status/ps-roadmap-fixture.json",
+            ]:
+                self.assertTrue(sources[source_path]["fingerprint"].startswith("sha256:"))
+                self.assertEqual(roadmap["source_fingerprints"][source_path], sources[source_path]["fingerprint"])
+
+    def test_baseline_revision_diff_is_bound_to_archived_and_current_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            baseline_path = memory_root / "plans" / "program-baseline.md"
+            baseline = json.loads(
+                baseline_path.read_text(encoding="utf-8").split("```json", 1)[1].split("```", 1)[0]
+            )
+            history = memory_root / "plans" / "baseline-history"
+            history.mkdir(parents=True)
+            archived = json.loads(json.dumps(baseline))
+            (history / "program-baseline-r1.md").write_text(
+                "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps(archived, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            baseline["revision"] = 2
+            baseline["default_tolerance_days"] = 3
+            baseline["milestones"][0]["planned_date"] = "2026-07-18"
+            baseline["milestones"][0]["baseline_revision"] = 2
+            baseline_path.write_text(
+                "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps(baseline, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record.write_text(record.read_text(encoding="utf-8").replace("| 1 |", "| 2 |"), encoding="utf-8")
+            self.write_program_status(memory_root, baseline, "2026-07-13")
+
+            completed = self.run_with_pass_audit(project_root, memory_root, "--as-of", "2026-07-13")
+            roadmap = json.loads(completed.stdout).get("preview", {}).get("roadmap") or json.loads(
+                (memory_root / "views" / "roadmap.json").read_text(encoding="utf-8")
+            )
+            revision_diff = roadmap["baseline_changes"]
+
+            self.assertEqual(revision_diff["from_revision"], 1)
+            self.assertEqual(revision_diff["to_revision"], 2)
+            self.assertEqual(revision_diff["status"], "compared")
+            self.assertTrue(revision_diff["from_fingerprint"].startswith("sha256:"))
+            self.assertTrue(revision_diff["to_fingerprint"].startswith("sha256:"))
+            self.assertTrue(
+                any(change["id"] == "MS-CHECKOUT" and "planned_date" in change["fields"] for change in revision_diff["changes"])
+            )
+            self.assertTrue(
+                any(change["id"] == "BASELINE" and "default_tolerance_days" in change["fields"] for change in revision_diff["changes"])
+            )
+
+    def test_baseline_revision_diff_rejects_foreign_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            baseline_path = memory_root / "plans" / "program-baseline.md"
+            baseline = json.loads(
+                baseline_path.read_text(encoding="utf-8").split("```json", 1)[1].split("```", 1)[0]
+            )
+            foreign = json.loads(json.dumps(baseline))
+            foreign["baseline_id"] = "FOREIGN-BASELINE"
+            history = memory_root / "plans" / "baseline-history"
+            history.mkdir(parents=True)
+            (history / "program-baseline-r1.md").write_text(
+                "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps(foreign, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            baseline["revision"] = 2
+            baseline["milestones"][0]["baseline_revision"] = 2
+            baseline_path.write_text(
+                "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps(baseline, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record.write_text(record.read_text(encoding="utf-8").replace("| 1 |", "| 2 |"), encoding="utf-8")
+            self.write_program_status(memory_root, baseline, "2026-07-13")
+            audit_path = self.write_audit(memory_root, as_of="2026-07-13")
+
+            completed = self.run_script(
+                project_root,
+                "--audit",
+                str(audit_path),
+                "--as-of",
+                "2026-07-13",
+                check=False,
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("baseline_id does not match", result["error"])
+
+    def test_missing_or_revision_mismatched_program_status_blocks(self) -> None:
+        for mutation, expected in [("missing", "program status is missing"), ("revision", "baseline revision")]:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp_dir:
+                project_root = Path(temp_dir)
+                memory_root = self.scaffold(project_root)
+                status_path = memory_root / "views" / "program-status.json"
+                if mutation == "missing":
+                    status_path.unlink()
+                else:
+                    payload = json.loads(status_path.read_text(encoding="utf-8"))
+                    payload["baseline_revision"] = 99
+                    status_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+                audit_path = self.write_audit(
+                    memory_root,
+                    as_of=date.today().isoformat(),
+                    sync_program_status=False,
+                )
+                completed = self.run_script(
+                    project_root,
+                    "--audit",
+                    str(audit_path),
+                    check=False,
+                )
+                result = json.loads(completed.stdout)
+
+                self.assertEqual(completed.returncode, 1)
+                self.assertEqual(result["status"], "blocked")
+                self.assertIn(expected, result["error"])
+                self.assertIn("adp-program-status", result["recommended_workflows"])
 
     def test_unknown_workstream_blocks_with_available_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -433,8 +751,8 @@ class RenderRoadmapTests(unittest.TestCase):
 
     def test_invalid_wdr_roadmap_enums_are_excluded_with_diagnostics(self) -> None:
         valid_row = (
-            "| Checkout validation complete | checkpoint | planned | 2026-07-15 | TBD | TBD | "
-            "FDE-A | medium | l2-payments | workstreams/l1-checkout/delivery-record.md#roadmap |"
+            "| MS-CHECKOUT | Checkout validation complete | checkpoint | planned | 2026-07-15 | 2026-07-17 | TBD | "
+            "FDE-A | medium | l2-payments | workstreams/l1-checkout/delivery-record.md#roadmap | 1 |"
         )
         cases = [
             ("type", valid_row.replace("| checkpoint |", "| release gate |"), "invalid Type enum 'release gate'"),
@@ -451,12 +769,12 @@ class RenderRoadmapTests(unittest.TestCase):
                 completed = self.run_with_pass_audit(project_root, memory_root)
                 result = json.loads(completed.stdout)
                 roadmap = json.loads((memory_root / "views" / "roadmap.json").read_text(encoding="utf-8"))
-                rendered = roadmap["milestone_timeline"] + roadmap["unscheduled_milestones"]
+                rendered = roadmap["milestone_timeline"]
                 exclusions = [
                     item for item in roadmap["excluded_items"] if item["item"] == "Checkout validation complete"
                 ]
 
-                self.assertNotIn("Checkout validation complete", {item["milestone"] for item in rendered})
+                self.assertIn("Checkout validation complete", {item["milestone"] for item in rendered})
                 self.assertEqual(len(exclusions), 1)
                 self.assertEqual(exclusions[0]["code"], "invalid_enum")
                 self.assertTrue(exclusions[0]["risk"])
@@ -493,7 +811,7 @@ class RenderRoadmapTests(unittest.TestCase):
 
                 self.assertFalse(roadmap["blocked_by_decisions"])
 
-    def test_fresh_kickoff_templates_create_no_milestones(self) -> None:
+    def test_fresh_kickoff_without_baseline_routes_to_plan_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             memory_root = project_root / "_bmad-output" / "adp" / "memory"
@@ -506,11 +824,14 @@ class RenderRoadmapTests(unittest.TestCase):
             ]:
                 (memory_root / rel).write_text((KICKOFF_TEMPLATE_ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
 
-            self.run_with_pass_audit(project_root, memory_root)
-            roadmap = json.loads((memory_root / "views" / "roadmap.json").read_text(encoding="utf-8"))
+            completed = self.run_script(project_root, check=False)
+            result = json.loads(completed.stdout)
 
-            self.assertFalse(roadmap["milestone_timeline"])
-            self.assertFalse(roadmap["unscheduled_milestones"])
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("baseline is missing", result["error"])
+            self.assertIn("adp-plan-baseline", result["recommended_workflows"])
+            self.assertFalse((memory_root / "views" / "roadmap.json").exists())
 
     def test_audit_status_controls_report_risk_state(self) -> None:
         expected_status = {"pass": "complete", "warning": "warning", "blocked": "blocked"}
@@ -609,6 +930,9 @@ class RenderRoadmapTests(unittest.TestCase):
                 memory_root = self.scaffold(project_root)
                 audit_options = {"as_of": "2026-07-10", **audit_args}
                 audit_path = self.write_audit(memory_root, **audit_options)
+                baseline_text = (memory_root / "plans" / "program-baseline.md").read_text(encoding="utf-8")
+                baseline = json.loads(baseline_text.split("```json", 1)[1].split("```", 1)[0])
+                self.write_program_status(memory_root, baseline, "2026-07-10")
                 if field_to_remove:
                     payload = json.loads(audit_path.read_text(encoding="utf-8"))
                     payload.pop(field_to_remove)
@@ -853,7 +1177,7 @@ class RenderRoadmapTests(unittest.TestCase):
                 any("malformed markdown table" in item["reason"] for item in roadmap["excluded_items"])
             )
             self.assertTrue(roadmap["risk_bearing"])
-            self.assertTrue(any("expected 10" in warning for warning in result["warnings"]))
+            self.assertTrue(any("expected 12" in warning for warning in result["warnings"]))
 
     def test_corrupt_previous_roadmap_omits_diff_with_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -869,6 +1193,30 @@ class RenderRoadmapTests(unittest.TestCase):
 
             self.assertFalse(roadmap["changed_since_last_roadmap"])
             self.assertTrue(any("root is not an object" in warning for warning in result["warnings"]))
+
+    def test_changed_since_last_roadmap_includes_new_unmapped_items(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            self.run_with_pass_audit(project_root, memory_root, "--as-of", "2026-07-10")
+            record_path = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record_path.write_text(
+                record_path.read_text(encoding="utf-8")
+                + "| TBD | New unbaselined event | checkpoint | planned | 2026-07-22 | TBD | TBD | FDE-A | medium | TBD | workstreams/l1-checkout/evidence.md#new-event | TBD |\n",
+                encoding="utf-8",
+            )
+
+            completed = self.run_with_pass_audit(project_root, memory_root, "--as-of", "2026-07-10")
+            roadmap = json.loads(completed.stdout).get("preview", {}).get("roadmap") or json.loads(
+                (memory_root / "views" / "roadmap.json").read_text(encoding="utf-8")
+            )
+
+            self.assertTrue(
+                any(
+                    change["change"] == "added" and change["milestone"] == "New unbaselined event"
+                    for change in roadmap["changed_since_last_roadmap"]
+                )
+            )
 
     def test_diff_is_omitted_when_explicit_output_reuses_another_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -969,7 +1317,7 @@ class RenderRoadmapTests(unittest.TestCase):
             record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
             record.write_text(record.read_text(encoding="utf-8") + "\nchanged after audit\n", encoding="utf-8")
             stale = self.run_script(project_root, "--audit", str(audit_path), check=False)
-            self.assertIn("render source inventory does not match", json.loads(stale.stdout)["error"])
+            self.assertIn("program status source fingerprint is stale", json.loads(stale.stdout)["error"])
 
     def test_supplied_prepass_is_identity_bound_to_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -10,13 +10,14 @@ import argparse
 import hashlib
 import json
 import locale
+import os
 import platform
 import re
 import subprocess
 import sys
 import tempfile
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +25,12 @@ from typing import Any
 SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_ROOT = SCRIPT_ROOT.parent
 DEFAULT_PREPASS_SCRIPT = SKILLS_ROOT / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
+DEFAULT_BASELINE_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "baseline.py"
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_AUDIT_OUTPUT_PATH = "audits"
+BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
+GENERATOR_VERSION = "2.0.0"
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 TERMINAL_DECISION_STATUSES = {"accepted", "closed", "done", "cancelled", "rejected", "superseded"}
 TERMINAL_INTAKE_STATUSES = {"applied", "superseded"}
@@ -44,12 +49,12 @@ REQUIRED_PREPASS_COLLECTIONS = {
 SUPPORTED_PREPASS_SCHEMA_VERSION = 2
 VALID_GAP_CATEGORIES = {"freshness", "completeness", "consistency", "closure", "merge_quality"}
 SCENARIO_CAPABILITIES = {
-    "global": "Global Project Readout",
-    "fde-morning": "FDE Action List",
-    "business-biweekly": "Global Project Readout",
-    "weekly-report": "Weekly Report Generation",
-    "project-lead": "Global Project Readout",
-    "roadmap": "Global Project Readout",
+    "global": "global-project-readout",
+    "fde-morning": "fde-action-list",
+    "business-biweekly": "global-project-readout",
+    "weekly-report": "weekly-report-consumption",
+    "project-lead": "global-project-readout",
+    "roadmap": "global-project-readout",
 }
 VIEW_OWNER_WORKFLOWS = {
     "views/project-lead.md": "adp-agent-program-lead",
@@ -87,6 +92,68 @@ VIEW_SOURCE_PATTERNS = {
     "views/dependency-map.md": ("workstreams/*/delivery-record.md", "decisions/**/*.md", "l0/*.md"),
     "views/roadmap.md": ("workstreams/*/delivery-record.md", "decisions/**/*.md", "l0/*.md"),
 }
+RENDER_COVERAGE_PROFILES = {
+    "adp-program-status-json": {
+        "required": {"status.title"},
+        "prefixes": {
+            "enum.program_status.",
+            "enum.report_confidence.",
+            "status.confidence_reason.",
+            "status.progress_reason.",
+        },
+    },
+    "adp-program-status-markdown": {
+        "required": {
+            "status.title",
+            "status.overall",
+            "status.confidence",
+            "status.as_of",
+            "status.period",
+            "field.revision",
+            "status.snapshot_id",
+            "status.executive_summary",
+            "status.critical_constraints",
+            "status.top_variances",
+            "status.period_changes",
+            "status.confidence_basis",
+            "status.lineage",
+            "status.input_audit_id",
+            "status.generator_version",
+            "status.rule_ids",
+        },
+        "prefixes": {"enum.program_status.", "enum.report_confidence.", "status.summary."},
+    },
+    "adp-weekly-report-markdown": {
+        "required": {
+            "status.weekly_title",
+            "status.executive_summary",
+            "status.period_changes",
+            "status.top_variances",
+            "status.upcoming",
+            "status.lineage",
+            "status.snapshot_id",
+            "status.input_audit_id",
+        },
+        "prefixes": {"enum.program_status.", "enum.report_confidence.", "status.summary."},
+    },
+    "adp-project-lead-markdown": {
+        "required": {
+            "status.project_lead_title",
+            "status.overall",
+            "status.confidence",
+            "field.owner",
+            "field.target_date",
+            "baseline.gates",
+            "baseline.milestones",
+            "status.recovery",
+            "status.lineage",
+            "status.snapshot_id",
+            "status.baseline_revision",
+            "status.input_audit_id",
+        },
+        "prefixes": {"enum.program_status.", "enum.report_confidence."},
+    },
+}
 
 
 class ContractArgumentParser(argparse.ArgumentParser):
@@ -121,6 +188,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("project_root", help="Project root containing ADP memory.")
     parser.add_argument(
+        "--phase",
+        choices=["input", "artifact"],
+        default="input",
+        help="Run pre-generation input audit or post-generation artifact validation. Default: input.",
+    )
+    parser.add_argument(
         "--scenario",
         choices=sorted(SCENARIO_CAPABILITIES),
         default="global",
@@ -135,6 +208,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prepass-json", help="Existing prepass JSON to audit instead of running the prepass.")
     parser.add_argument("--prepass-script", default=str(DEFAULT_PREPASS_SCRIPT), help="Path to adp-state-prepass.py.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Path to shared ADP effective-config resolver.")
+    parser.add_argument("--baseline-script", default=str(DEFAULT_BASELINE_SCRIPT), help="Path to adp-plan-baseline baseline.py.")
+    parser.add_argument("--artifact", action="append", default=[], help="Generated artifact to validate. Repeatable for artifact phase.")
+    parser.add_argument("--input-audit-json", help="Input audit JSON that the artifact declares through input_audit_id.")
     parser.add_argument("--max-age-days", type=int, default=7, help="Freshness threshold in days. Default: 7.")
     parser.add_argument("--as-of", help="Audit date, YYYY-MM-DD. Default: today.")
     parser.add_argument("--output-dir", help="Audit output directory. Default: <memory-root>/audits.")
@@ -221,11 +298,10 @@ def main() -> int:
             memlog = record_headless_context(args, memlog)
         result = run(args, memlog)
     except Exception as exc:  # pragma: no cover - defensive CLI boundary
-        result = failure_envelope(
-            status="error",
-            scenario=args.scenario,
-            error=str(exc),
-            memlog=memlog,
+        result = (
+            artifact_failure_envelope(args.scenario, status="error", error=str(exc), memlog=memlog)
+            if args.phase == "artifact"
+            else failure_envelope(status="error", scenario=args.scenario, error=str(exc), memlog=memlog)
         )
         if args.verbose:
             print(f"audit failed: {exc}", file=sys.stderr)
@@ -267,6 +343,8 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             project_root=str(project_root),
         )
     memory_root = resolve_memory_root(project_root, args.memory_root)
+    if args.phase == "artifact":
+        return run_artifact_validation(args, project_root, memory_root, as_of, memlog)
     if args.prepass_json:
         try:
             prepass = load_json(Path(args.prepass_json))
@@ -329,7 +407,16 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             memory_root=str(memory_root),
         )
 
-    audit = build_audit(prepass, project_root, memory_root, args.scenario, as_of, args.max_age_days)
+    audit = build_audit(
+        prepass,
+        project_root,
+        memory_root,
+        args.scenario,
+        as_of,
+        args.max_age_days,
+        Path(args.config_script).resolve(),
+        Path(args.baseline_script).resolve(),
+    )
     output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, args.scenario)
     try:
         output_paths = write_audit_outputs(audit, output_dir, as_of, args.scenario)
@@ -349,6 +436,9 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
         "status": "complete",
         "audit_schema_version": audit["audit_schema_version"],
         "audit_status": audit["audit_status"],
+        "audit_type": audit["audit_type"],
+        "input_audit_id": audit["input_audit_id"],
+        "execution_disposition": audit["execution_disposition"],
         "safe_to_generate": audit["safe_to_generate"],
         "safe_to_generate_green_report": audit["safe_to_generate_green_report"],
         "report_confidence": audit["report_confidence"],
@@ -362,6 +452,643 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
     if memlog is not None:
         result["memlog"] = str(memlog)
     return result
+
+
+def run_artifact_validation(
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+    as_of: date,
+    memlog: Path | None,
+) -> dict[str, Any]:
+    if not args.input_audit_json:
+        return artifact_failure_envelope(
+            args.scenario,
+            status="error",
+            error="artifact phase requires --input-audit-json",
+            recommended_workflows=["adp-state-audit"],
+            memlog=memlog,
+        )
+    if not args.artifact:
+        return artifact_failure_envelope(
+            args.scenario,
+            status="error",
+            error="artifact phase requires at least one --artifact",
+            recommended_workflows=["owning artifact workflow"],
+            memlog=memlog,
+        )
+    input_audit_path = resolve_project_path(project_root, args.input_audit_json)
+    try:
+        input_audit = load_json(input_audit_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return artifact_failure_envelope(
+            args.scenario,
+            status="error",
+            error=f"cannot read input audit JSON: {exc}",
+            recommended_workflows=["adp-state-audit"],
+            memlog=memlog,
+        )
+    integrity_errors = validate_input_audit_integrity(input_audit)
+    if integrity_errors:
+        return artifact_failure_envelope(
+            args.scenario,
+            status="blocked",
+            reason="input audit integrity validation failed",
+            recommended_workflows=["adp-state-audit"],
+            memlog=memlog,
+            details=integrity_errors,
+        )
+    input_scenario = str(input_audit.get("scenario") or "global")
+    scenario_was_explicit = "--scenario" in set(getattr(args, "provided_options", set()))
+    effective_scenario = args.scenario if scenario_was_explicit else input_scenario
+    scenario_mismatch = scenario_was_explicit and args.scenario != input_scenario
+    artifact_paths = [resolve_project_path(project_root, raw) for raw in args.artifact]
+    validation = build_artifact_validation(
+        input_audit,
+        input_audit_path,
+        artifact_paths,
+        project_root,
+        memory_root,
+        effective_scenario,
+        as_of,
+        args.max_age_days,
+        scenario_mismatch=scenario_mismatch,
+        locale_catalog_path=Path(args.config_script).resolve().parent.parent / "assets" / "locale-catalog.json",
+    )
+    output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, effective_scenario)
+    try:
+        output_paths = write_audit_outputs(validation, output_dir, as_of, effective_scenario)
+    except OSError as exc:
+        return artifact_failure_envelope(
+            effective_scenario,
+            status="error",
+            error=f"cannot write artifact validation outputs: {exc}",
+            recommended_workflows=validation["recommended_workflows"],
+            memlog=memlog,
+        )
+    validation["outputs"] = output_paths
+    result = {
+        "ok": True,
+        "status": "complete",
+        "audit_type": "artifact",
+        "artifact_validation_id": validation["artifact_validation_id"],
+        "input_audit_id": validation["input_audit_id"],
+        "audit_status": validation["audit_status"],
+        "execution_disposition": validation["execution_disposition"],
+        "safe_to_publish": validation["safe_to_publish"],
+        "scenario": effective_scenario,
+        "outputs": output_paths,
+        "counts": validation["counts"],
+        "recommended_workflows": validation["recommended_workflows"],
+    }
+    if memlog is not None:
+        result["memlog"] = str(memlog)
+    return result
+
+
+def artifact_failure_envelope(
+    scenario: str,
+    *,
+    status: str,
+    recommended_workflows: list[str] | None = None,
+    error: str | None = None,
+    reason: str | None = None,
+    memlog: Path | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    return failure_envelope(
+        status=status,
+        scenario=scenario,
+        recommended_workflows=recommended_workflows,
+        error=error,
+        reason=reason,
+        memlog=memlog,
+        phase="artifact",
+        audit_type="artifact",
+        execution_disposition="blocked",
+        safe_to_publish=False,
+        **details,
+    )
+
+
+def build_artifact_validation(
+    input_audit: dict[str, Any],
+    input_audit_path: Path,
+    artifact_paths: list[Path],
+    project_root: Path,
+    memory_root: Path,
+    scenario: str,
+    as_of: date,
+    max_age_days: int,
+    *,
+    scenario_mismatch: bool = False,
+    locale_catalog_path: Path,
+) -> dict[str, Any]:
+    raw_findings: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    expected_audit_id = str(input_audit.get("input_audit_id"))
+    expected_revision = input_audit.get("baseline_revision")
+    expected_locale = str(input_audit.get("locale") or "en")
+    expected_fingerprints = input_audit.get("source_fingerprints") if isinstance(input_audit.get("source_fingerprints"), dict) else {}
+    try:
+        locale_catalog = load_json(locale_catalog_path)
+        locale_catalog_fingerprint = file_sha256(locale_catalog_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        locale_catalog = {}
+        locale_catalog_fingerprint = ""
+        raw_findings.append(
+            artifact_finding(
+                "artifact.locale_catalog_unavailable",
+                "blocking",
+                "blocked",
+                f"shared locale catalog could not be loaded: {exc}",
+                str(locale_catalog_path),
+                "adp-setup",
+            )
+        )
+    if input_audit.get("execution_disposition") == "blocked":
+        raw_findings.append(
+            artifact_finding(
+                "input_audit.blocked",
+                "blocking",
+                "blocked",
+                "artifact was generated from an input audit that blocked execution",
+                str(input_audit_path),
+                "adp-state-audit",
+            )
+        )
+    elif input_audit.get("execution_disposition") == "degraded":
+        raw_findings.append(
+            artifact_finding(
+                "input_audit.degraded",
+                "warning",
+                "degraded",
+                "artifact inherits degraded confidence from its input audit",
+                str(input_audit_path),
+                "adp-state-audit",
+            )
+        )
+    if scenario_mismatch:
+        raw_findings.append(
+            artifact_finding(
+                "artifact.scenario_mismatch",
+                "blocking",
+                "blocked",
+                f"explicit validation scenario {scenario!r} does not match input audit scenario {input_audit.get('scenario')!r}",
+                str(input_audit_path),
+                "owning artifact workflow",
+            )
+        )
+    changed_sources: list[str] = []
+    for source, expected in expected_fingerprints.items():
+        if is_derived_lineage_path(str(source)):
+            continue
+        current_path = resolve_fingerprint_source(project_root, memory_root, str(source))
+        if current_path is None or not current_path.is_file() or file_sha256(current_path) != expected:
+            changed_sources.append(str(source))
+    if changed_sources:
+        raw_findings.append(
+            artifact_finding(
+                "artifact.input_sources_changed",
+                "warning",
+                "degraded",
+                f"{len(changed_sources)} source(s) changed or disappeared after the input audit",
+                ", ".join(changed_sources),
+                "adp-state-audit",
+            )
+        )
+    for path in artifact_paths:
+        if not path.is_file():
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.missing",
+                    "blocking",
+                    "blocked",
+                    "generated artifact is missing",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+            continue
+        before_hash = file_sha256(path)
+        try:
+            metadata = artifact_metadata(path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.unreadable",
+                    "blocking",
+                    "blocked",
+                    str(exc),
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+            continue
+        artifacts.append({"path": str(path), "fingerprint": before_hash, "metadata": metadata})
+        required = [
+            "generated_at",
+            "as_of",
+            "reporting_period",
+            "report_confidence",
+            "scenario",
+            "input_audit_id",
+            "baseline_revision",
+            "source_fingerprints",
+            "locale",
+            "locale_fallback",
+            "render_contract",
+            "generator_version",
+        ]
+        for field_name in required:
+            if field_name == "source_fingerprints":
+                missing = not isinstance(metadata.get(field_name), dict) or not metadata[field_name]
+            elif field_name == "locale_fallback":
+                missing = not isinstance(metadata.get(field_name), bool)
+            elif field_name == "reporting_period":
+                missing = not isinstance(metadata.get(field_name), (str, dict)) or not metadata[field_name]
+            elif field_name == "render_contract":
+                missing = not isinstance(metadata.get(field_name), dict) or not metadata[field_name]
+            else:
+                missing = not is_meaningful(metadata.get(field_name))
+            if missing:
+                raw_findings.append(
+                    artifact_finding(
+                        f"artifact.{field_name}_missing",
+                        "blocking",
+                        "blocked",
+                        f"artifact metadata is missing {field_name}",
+                        str(path),
+                        "owning artifact workflow",
+                    )
+                )
+        if str(metadata.get("input_audit_id") or "") != expected_audit_id:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.input_audit_mismatch",
+                    "blocking",
+                    "blocked",
+                    f"artifact input_audit_id does not match {expected_audit_id}",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        if metadata.get("baseline_revision") != expected_revision:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.baseline_revision_mismatch",
+                    "blocking",
+                    "blocked",
+                    f"artifact baseline revision does not match {expected_revision}",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        artifact_locale = str(metadata.get("locale") or "")
+        if artifact_locale and artifact_locale != expected_locale:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.locale_mismatch",
+                    "blocking",
+                    "blocked",
+                    f"artifact locale {artifact_locale!r} does not match input audit locale {expected_locale!r}",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        render_contract_errors = validate_render_contract(
+            metadata.get("render_contract"),
+            artifact_locale,
+            artifact_render_text(path, metadata),
+            locale_catalog,
+            locale_catalog_fingerprint,
+        )
+        if render_contract_errors:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.render_contract_invalid",
+                    "blocking",
+                    "blocked",
+                    "; ".join(render_contract_errors),
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        if isinstance(metadata.get("locale_fallback"), bool) and metadata.get("locale_fallback") != bool(input_audit.get("locale_fallback")):
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.locale_fallback_mismatch",
+                    "blocking",
+                    "blocked",
+                    "artifact locale_fallback disclosure does not match the input audit",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        elif metadata.get("locale_fallback") is True:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.locale_fallback",
+                    "warning",
+                    "degraded",
+                    "artifact explicitly disclosed locale fallback",
+                    str(path),
+                    "adp-setup",
+                )
+            )
+        generated = parse_datetime(str(metadata.get("generated_at") or ""))
+        if generated is None:
+            if is_meaningful(metadata.get("generated_at")):
+                raw_findings.append(
+                    artifact_finding(
+                        "artifact.generated_at_invalid",
+                        "blocking",
+                        "blocked",
+                        "artifact generated_at is not a valid ISO timestamp",
+                        str(path),
+                        "owning artifact workflow",
+                    )
+                )
+        elif generated.date() > as_of:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.generated_at_future",
+                    "blocking",
+                    "blocked",
+                    "artifact generated_at is later than the validation as_of date",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        elif (as_of - generated.date()).days > max_age_days:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.stale_snapshot",
+                    "warning",
+                    "degraded",
+                    f"artifact is older than {max_age_days} days",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        artifact_as_of = parse_date(metadata.get("as_of"))
+        if is_meaningful(metadata.get("as_of")) and artifact_as_of is None:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.as_of_invalid",
+                    "blocking",
+                    "blocked",
+                    "artifact as_of is not a valid date",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        if str(metadata.get("scenario") or "") != str(input_audit.get("scenario") or "global"):
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.scenario_lineage_mismatch",
+                    "blocking",
+                    "blocked",
+                    "artifact scenario does not match the input audit scenario",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        confidence = str(metadata.get("report_confidence") or "").lower()
+        if confidence and confidence not in {"high", "medium", "low"}:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.report_confidence_invalid",
+                    "blocking",
+                    "blocked",
+                    "artifact report_confidence must be high, medium, or low",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        declared_fingerprints = metadata.get("source_fingerprints") if isinstance(metadata.get("source_fingerprints"), dict) else {}
+        stale_sources = [
+            source
+            for source, expected in expected_fingerprints.items()
+            if declared_fingerprints.get(source) != expected
+        ]
+        if stale_sources:
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.source_fingerprint_mismatch",
+                    "warning",
+                    "degraded",
+                    f"artifact source fingerprints are stale or incomplete for {len(stale_sources)} source(s)",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        if file_sha256(path) != before_hash:
+            raise RuntimeError(f"artifact validation modified immutable input: {path}")
+
+    canonical = []
+    for item in raw_findings:
+        finding = canonical_finding(item, str(item["severity"]), "artifact_contract")
+        finding["code"] = str(item["code"])
+        finding["execution_disposition"] = str(item["execution_disposition"])
+        canonical.append(finding)
+    blocking = [item for item in canonical if item["severity"] == "blocking"]
+    warnings = [item for item in canonical if item["severity"] != "blocking"]
+    if any(item["execution_disposition"] == "blocked" for item in canonical):
+        disposition = "blocked"
+    elif canonical:
+        disposition = "degraded"
+    else:
+        disposition = "ready"
+    audit_status = "blocked" if blocking else ("warning" if warnings else "pass")
+    recommended = sorted({str(item.get("recommended_workflow")) for item in canonical if item.get("recommended_workflow")})
+    validation = {
+        "ok": True,
+        "audit_type": "artifact",
+        "artifact_validation_schema_version": 1,
+        "audit_schema_version": 1,
+        "schema_version": 1,
+        "generator_version": GENERATOR_VERSION,
+        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "as_of": as_of.isoformat(),
+        "scenario": scenario,
+        "project_root": str(project_root),
+        "memory_root": str(memory_root),
+        "input_audit_id": expected_audit_id,
+        "input_audit_path": str(input_audit_path),
+        "baseline_revision": expected_revision,
+        "locale": expected_locale,
+        "audit_status": audit_status,
+        "execution_disposition": disposition,
+        "safe_to_generate": disposition != "blocked",
+        "safe_to_generate_green_report": disposition == "ready",
+        "safe_to_publish": disposition != "blocked",
+        "report_confidence": {"pass": "high", "warning": "medium", "blocked": "low"}[audit_status],
+        "artifacts": artifacts,
+        "blocking_gaps": blocking,
+        "warnings": warnings,
+        "duplicate_candidates": [],
+        "overlap_claims": [],
+        "conflicts": [],
+        "stale_items": [item for item in warnings if item.get("code") in {"artifact.stale_snapshot", "artifact.source_fingerprint_mismatch"}],
+        "counts": {"artifacts": len(artifacts), "blocking_findings": len(blocking), "warning_findings": len(warnings)},
+        "recommended_workflows": recommended,
+    }
+    validation["artifact_validation_id"] = stable_artifact_validation_id(validation)
+    validation["audit_content_hash"] = audit_content_hash(validation)
+    return validation
+
+
+def artifact_finding(
+    code: str,
+    severity: str,
+    disposition: str,
+    summary: str,
+    source: str,
+    workflow: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "severity": severity,
+        "execution_disposition": disposition,
+        "summary": summary,
+        "source": source,
+        "recommended_workflow": workflow,
+        "category": "artifact_validation",
+        "gap_type": code,
+    }
+
+
+def validate_render_contract(
+    value: Any,
+    locale_value: str,
+    rendered_text: str,
+    locale_catalog: dict[str, Any],
+    locale_catalog_fingerprint: str,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return ["render_contract must be an object"]
+    errors: list[str] = []
+    if value.get("catalog_locale") != locale_value:
+        errors.append("render_contract catalog_locale must match artifact locale")
+    if value.get("catalog_fingerprint") != locale_catalog_fingerprint:
+        errors.append("render_contract catalog_fingerprint does not match the shared locale catalog")
+    message_keys = value.get("message_keys")
+    if not isinstance(message_keys, list) or not message_keys or any(not is_meaningful(item) for item in message_keys):
+        errors.append("render_contract message_keys must be a non-empty array")
+    coverage_profile = value.get("coverage_profile")
+    if coverage_profile is not None:
+        profile = RENDER_COVERAGE_PROFILES.get(str(coverage_profile))
+        if profile is None:
+            errors.append("render_contract coverage_profile is not supported")
+        elif isinstance(message_keys, list):
+            declared = {str(key) for key in message_keys}
+            missing = sorted(profile["required"] - declared)
+            if missing:
+                errors.append("render_contract coverage_profile is missing required message keys: " + ", ".join(missing))
+            missing_prefixes = sorted(prefix for prefix in profile["prefixes"] if not any(key.startswith(prefix) for key in declared))
+            if missing_prefixes:
+                errors.append("render_contract coverage_profile is missing message-key families: " + ", ".join(missing_prefixes))
+    unresolved = value.get("unresolved_message_keys")
+    if not isinstance(unresolved, list):
+        errors.append("render_contract unresolved_message_keys must be an array")
+    elif unresolved:
+        errors.append("render_contract contains unresolved message keys")
+    if value.get("source_fact_translation_persisted") is not False:
+        errors.append("render_contract must confirm source facts were not persistently translated")
+    selected_catalog = locale_catalog.get(locale_value) if isinstance(locale_catalog.get(locale_value), dict) else {}
+    resolved = [selected_catalog.get(str(key)) for key in message_keys] if isinstance(message_keys, list) else []
+    if resolved and any(not isinstance(text, str) or not text for text in resolved):
+        errors.append("render_contract message_keys are not fully resolved by the shared locale catalog")
+    samples = value.get("localized_system_text")
+    if resolved and samples != resolved:
+        errors.append("render_contract localized_system_text does not match shared catalog values")
+    elif resolved and any(str(sample) not in rendered_text for sample in resolved):
+        errors.append("resolved localized system text is not present in the rendered artifact")
+    return errors
+
+
+def artifact_render_text(path: Path, metadata: dict[str, Any]) -> str:
+    if path.suffix.lower() == ".json":
+        visible = {key: value for key, value in metadata.items() if key != "render_contract"}
+        return json.dumps(visible, ensure_ascii=False, sort_keys=True)
+    text = read_text(path)
+    return text.split("<!-- adp:artifact-metadata:v1 -->", 1)[0]
+
+
+def artifact_metadata(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() == ".json":
+        payload = load_json(path)
+        return payload
+    text = read_text(path)
+    marker = "<!-- adp:artifact-metadata:v1 -->"
+    marker_index = text.find(marker)
+    if marker_index < 0:
+        raise ValueError(f"Markdown artifact is missing stable machine metadata marker {marker}")
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text[marker_index:], re.DOTALL)
+    if not match:
+        raise ValueError("Markdown artifact is missing machine metadata JSON after its marker")
+    metadata = json.loads(match.group(1))
+    if not isinstance(metadata, dict):
+        raise ValueError("Markdown artifact machine metadata must be a JSON object")
+    return metadata
+
+
+def stable_artifact_validation_id(validation: dict[str, Any]) -> str:
+    identity = {
+        "audit_type": validation.get("audit_type"),
+        "artifact_validation_schema_version": validation.get("artifact_validation_schema_version"),
+        "audit_schema_version": validation.get("audit_schema_version"),
+        "schema_version": validation.get("schema_version"),
+        "generator_version": validation.get("generator_version"),
+        "input_audit_id": validation.get("input_audit_id"),
+        "scenario": validation.get("scenario"),
+        "as_of": validation.get("as_of"),
+        "baseline_revision": validation.get("baseline_revision"),
+        "locale": validation.get("locale"),
+        "execution_disposition": validation.get("execution_disposition"),
+        "audit_status": validation.get("audit_status"),
+        "safe_to_publish": validation.get("safe_to_publish"),
+        "report_confidence": validation.get("report_confidence"),
+        "recommended_workflows": validation.get("recommended_workflows", []),
+        "artifacts": [
+            {"path": item.get("path"), "fingerprint": item.get("fingerprint")}
+            for item in validation.get("artifacts", [])
+        ],
+        "findings": sorted(
+            canonical_finding_identity(item)
+            for item in [*validation.get("blocking_gaps", []), *validation.get("warnings", [])]
+            if isinstance(item, dict)
+        ),
+    }
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"artifact-validation-{digest[:16]}"
+
+
+def resolve_project_path(project_root: Path, raw: str) -> Path:
+    path = Path(raw).expanduser()
+    return (path if path.is_absolute() else project_root / path).resolve()
+
+
+def resolve_fingerprint_source(project_root: Path, memory_root: Path, raw: str) -> Path | None:
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        resolved = path.resolve()
+    elif raw.replace("\\", "/").startswith("_bmad/"):
+        resolved = (project_root / path).resolve()
+    else:
+        resolved = (memory_root / path).resolve()
+    project = project_root.resolve()
+    memory = memory_root.resolve()
+    try:
+        resolved.relative_to(project)
+        return resolved
+    except ValueError:
+        try:
+            resolved.relative_to(memory)
+            return resolved
+        except ValueError:
+            return None
 
 
 def resolve_headless_memlog(args: argparse.Namespace) -> Path:
@@ -407,6 +1134,7 @@ def record_headless_context(args: argparse.Namespace, memlog: Path) -> Path:
     defaults = [
         name
         for option, name in [
+            ("--phase", "phase=input"),
             ("--scenario", "scenario=global"),
             ("--as-of", f"as_of={date.today().isoformat()}"),
             ("--max-age-days", "max_age_days=7"),
@@ -420,12 +1148,15 @@ def record_headless_context(args: argparse.Namespace, memlog: Path) -> Path:
     effective_capability = args.capability or SCENARIO_CAPABILITIES[args.scenario]
     effective_memory_root = resolve_memory_root(project_root, args.memory_root)
     scope = {
+        "phase": args.phase,
         "scenario": args.scenario,
         "capability": effective_capability,
         "workstreams": args.workstream or ["all"],
         "memory_root": str(effective_memory_root),
         "as_of": effective_as_of,
         "max_age_days": args.max_age_days,
+        "artifacts": args.artifact or [],
+        "input_audit_json": args.input_audit_json or "",
     }
     memlog = append_headless_memlog(
         args,
@@ -598,6 +1329,8 @@ def build_audit(
     scenario: str,
     as_of: date,
     max_age_days: int,
+    config_script: Path,
+    baseline_script: Path,
 ) -> dict[str, Any]:
     sources = list(prepass.get("sources_read", []))
     workstreams = list(prepass.get("workstreams", []))
@@ -609,6 +1342,7 @@ def build_audit(
     consistency = audit_consistency(prepass, freshness)
     closure = audit_closure(prepass, memory_root, as_of)
     merge_quality = audit_merge_quality(prepass)
+    vnext = audit_vnext_inputs(project_root, memory_root, as_of, config_script, baseline_script)
 
     contract_findings = canonical_findings(
         freshness,
@@ -617,25 +1351,40 @@ def build_audit(
         closure,
         merge_quality,
     )
+    for finding in canonicalize_vnext_findings(vnext["findings"]):
+        group = "blocking_gaps" if finding["severity"] == "blocking" else "warnings"
+        contract_findings[group].append(finding)
     blocking_count = len(contract_findings["blocking_gaps"]) + len(contract_findings["conflicts"])
     warning_count = sum(
         len(contract_findings[group])
         for group in ["warnings", "duplicate_candidates", "overlap_claims", "stale_items"]
     )
     audit_status = "blocked" if blocking_count else ("warning" if warning_count else "pass")
+    all_findings = [item for group in contract_findings.values() for item in group]
+    if any(item.get("execution_disposition") == "blocked" for item in all_findings):
+        execution_disposition = "blocked"
+    elif all_findings:
+        execution_disposition = "degraded"
+    else:
+        execution_disposition = "ready"
     recommended = recommend_workflows(contract_findings, prepass)
     source_inventory_items = canonical_source_inventory(sources, prepass.get("missing_sources", []))
 
-    return {
+    source_fingerprints = collect_source_fingerprints(memory_root, sources, vnext["source_fingerprints"])
+    audit = {
         "ok": True,
+        "audit_type": "input",
         "audit_schema_version": 1,
         "schema_version": 1,
         "prepass_schema_version": prepass.get("schema_version"),
         "audit_status": audit_status,
-        "safe_to_generate": True,
-        "safe_to_generate_green_report": audit_status == "pass",
+        "execution_disposition": execution_disposition,
+        "safe_to_generate": execution_disposition != "blocked",
+        "safe_to_generate_green_report": execution_disposition == "ready" and audit_status == "pass",
         "report_confidence": {"pass": "high", "warning": "medium", "blocked": "low"}[audit_status],
+        "generator_version": GENERATOR_VERSION,
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "as_of": as_of.isoformat(),
         "scenario": scenario,
         "project_root": str(project_root),
         "memory_root": str(memory_root),
@@ -651,6 +1400,12 @@ def build_audit(
             "workstreams": [item.get("id", "") for item in workstreams],
         },
         "source_inventory_items": source_inventory_items,
+        "source_fingerprints": source_fingerprints,
+        "baseline_revision": vnext["baseline_revision"],
+        "baseline_fingerprint": vnext["baseline_fingerprint"],
+        "locale": vnext["locale"],
+        "locale_fallback": vnext["locale_fallback"],
+        "effective_config": vnext["effective_config"],
         **contract_findings,
         "merge_review_evidence": {
             "shared_references": merge_quality["shared_reference_evidence"],
@@ -677,6 +1432,517 @@ def build_audit(
         },
         "recommended_workflows": recommended,
     }
+    audit["input_audit_id"] = stable_input_audit_id(audit)
+    audit["audit_content_hash"] = audit_content_hash(audit)
+    return audit
+
+
+def audit_vnext_inputs(
+    project_root: Path,
+    memory_root: Path,
+    as_of: date,
+    config_script: Path,
+    baseline_script: Path,
+) -> dict[str, Any]:
+    findings: list[dict[str, Any]] = []
+    fingerprints: dict[str, str] = {}
+    config = run_shared_json_script(config_script, [str(project_root)])
+    locale = str(config.get("document_locale") or "en") if config.get("ok") else "en"
+    locale_fallback = bool(config.get("ok") and "document_output_language" in config.get("fallbacks", []))
+    if not config.get("ok"):
+        findings.append(
+            vnext_finding(
+                "config.unavailable",
+                "blocking",
+                "blocked",
+                "shared effective config could not be resolved",
+                str(config_script),
+                "adp-setup",
+            )
+        )
+    elif locale_fallback:
+        findings.append(
+            vnext_finding(
+                "locale.fallback",
+                "warning",
+                "degraded",
+                "document output language fell back to English",
+                str(config.get("value_sources", {}).get("document_output_language", "effective config")),
+                "adp-setup",
+            )
+        )
+    for source in config.get("sources_checked", []) if isinstance(config.get("sources_checked"), list) else []:
+        path = Path(str(source.get("path", "")))
+        if path.is_file():
+            fingerprints[project_relative(project_root, path)] = file_sha256(path)
+
+    baseline_path = memory_root / "plans" / "program-baseline.md"
+    if not baseline_path.is_file():
+        findings.append(
+            vnext_finding(
+                "baseline.missing",
+                "blocking",
+                "blocked",
+                "approved program baseline is missing",
+                rel_to_memory(memory_root, baseline_path),
+                "adp-plan-baseline",
+            )
+        )
+        return {
+            "findings": findings,
+            "baseline_revision": None,
+            "baseline_fingerprint": "",
+            "locale": locale,
+            "locale_fallback": locale_fallback,
+            "effective_config": public_effective_config(config),
+            "source_fingerprints": fingerprints,
+        }
+
+    baseline_fingerprint = file_sha256(baseline_path)
+    fingerprints[rel_to_memory(memory_root, baseline_path)] = baseline_fingerprint
+    validation = run_shared_json_script(
+        baseline_script,
+        ["validate", str(project_root), "--baseline", str(baseline_path)],
+        allow_nonzero=True,
+    )
+    if not validation.get("valid"):
+        details = validation.get("findings") if isinstance(validation.get("findings"), list) else []
+        summary = "; ".join(str(item.get("message", "invalid baseline")) for item in details[:3] if isinstance(item, dict))
+        findings.append(
+            vnext_finding(
+                "baseline.invalid",
+                "blocking",
+                "blocked",
+                summary or str(validation.get("error") or "program baseline validation failed"),
+                rel_to_memory(memory_root, baseline_path),
+                "adp-plan-baseline",
+            )
+        )
+        baseline = parse_program_baseline(baseline_path, tolerate_errors=True)
+    else:
+        baseline = parse_program_baseline(baseline_path)
+    baseline_revision = baseline.get("revision") if isinstance(baseline, dict) else validation.get("baseline_revision")
+    if isinstance(baseline, dict):
+        mapping_findings, wdr_fingerprints = audit_plan_actual_mapping(baseline, memory_root, as_of)
+        findings.extend(mapping_findings)
+        fingerprints.update(wdr_fingerprints)
+    return {
+        "findings": findings,
+        "baseline_revision": baseline_revision,
+        "baseline_fingerprint": baseline_fingerprint,
+        "locale": locale,
+        "locale_fallback": locale_fallback,
+        "effective_config": public_effective_config(config),
+        "source_fingerprints": fingerprints,
+    }
+
+
+def vnext_finding(
+    code: str,
+    severity: str,
+    disposition: str,
+    summary: str,
+    source: str,
+    workflow: str,
+    *,
+    workstream: str = "",
+    gap_type: str = "",
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "severity": severity,
+        "execution_disposition": disposition,
+        "summary": summary,
+        "source": source,
+        "recommended_workflow": workflow,
+        "workstream": workstream,
+        "gap_type": gap_type or code,
+        "category": "vnext_input",
+    }
+
+
+def run_shared_json_script(script: Path, arguments: list[str], allow_nonzero: bool = False) -> dict[str, Any]:
+    if not script.is_file():
+        return {"ok": False, "error": f"required shared script not found: {script}"}
+    completed = subprocess.run([sys.executable, str(script), *arguments], capture_output=True)
+    stdout = decode_process_output(completed.stdout)
+    stderr = decode_process_output(completed.stderr)
+    try:
+        payload = json.loads(stdout or "{}")
+    except json.JSONDecodeError:
+        return {"ok": False, "error": (stderr or stdout or "shared script emitted invalid JSON").strip()}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "shared script JSON must be an object"}
+    if completed.returncode and not allow_nonzero:
+        payload["ok"] = False
+        payload.setdefault("error", stderr.strip() or f"shared script exited {completed.returncode}")
+    return payload
+
+
+def public_effective_config(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "document_locale": str(config.get("document_locale") or "en"),
+        "communication_locale": str(config.get("communication_locale") or "en"),
+        "fallbacks": list(config.get("fallbacks", [])) if isinstance(config.get("fallbacks"), list) else [],
+        "value_sources": dict(config.get("value_sources", {})) if isinstance(config.get("value_sources"), dict) else {},
+    }
+
+
+def parse_program_baseline(path: Path, tolerate_errors: bool = False) -> dict[str, Any]:
+    try:
+        text = read_text(path)
+        marker_index = text.find(BASELINE_MARKER)
+        if marker_index < 0:
+            raise ValueError(f"baseline marker missing: {BASELINE_MARKER}")
+        match = re.search(r"```json\s*(\{.*?\})\s*```", text[marker_index:], re.DOTALL)
+        if not match:
+            raise ValueError("canonical baseline JSON block is missing")
+        value = json.loads(match.group(1))
+        if not isinstance(value, dict):
+            raise ValueError("canonical baseline JSON must be an object")
+        return value
+    except (OSError, ValueError, json.JSONDecodeError):
+        if tolerate_errors:
+            return {}
+        raise
+
+
+def audit_plan_actual_mapping(
+    baseline: dict[str, Any],
+    memory_root: Path,
+    as_of: date,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    findings: list[dict[str, Any]] = []
+    fingerprints: dict[str, str] = {}
+    milestones = {
+        str(item.get("id")): item
+        for item in baseline.get("milestones", [])
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    baseline_revision = baseline.get("revision")
+    mapped_rows: dict[str, list[dict[str, str]]] = defaultdict(list)
+    records = sorted((memory_root / "workstreams").glob("*/delivery-record.md"))
+    for record in records:
+        rel = rel_to_memory(memory_root, record)
+        fingerprints[rel] = file_sha256(record)
+        workstream_id = normalize_workstream_id(record.parent.name)
+        for row in roadmap_rows(record):
+            milestone_id = row_value(row, "milestone id", "milestone_id", "id")
+            status = normalize_status(row_value(row, "status"))
+            forecast = row_value(row, "forecast", "forecast date")
+            actual = row_value(row, "actual", "actual date", "completed")
+            has_actual_state = is_meaningful(forecast) or is_meaningful(actual) or status in {"at-risk", "done", "blocked"}
+            if not milestone_id and has_actual_state:
+                findings.append(
+                    vnext_finding(
+                        "actual.unmapped",
+                        "blocking",
+                        "blocked",
+                        "roadmap actual state has no baseline milestone ID",
+                        rel,
+                        "adp-status-sync",
+                        workstream=workstream_id,
+                    )
+                )
+                continue
+            if not milestone_id:
+                continue
+            row["__source"] = rel
+            row["__workstream"] = workstream_id
+            mapped_rows[milestone_id].append(row)
+            baseline_item = milestones.get(milestone_id)
+            if baseline_item is None and has_actual_state:
+                findings.append(
+                    vnext_finding(
+                        "actual.unmapped",
+                        "blocking",
+                        "blocked",
+                        f"actual state references unknown baseline milestone {milestone_id}",
+                        rel,
+                        "adp-status-sync",
+                        workstream=workstream_id,
+                    )
+                )
+                continue
+            if baseline_item is not None:
+                expected_workstream = normalize_workstream_id(str(baseline_item.get("workstream_id", "")))
+                if expected_workstream != workstream_id:
+                    findings.append(
+                        vnext_finding(
+                            "actual.workstream_mismatch",
+                            "blocking",
+                            "blocked",
+                            f"milestone {milestone_id} belongs to {expected_workstream}, not {workstream_id}",
+                            rel,
+                            "adp-status-sync",
+                            workstream=workstream_id,
+                        )
+                    )
+                row_revision = row_value(row, "baseline revision", "baseline_revision")
+                if has_actual_state and str(row_revision) != str(baseline_revision):
+                    findings.append(
+                        vnext_finding(
+                            "actual.baseline_revision_mismatch",
+                            "blocking",
+                            "blocked",
+                            f"milestone {milestone_id} actual state declares baseline revision {row_revision or 'missing'}, expected {baseline_revision}",
+                            rel,
+                            "adp-status-sync",
+                            workstream=workstream_id,
+                        )
+                    )
+            for field_name, value in [("forecast", forecast), ("actual", actual)]:
+                if is_meaningful(value) and parse_date(value) is None:
+                    findings.append(
+                        vnext_finding(
+                            f"actual.{field_name}_invalid",
+                            "blocking",
+                            "blocked",
+                            f"milestone {milestone_id} has invalid {field_name} date {value!r}",
+                            rel,
+                            "adp-status-sync",
+                            workstream=workstream_id,
+                        )
+                    )
+
+    for milestone_id, rows in mapped_rows.items():
+        if len(rows) > 1:
+            findings.append(
+                vnext_finding(
+                    "actual.duplicate_mapping",
+                    "blocking",
+                    "blocked",
+                    f"milestone {milestone_id} has {len(rows)} actual-state rows",
+                    ", ".join(str(row.get("__source", "")) for row in rows),
+                    "adp-status-sync",
+                    workstream=str(rows[0].get("__workstream", "")),
+                )
+            )
+
+    for milestone_id, milestone in milestones.items():
+        planned = parse_date(milestone.get("planned_date"))
+        raw_tolerance = milestone.get("tolerance_days", baseline.get("default_tolerance_days", 0))
+        tolerance = raw_tolerance if isinstance(raw_tolerance, int) and not isinstance(raw_tolerance, bool) else 0
+        actual_due = planned + timedelta(days=tolerance) if planned is not None else None
+        if actual_due is None or as_of <= actual_due:
+            continue
+        expected_workstream = normalize_workstream_id(str(milestone.get("workstream_id", "")))
+        matching = [
+            row
+            for row in mapped_rows.get(milestone_id, [])
+            if row.get("__workstream") == expected_workstream
+        ]
+        actual = row_value(matching[0], "actual", "actual date", "completed") if matching else ""
+        if not is_meaningful(actual):
+            findings.append(
+                vnext_finding(
+                    "actual.missing",
+                    "warning",
+                    "degraded",
+                    f"milestone {milestone_id} passed actual-date boundary {actual_due.isoformat()} without an actual date",
+                    str(matching[0].get("__source")) if matching else f"workstreams/{expected_workstream}/delivery-record.md",
+                    "adp-status-sync",
+                    workstream=expected_workstream,
+                )
+            )
+    return findings, fingerprints
+
+
+def roadmap_rows(path: Path) -> list[dict[str, str]]:
+    lines = section_text(read_text(path), "Roadmap").splitlines()
+    table_start = next((index for index, line in enumerate(lines) if line.strip().startswith("|")), None)
+    if table_start is None or table_start + 1 >= len(lines):
+        return []
+    headers = [normalize_text_key(value) for value in split_markdown_row(lines[table_start])]
+    rows: list[dict[str, str]] = []
+    for line in lines[table_start + 2 :]:
+        if not line.strip().startswith("|"):
+            break
+        cells = split_markdown_row(line)
+        if len(cells) == len(headers):
+            rows.append(dict(zip(headers, cells, strict=True)))
+    return rows
+
+
+def split_markdown_row(line: str) -> list[str]:
+    text = line.strip().strip("|")
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in text:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    cells.append("".join(current).strip())
+    return cells
+
+
+def row_value(row: dict[str, str], *names: str) -> str:
+    for name in names:
+        value = row.get(normalize_text_key(name), "").strip()
+        if value:
+            return value
+    return ""
+
+
+def normalize_workstream_id(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
+
+
+def canonicalize_vnext_findings(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for item in items:
+        finding = canonical_finding(item, str(item.get("severity") or "warning"), "input_contract")
+        finding["code"] = str(item.get("code") or "input.unknown")
+        finding["execution_disposition"] = str(item.get("execution_disposition") or "degraded")
+        findings.append(finding)
+    return findings
+
+
+def collect_source_fingerprints(
+    memory_root: Path,
+    sources: list[dict[str, Any]],
+    initial: dict[str, str],
+) -> dict[str, str]:
+    fingerprints = dict(initial)
+    for source in sources:
+        rel = str(source.get("path", ""))
+        if is_derived_lineage_path(rel):
+            continue
+        path = resolve_contained_path(memory_root, rel)
+        if path is not None and path.is_file():
+            fingerprints[rel] = file_sha256(path)
+    return dict(sorted(fingerprints.items()))
+
+
+def is_derived_lineage_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").lstrip("./")
+    return normalized.startswith("views/") or normalized.startswith("snapshots/") or normalized.startswith("audits/")
+
+
+def stable_input_audit_id(audit: dict[str, Any]) -> str:
+    identity = {
+        "audit_type": audit.get("audit_type"),
+        "audit_schema_version": audit.get("audit_schema_version"),
+        "schema_version": audit.get("schema_version"),
+        "generator_version": audit.get("generator_version"),
+        "scenario": audit.get("scenario"),
+        "as_of": audit.get("as_of"),
+        "baseline_revision": audit.get("baseline_revision"),
+        "baseline_fingerprint": audit.get("baseline_fingerprint"),
+        "locale": audit.get("locale"),
+        "locale_fallback": audit.get("locale_fallback"),
+        "execution_disposition": audit.get("execution_disposition"),
+        "audit_status": audit.get("audit_status"),
+        "safe_to_generate": audit.get("safe_to_generate"),
+        "safe_to_generate_green_report": audit.get("safe_to_generate_green_report"),
+        "report_confidence": audit.get("report_confidence"),
+        "recommended_workflows": audit.get("recommended_workflows", []),
+        "source_fingerprints": audit.get("source_fingerprints", {}),
+        "findings": sorted(
+            canonical_finding_identity(item)
+            for group in ["blocking_gaps", "warnings", "duplicate_candidates", "overlap_claims", "conflicts", "stale_items"]
+            for item in audit.get(group, [])
+            if isinstance(item, dict)
+        ),
+    }
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"input-audit-{digest[:16]}"
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_finding_identity(finding: dict[str, Any]) -> str:
+    value = {
+        key: finding.get(key)
+        for key in [
+            "id",
+            "code",
+            "severity",
+            "execution_disposition",
+            "kind",
+            "source_type",
+            "sources",
+            "workstreams",
+            "owner",
+            "summary",
+            "category",
+            "gap_type",
+            "recommended_workflow",
+        ]
+    }
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def audit_content_hash(audit: dict[str, Any]) -> str:
+    payload = {key: value for key, value in audit.items() if key not in {"audit_content_hash", "outputs"}}
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def validate_input_audit_integrity(audit: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    required = {
+        "audit_type": "input",
+        "audit_schema_version": 1,
+        "schema_version": 1,
+    }
+    for field_name, expected in required.items():
+        if audit.get(field_name) != expected:
+            errors.append(f"{field_name} must be {expected!r}")
+    for field_name in [
+        "input_audit_id",
+        "audit_content_hash",
+        "generator_version",
+        "scenario",
+        "as_of",
+        "execution_disposition",
+        "audit_status",
+        "safe_to_generate",
+        "safe_to_generate_green_report",
+        "report_confidence",
+        "baseline_revision",
+        "locale",
+        "locale_fallback",
+        "source_fingerprints",
+        "blocking_gaps",
+        "warnings",
+        "recommended_workflows",
+    ]:
+        if field_name not in audit:
+            errors.append(f"{field_name} is required")
+    if "source_fingerprints" in audit and not isinstance(audit["source_fingerprints"], dict):
+        errors.append("source_fingerprints must be an object")
+    if "locale_fallback" in audit and not isinstance(audit["locale_fallback"], bool):
+        errors.append("locale_fallback must be boolean")
+    if audit.get("execution_disposition") not in {"ready", "degraded", "blocked"}:
+        errors.append("execution_disposition is invalid")
+    if not errors and stable_input_audit_id(audit) != audit.get("input_audit_id"):
+        errors.append("input_audit_id does not match canonical audit content")
+    if not errors and audit_content_hash(audit) != audit.get("audit_content_hash"):
+        errors.append("audit_content_hash does not match stored audit content")
+    return errors
+
+
+def project_relative(project_root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return str(path.resolve())
 
 
 def audit_freshness(
@@ -1390,6 +2656,7 @@ def canonical_finding(item: dict[str, Any], severity: str, kind: str) -> dict[st
         "category": str(item.get("category") or kind),
         "gap_type": str(item.get("gap_type") or ""),
         "recommended_workflow": str(item.get("recommended_workflow") or ""),
+        "execution_disposition": str(item.get("execution_disposition") or "degraded"),
     }
     if kind == "conflict":
         finding["details"] = {
@@ -1487,25 +2754,100 @@ def recommend_workflows(
 
 def write_audit_outputs(audit: dict[str, Any], output_dir: Path, as_of: date, scenario: str) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{as_of.isoformat()}-{slugify(scenario)}-audit"
+    if audit.get("audit_type") == "artifact":
+        audit_id = str(audit["artifact_validation_id"])
+        stem = f"{as_of.isoformat()}-{slugify(scenario)}-{audit_id}"
+        id_field = "artifact_validation_id"
+    else:
+        audit_id = str(audit["input_audit_id"])
+        stem = f"{as_of.isoformat()}-{slugify(scenario)}-{audit_id}"
+        id_field = "input_audit_id"
     json_path = output_dir / f"{stem}.json"
     markdown_path = output_dir / f"{stem}.md"
-    json_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-    markdown_path.write_text(render_markdown(audit), encoding="utf-8", newline="\n")
+    json_exists = json_path.exists()
+    markdown_exists = markdown_path.exists()
+    if markdown_exists and not json_exists:
+        raise OSError(f"immutable audit pair is incomplete: {markdown_path}")
+    render_source = audit
+    if json_path.exists():
+        existing = load_json(json_path)
+        if existing.get(id_field) != audit_id:
+            raise OSError(f"immutable audit path collision: {json_path}")
+        expected_id = (
+            stable_artifact_validation_id(existing)
+            if existing.get("audit_type") == "artifact"
+            else stable_input_audit_id(existing)
+        )
+        if expected_id != audit_id or audit_content_hash(existing) != existing.get("audit_content_hash"):
+            raise OSError(f"immutable audit content failed integrity validation: {json_path}")
+        render_source = existing
+    if markdown_path.exists():
+        if read_text(markdown_path) != render_markdown(render_source):
+            raise OSError(f"immutable audit Markdown failed integrity validation: {markdown_path}")
+    json_text = json.dumps(audit, ensure_ascii=False, indent=2) + "\n"
+    markdown_text = render_markdown(render_source)
+    if not json_exists and not markdown_exists:
+        atomic_write_pair(json_path, json_text, markdown_path, markdown_text)
+    elif not markdown_exists:
+        atomic_write_text(markdown_path, markdown_text)
+    else:
+        pass
     return {"json": str(json_path), "markdown": str(markdown_path)}
 
 
+def atomic_write_pair(json_path: Path, json_text: str, markdown_path: Path, markdown_text: str) -> None:
+    json_temp = write_temp_text(json_path, json_text)
+    markdown_temp = write_temp_text(markdown_path, markdown_text)
+    json_published = False
+    try:
+        os.replace(json_temp, json_path)
+        json_published = True
+        os.replace(markdown_temp, markdown_path)
+    except OSError:
+        if json_published and not markdown_path.exists():
+            json_path.unlink(missing_ok=True)
+        raise
+    finally:
+        Path(json_temp).unlink(missing_ok=True)
+        Path(markdown_temp).unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    temp = write_temp_text(path, text)
+    try:
+        os.replace(temp, path)
+    finally:
+        Path(temp).unlink(missing_ok=True)
+
+
+def write_temp_text(path: Path, text: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", dir=path.parent, delete=False) as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return handle.name
+
+
 def render_markdown(audit: dict[str, Any]) -> str:
+    if audit.get("audit_type") == "artifact":
+        return render_artifact_validation_markdown(audit)
     findings = audit["findings"]
     lines = [
         "# ADP State Audit",
         "",
         f"Generated: {audit['generated_at']}",
+        f"Input audit ID: {audit['input_audit_id']}",
         f"Scenario: {audit['scenario']}",
         f"Audit status: {audit['audit_status']}",
+        f"Execution disposition: {audit['execution_disposition']}",
         f"Safe to generate: {str(audit['safe_to_generate']).lower()}",
         f"Safe to generate green report: {str(audit['safe_to_generate_green_report']).lower()}",
         f"Report confidence: {audit['report_confidence']}",
+        f"Baseline revision: {audit['baseline_revision'] if audit['baseline_revision'] is not None else 'missing'}",
+        f"Locale: {audit['locale']}",
+        f"Locale fallback: {str(audit['locale_fallback']).lower()}",
+        f"Generator version: {audit['generator_version']}",
         f"Memory root: `{audit['memory_root']}`",
         "",
         "## Quality Gate",
@@ -1538,6 +2880,41 @@ def render_markdown(audit: dict[str, Any]) -> str:
         lines.extend(f"- `{workflow}`" for workflow in audit["recommended_workflows"])
     else:
         lines.append("- No follow-up workflow required by this audit.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_artifact_validation_markdown(validation: dict[str, Any]) -> str:
+    lines = [
+        "# ADP Artifact Validation",
+        "",
+        f"Generated: {validation['generated_at']}",
+        f"Artifact validation ID: {validation['artifact_validation_id']}",
+        f"Input audit ID: {validation['input_audit_id']}",
+        f"Scenario: {validation['scenario']}",
+        f"Audit status: {validation['audit_status']}",
+        f"Execution disposition: {validation['execution_disposition']}",
+        f"Safe to publish: {str(validation['safe_to_publish']).lower()}",
+        f"Report confidence: {validation['report_confidence']}",
+        f"Baseline revision: {validation['baseline_revision']}",
+        f"Locale: {validation['locale']}",
+        f"Generator version: {validation['generator_version']}",
+        "",
+        "## Validated Artifacts",
+        "",
+    ]
+    if validation["artifacts"]:
+        lines.extend(f"- `{item['path']}` ({item['fingerprint']})" for item in validation["artifacts"])
+    else:
+        lines.append("- No readable artifacts.")
+    lines.append("")
+    add_table(lines, "Blocking Gaps", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings(validation["blocking_gaps"]))
+    add_table(lines, "Warnings", ["Source", "Workstream", "Gap", "Recommended workflow"], flatten_findings(validation["warnings"]))
+    lines.extend(["## Recommended Workflows", ""])
+    if validation["recommended_workflows"]:
+        lines.extend(f"- `{workflow}`" for workflow in validation["recommended_workflows"])
+    else:
+        lines.append("- No follow-up workflow required by this validation.")
     lines.append("")
     return "\n".join(lines)
 
@@ -1838,7 +3215,7 @@ def parse_datetime(value: str) -> datetime | None:
 
 
 def extract_colon_field(text: str, label: str) -> str:
-    pattern = re.compile(rf"^\s*{re.escape(label)}\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+    pattern = re.compile(rf"^\s*(?:[-*+]\s+)?{re.escape(label)}\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
     match = pattern.search(text)
     return match.group(1).strip() if match else ""
 

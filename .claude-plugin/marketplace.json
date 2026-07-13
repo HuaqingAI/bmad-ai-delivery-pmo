@@ -2,19 +2,17 @@
   "name": "ai-delivery-pmo",
   "source": "./",
   "description": "AI Delivery PMO module for coordinating complex FDE delivery programs with shared workstream state, readiness, risks, dependencies, L0 references, and stakeholder readouts.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "plugins": [
     {
       "name": "ai-delivery-pmo",
       "source": "./",
       "description": "AI Delivery PMO module for coordinating complex FDE delivery programs with shared workstream state, readiness, risks, dependencies, L0 references, and stakeholder readouts.",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "skills": [
         "./skills/adp-setup",
         "./skills/adp-project-kickoff",
-        "./skills/adp-state-audit",
-        "./skills/adp-meeting-pack",
-        "./skills/adp-roadmap-sync",
+        "./skills/adp-plan-baseline",
         "./skills/adp-workstream-register",
         "./skills/adp-bmm-checkpoint-sync",
         "./skills/adp-meeting-sync",
@@ -22,6 +20,10 @@
         "./skills/adp-risk-dependency-change-review",
         "./skills/adp-l0-reference-sync",
         "./skills/adp-acceptance-readiness-review",
+        "./skills/adp-state-audit",
+        "./skills/adp-program-status",
+        "./skills/adp-roadmap-sync",
+        "./skills/adp-meeting-pack",
         "./skills/adp-agent-program-lead"
       ]
     }
@@ -29,9 +31,7 @@
   "skills": [
     "./skills/adp-setup",
     "./skills/adp-project-kickoff",
-    "./skills/adp-state-audit",
-    "./skills/adp-meeting-pack",
-    "./skills/adp-roadmap-sync",
+    "./skills/adp-plan-baseline",
     "./skills/adp-workstream-register",
     "./skills/adp-bmm-checkpoint-sync",
     "./skills/adp-meeting-sync",
@@ -39,6 +39,10 @@
     "./skills/adp-risk-dependency-change-review",
     "./skills/adp-l0-reference-sync",
     "./skills/adp-acceptance-readiness-review",
+    "./skills/adp-state-audit",
+    "./skills/adp-program-status",
+    "./skills/adp-roadmap-sync",
+    "./skills/adp-meeting-pack",
     "./skills/adp-agent-program-lead"
   ]
 }

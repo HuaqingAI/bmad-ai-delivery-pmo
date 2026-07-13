@@ -64,14 +64,30 @@ ARTIFACT_LABELS = {
 }
 
 ADP_STATUSES = {"draft", "gap", "ready"}
+CONFIG_KEYS = {
+    "communication_language",
+    "document_output_language",
+    "planning_artifacts",
+    "implementation_artifacts",
+    "default_reporting_cadence",
+    "project_timezone",
+    "timezone",
+}
 
 SKIP_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__"}
 
 DIRECTORIES = [
     "",
+    "plans",
+    "plans/baseline-history",
     "schemas",
+    "snapshots",
+    "snapshots/program-status",
     "l0",
     "meetings",
+    "meetings/raw",
+    "meetings/receipts",
+    "meetings/cursors",
     "decisions",
     "decisions/business-decision-packets",
     "intake",
@@ -90,6 +106,9 @@ TEMPLATE_FILES = [
     "index.md",
     "project-charter.md",
     "cadence.md",
+    "plans/README.md",
+    "schemas/program-baseline.md",
+    "schemas/program-status.md",
     "schemas/workstream-delivery-record.md",
     "schemas/readiness-scorecard.md",
     "schemas/status-taxonomy.md",
@@ -108,6 +127,11 @@ TEMPLATE_FILES = [
     "l0/exceptions-and-open-questions.md",
     "decisions/decision-log.md",
     "actions/action-ledger.md",
+    "intake/program-baseline-candidate.json",
+    "intake/program-baseline-intake.md",
+    "snapshots/program-status/README.md",
+    "views/program-status.md",
+    "views/program-status.json",
     "views/project-lead.md",
     "views/fde-actions.md",
     "views/acceptance-readiness.md",
@@ -118,6 +142,39 @@ TEMPLATE_FILES = [
     "views/roadmap.md",
     "views/roadmap.json",
 ]
+
+WEEKDAY_NAMES = {
+    "mon": "Monday",
+    "monday": "Monday",
+    "tue": "Tuesday",
+    "tuesday": "Tuesday",
+    "wed": "Wednesday",
+    "wednesday": "Wednesday",
+    "thu": "Thursday",
+    "thursday": "Thursday",
+    "fri": "Friday",
+    "friday": "Friday",
+    "sat": "Saturday",
+    "saturday": "Saturday",
+    "sun": "Sunday",
+    "sunday": "Sunday",
+}
+
+
+def parse_fde_days(raw: str) -> str:
+    days: list[str] = []
+    for token in raw.split(","):
+        key = token.strip().lower()
+        if not key:
+            continue
+        day = WEEKDAY_NAMES.get(key)
+        if not day:
+            raise argparse.ArgumentTypeError(f"unsupported weekday: {token.strip()}")
+        if day not in days:
+            days.append(day)
+    if not days:
+        raise argparse.ArgumentTypeError("at least one FDE meeting day is required")
+    return ", ".join(days)
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,8 +197,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cadence",
         choices=["weekly", "biweekly", "custom"],
-        default="weekly",
-        help="Default status cadence marker.",
+        default="",
+        help="Default status cadence marker. Falls back to project config, then weekly.",
+    )
+    parser.add_argument(
+        "--timezone",
+        default="",
+        help="Project timezone label for cadence calculations, for example Asia/Shanghai.",
+    )
+    parser.add_argument(
+        "--fde-days",
+        type=parse_fde_days,
+        default="Monday, Wednesday, Friday",
+        help="Comma-separated recurring FDE meeting weekdays. Default: Monday,Wednesday,Friday.",
+    )
+    parser.add_argument(
+        "--fde-cadence-override",
+        default="",
+        help="Source-backed note describing a long-term departure from the recurring FDE weekdays.",
     )
     parser.add_argument("--source", default="", help="Brief, file path, or note describing kickoff source.")
     parser.add_argument(
@@ -193,23 +266,35 @@ def render_template(text: str, values: dict[str, str]) -> str:
 
 
 def parse_config_file(path: Path) -> dict[str, str]:
-    """Parse simple top-level YAML scalars used by BMad config files."""
+    """Parse simple YAML scalars into dotted keys without external dependencies."""
     values: dict[str, str] = {}
+    sections: list[tuple[int, str]] = []
     for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
+        line = raw_line.split("#", 1)[0].rstrip()
         if not line or line.startswith("#") or ":" not in line:
             continue
-        key, raw_value = line.split(":", 1)
+        indent = len(line) - len(line.lstrip(" "))
+        key, raw_value = line.strip().split(":", 1)
         key = key.strip()
         value = raw_value.strip()
-        if not key or not value:
+        while sections and indent <= sections[-1][0]:
+            sections.pop()
+        if not key:
             continue
-        if "#" in value:
-            value = value.split("#", 1)[0].strip()
+        if not value:
+            sections.append((indent, key))
+            continue
         if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1]
-        values[key] = value
+        dotted_key = ".".join([section for _, section in sections] + [key])
+        values[dotted_key] = value
     return values
+
+
+def config_candidates(key: str) -> tuple[str, ...]:
+    if key == "default_reporting_cadence":
+        return (f"adp.{key}", key)
+    return (key, f"core.{key}", f"adp.{key}", f"bmm.{key}", f"bmb.{key}")
 
 
 def load_bmad_config(project_root: Path) -> tuple[dict[str, str], list[str]]:
@@ -224,6 +309,13 @@ def load_bmad_config(project_root: Path) -> tuple[dict[str, str], list[str]]:
             parsed = parse_config_file(path)
         except UnicodeDecodeError:
             continue
+        for canonical_key in CONFIG_KEYS:
+            if canonical_key in values:
+                continue
+            for candidate in config_candidates(canonical_key):
+                if candidate in parsed:
+                    values[canonical_key] = parsed[candidate]
+                    break
         for key, value in parsed.items():
             values.setdefault(key, value)
     return values, sources
@@ -430,6 +522,24 @@ def write_templates(
             target.write_text(content, encoding="utf-8", newline="\n")
         created.append(str(target))
     return created, existing, errors
+
+
+def describe_baseline_onboarding(memory_root: Path) -> dict[str, Any]:
+    baseline_path = memory_root / "plans" / "program-baseline.md"
+    candidate_path = memory_root / "intake" / "program-baseline-candidate.json"
+    exists = baseline_path.is_file()
+    return {
+        "status": "ready" if exists else "gap",
+        "baseline_exists": exists,
+        "baseline_path": str(baseline_path),
+        "candidate_intake_path": str(candidate_path),
+        "owner_skill": "adp-plan-baseline",
+        "next_action": (
+            "Run adp-plan-baseline validate or inspect."
+            if exists
+            else "Confirm project targets, gates, and milestones, then run adp-plan-baseline propose or create."
+        ),
+    }
 
 
 def as_list(value: Any) -> list[Any]:
@@ -673,6 +783,11 @@ def main() -> int:
     discovered_artifacts = discover_bmad_artifacts(project_root, config_values)
     confirmed_workstreams, workstream_plan_errors = load_workstream_plan(project_root, args.workstream_plan)
     project_name = args.project_name or project_root.name
+    cadence = args.cadence or config_values.get("default_reporting_cadence", "weekly")
+    if cadence not in {"weekly", "biweekly", "custom"}:
+        cadence = "weekly"
+    project_timezone = args.timezone or config_values.get("project_timezone") or config_values.get("timezone") or "TBD"
+    fde_cadence_override = args.fde_cadence_override or "None confirmed"
 
     if workstream_plan_errors:
         result = {
@@ -684,7 +799,7 @@ def main() -> int:
             "memory_root": str(memory_root),
             "project_name": project_name,
             "profile": args.profile,
-            "cadence": args.cadence,
+            "cadence": cadence,
             "non_interactive": bool(args.yes or args.headless),
             "config_sources": config_sources,
             "language": {
@@ -724,7 +839,7 @@ def main() -> int:
             "legacy_memory": legacy_status,
             "project_name": project_name,
             "profile": args.profile,
-            "cadence": args.cadence,
+            "cadence": cadence,
             "non_interactive": False,
             "config_sources": config_sources,
             "language": {
@@ -770,7 +885,7 @@ def main() -> int:
             "legacy_memory": legacy_status,
             "project_name": project_name,
             "profile": args.profile,
-            "cadence": args.cadence,
+            "cadence": cadence,
             "non_interactive": bool(args.yes or args.headless),
             "config_sources": config_sources,
             "language": {
@@ -822,7 +937,7 @@ def main() -> int:
             "legacy_memory": legacy_status,
             "project_name": project_name,
             "profile": args.profile,
-            "cadence": args.cadence,
+            "cadence": cadence,
             "non_interactive": False,
             "config_sources": config_sources,
             "language": {
@@ -863,7 +978,10 @@ def main() -> int:
     values = {
         "PROJECT_NAME": project_name,
         "PROJECT_PROFILE": args.profile,
-        "DEFAULT_CADENCE": args.cadence,
+        "DEFAULT_CADENCE": cadence,
+        "PROJECT_TIMEZONE": project_timezone,
+        "FDE_MEETING_DAYS": args.fde_days,
+        "FDE_CADENCE_OVERRIDE": fde_cadence_override,
         "SOURCE_NOTE": args.source or "TBD",
         "CREATED_AT": now,
         "MEMORY_ROOT": str(memory_root),
@@ -885,6 +1003,7 @@ def main() -> int:
     files_created.extend(plan_files_created)
     files_existing.extend(plan_files_existing)
     errors.extend(plan_errors)
+    baseline_onboarding = describe_baseline_onboarding(memory_root)
 
     result = {
         "ok": not errors,
@@ -896,7 +1015,13 @@ def main() -> int:
         "legacy_memory": legacy_status,
         "project_name": project_name,
         "profile": args.profile,
-        "cadence": args.cadence,
+        "cadence": cadence,
+        "meeting_cadence": {
+            "project_timezone": project_timezone,
+            "fde_meeting_days": [day.strip() for day in args.fde_days.split(",")],
+            "long_term_override": args.fde_cadence_override or None,
+        },
+        "baseline_onboarding": baseline_onboarding,
         "non_interactive": bool(args.yes or args.headless),
         "config_sources": config_sources,
         "language": {
@@ -913,6 +1038,11 @@ def main() -> int:
         "errors": errors,
         "next_actions": [
             "Fill project-charter.md with objective, stakeholders, scope boundaries, and escalation path.",
+            *(
+                [str(baseline_onboarding["next_action"])]
+                if not baseline_onboarding["baseline_exists"]
+                else []
+            ),
             *([] if not legacy_status["migration_note"] else [str(legacy_status["migration_note"])]),
             *(
                 [

@@ -9,6 +9,7 @@ Exit codes: 0=success, 1=validation error, 2=runtime error
 """
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -64,6 +65,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--answers",
         help="Optional answers JSON to validate after overlaying inline or collected values.",
+    )
+    parser.add_argument(
+        "--module-help",
+        help="Source module-help.csv. Defaults beside module.yaml.",
+    )
+    parser.add_argument(
+        "--installed-skills-dir",
+        help="Installed module skill root. Defaults from project config and conventional locations.",
     )
     parser.add_argument("-o", "--output", help="Write JSON output to this file")
     parser.add_argument("--verbose", action="store_true", help="Print diagnostics to stderr")
@@ -201,16 +210,41 @@ def existing_values(
     return core, module
 
 
+def variable_value_error(key: str, value: Any, definition: dict[str, Any]) -> str | None:
+    expected_type = definition.get("type")
+    if expected_type == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
+        return f"{key} must be an integer"
+    if expected_type == "string" and not isinstance(value, str):
+        return f"{key} must be a string"
+    choices = definition.get("choices")
+    if isinstance(choices, list) and value not in choices:
+        return f"{key} must be one of: {', '.join(str(item) for item in choices)}"
+    if isinstance(value, int) and not isinstance(value, bool):
+        minimum = definition.get("minimum")
+        maximum = definition.get("maximum")
+        if isinstance(minimum, int) and value < minimum:
+            return f"{key} must be at least {minimum}"
+        if isinstance(maximum, int) and value > maximum:
+            return f"{key} must be at most {maximum}"
+    return None
+
+
 def choose_defaults(
     variables: dict[str, dict[str, Any]],
     existing_core: dict[str, Any],
     existing_module: dict[str, Any],
     legacy_core: dict[str, Any],
     legacy_module: dict[str, Any],
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]], list[dict[str, str]]]:
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, str]],
+    list[dict[str, str]],
+    list[str],
+]:
     defaults = {"core": {}, "module": {}}
     sources = {"core": {}, "module": {}}
     missing: list[dict[str, str]] = []
+    warnings: list[str] = []
 
     for key, default in CORE_DEFAULTS.items():
         if key in existing_core:
@@ -224,14 +258,30 @@ def choose_defaults(
             sources["core"][key] = "module_default"
 
     for key, definition in variables.items():
-        if key in existing_module:
-            defaults["module"][key] = existing_module[key]
-            sources["module"][key] = "existing"
-        elif key in legacy_module:
-            defaults["module"][key] = legacy_module[key]
-            sources["module"][key] = "legacy"
-        elif "default" in definition:
-            defaults["module"][key] = definition["default"]
+        selected = False
+        for source, candidate_values in (
+            ("existing", existing_module),
+            ("legacy", legacy_module),
+        ):
+            if key not in candidate_values:
+                continue
+            value = candidate_values[key]
+            error = variable_value_error(key, value, definition)
+            if error:
+                warnings.append(f"Ignored invalid {source} value: {error}")
+                continue
+            defaults["module"][key] = value
+            sources["module"][key] = source
+            selected = True
+            break
+        if selected:
+            continue
+        if "default" in definition:
+            value = definition["default"]
+            error = variable_value_error(key, value, definition)
+            if error:
+                fail(f"Invalid module default: {error}", 1)
+            defaults["module"][key] = value
             sources["module"][key] = "module_default"
         else:
             missing.append(
@@ -242,7 +292,7 @@ def choose_defaults(
                 }
             )
 
-    return defaults, sources, missing
+    return defaults, sources, missing, warnings
 
 
 def overlay_answers(
@@ -274,6 +324,12 @@ def answer_validation_errors(
         unknown_keys = sorted(set(values) - allowed[scope])
         if unknown_keys:
             errors.append(f"Unknown {scope} answer keys: {', '.join(unknown_keys)}")
+        if scope == "module":
+            for key, value in values.items():
+                if key in variables:
+                    error = variable_value_error(key, value, variables[key])
+                    if error:
+                        errors.append(error)
     return errors
 
 
@@ -393,6 +449,162 @@ def installed_skills_dir(project_root: Path, config: dict[str, Any]) -> dict[str
     return {"path": str(path.resolve()), "source": f"{source}_default"}
 
 
+def expected_skill_order(module_help_path: Path) -> list[str]:
+    if not module_help_path.is_file():
+        return []
+    try:
+        with module_help_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = csv.DictReader(handle)
+            ordered: list[str] = []
+            for row in rows:
+                skill = str(row.get("skill") or "").strip()
+                if skill and skill not in ordered:
+                    ordered.append(skill)
+            return ordered
+    except OSError as error:
+        fail(f"Could not read {module_help_path}: {error}", 2)
+
+
+def inspect_installed_components(
+    skills_root: Path,
+    expected_skills: list[str],
+    shared_resources: Any,
+    module_help_path: Path,
+) -> dict[str, Any]:
+    skill_rows = []
+    for skill in expected_skills:
+        skill_path = skills_root / skill
+        skill_md = skill_path / "SKILL.md"
+        skill_rows.append(
+            {
+                "skill": skill,
+                "path": str(skill_path.resolve()),
+                "installed": skill_path.is_dir() and skill_md.is_file(),
+            }
+        )
+
+    resource_rows = []
+    if isinstance(shared_resources, list):
+        for item in shared_resources:
+            if not isinstance(item, dict):
+                continue
+            owner = str(item.get("owner_skill") or "").strip()
+            relative = str(item.get("path") or "").strip()
+            resource_path = skills_root / owner / Path(relative)
+            resource_rows.append(
+                {
+                    "owner_skill": owner,
+                    "path": relative,
+                    "purpose": str(item.get("purpose") or ""),
+                    "resolved_path": str(resource_path.resolve()),
+                    "installed": bool(owner and relative and resource_path.is_file()),
+                }
+            )
+
+    missing_skills = [item["skill"] for item in skill_rows if not item["installed"]]
+    missing_resources = [
+        f"{item['owner_skill']}/{item['path']}"
+        for item in resource_rows
+        if not item["installed"]
+    ]
+    help_available = module_help_path.is_file()
+    return {
+        "ready": help_available and not missing_skills and not missing_resources,
+        "module_help_path": str(module_help_path.resolve()),
+        "module_help_available": help_available,
+        "expected_skill_order": expected_skills,
+        "skills": skill_rows,
+        "missing_skills": missing_skills,
+        "shared_resources": resource_rows,
+        "missing_shared_resources": missing_resources,
+    }
+
+
+def version_tuple(value: Any) -> tuple[int, int, int] | None:
+    parts = str(value or "").split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)  # type: ignore[return-value]
+
+
+def memory_upgrade_report(project_root: Path) -> dict[str, Any]:
+    memory_root = project_root / "_bmad-output" / "adp" / "memory"
+    required_paths = [
+        "plans",
+        "plans/baseline-history",
+        "schemas/program-baseline.md",
+        "schemas/program-status.md",
+        "snapshots/program-status",
+        "views/program-status.json",
+        "views/program-status.md",
+        "intake/program-baseline-candidate.json",
+    ]
+    if not memory_root.is_dir():
+        return {
+            "root": str(memory_root.resolve()),
+            "status": "not_initialized",
+            "missing_paths": required_paths,
+            "recommended_workflow": "adp-project-kickoff",
+            "preserved_paths": [],
+        }
+    missing = [item for item in required_paths if not (memory_root / item).exists()]
+    preserved = [str(memory_root.resolve())]
+    baseline = memory_root / "plans" / "program-baseline.md"
+    snapshots = memory_root / "snapshots" / "program-status"
+    if baseline.exists():
+        preserved.append(str(baseline.resolve()))
+    if snapshots.exists():
+        preserved.append(str(snapshots.resolve()))
+    return {
+        "root": str(memory_root.resolve()),
+        "status": "migration_required" if missing else "current",
+        "missing_paths": missing,
+        "recommended_workflow": "adp-project-kickoff" if missing else None,
+        "preserved_paths": preserved,
+    }
+
+
+def build_upgrade_report(
+    config: dict[str, Any],
+    module_code: str,
+    target_version: Any,
+    state: str,
+    sources: dict[str, dict[str, str]],
+    installation: dict[str, Any],
+    project_root: Path,
+) -> dict[str, Any]:
+    module_section = config.get(module_code, {})
+    installed_version = module_section.get("version") if isinstance(module_section, dict) else None
+    installed_tuple = version_tuple(installed_version)
+    target_tuple = version_tuple(target_version)
+    if installed_version is None:
+        version_status = "fresh_install"
+    elif installed_tuple is None or target_tuple is None:
+        version_status = "unknown"
+    elif installed_tuple < target_tuple:
+        version_status = "upgrade"
+    elif installed_tuple > target_tuple:
+        version_status = "newer_installed"
+    else:
+        version_status = "current"
+
+    defaulted_variables = sorted(
+        key
+        for key, source in sources.get("module", {}).items()
+        if source == "module_default"
+    )
+    return {
+        "install_state": state,
+        "installed_version": installed_version,
+        "target_version": target_version,
+        "version_status": version_status,
+        "defaulted_module_variables": defaulted_variables,
+        "installed_components": installation,
+        "memory": memory_upgrade_report(project_root),
+        "project_state_policy": "config/help/resources only; existing ADP memory and baseline are never deleted or overwritten",
+    }
+
+
 def main() -> None:
     args = parse_args()
     reject_unresolved_paths(
@@ -402,6 +614,8 @@ def main() -> None:
             ("--user-config-path", args.user_config_path),
             ("--legacy-dir", args.legacy_dir),
             ("--answers", args.answers),
+            ("--module-help", args.module_help),
+            ("--installed-skills-dir", args.installed_skills_dir),
         ]
     )
 
@@ -414,7 +628,8 @@ def main() -> None:
     )
     legacy_dir = Path(args.legacy_dir).resolve() if args.legacy_dir else project_root / "_bmad"
 
-    module_yaml = load_yaml_file(Path(args.module_yaml), required=True)
+    module_yaml_path = Path(args.module_yaml).resolve()
+    module_yaml = load_yaml_file(module_yaml_path, required=True)
     module_code = module_yaml.get("code")
     if not module_code:
         fail("module.yaml must contain a 'code' field", 1)
@@ -428,7 +643,7 @@ def main() -> None:
     current_core, current_module = existing_values(
         config, user_config, str(module_code), variables
     )
-    defaults, sources, missing = choose_defaults(
+    defaults, sources, missing, config_warnings = choose_defaults(
         variables, current_core, current_module, legacy_core, legacy_module
     )
     provided_answers = load_json_file(Path(args.answers)) if args.answers else {}
@@ -438,17 +653,53 @@ def main() -> None:
     validated_answers = overlay_answers(defaults, provided_answers)
     remaining_missing = remaining_missing_inputs(missing, validated_answers)
     metadata = extract_module_metadata(module_yaml)
+    state = install_state(config, str(module_code), legacy_files)
+    module_help_path = (
+        Path(args.module_help).resolve()
+        if args.module_help
+        else module_yaml_path.parent / "module-help.csv"
+    )
+    if args.installed_skills_dir:
+        skills_dir = {
+            "path": str(Path(args.installed_skills_dir).resolve()),
+            "source": "explicit",
+        }
+    else:
+        skills_dir = installed_skills_dir(project_root, config)
+    installation = inspect_installed_components(
+        Path(skills_dir["path"]),
+        expected_skill_order(module_help_path),
+        module_yaml.get("shared_resources", []),
+        module_help_path,
+    )
     gaps = [
         f"Missing required {item['scope']} value: {item['key']}"
         for item in remaining_missing
     ]
-    skills_dir = installed_skills_dir(project_root, config)
+    if not installation["module_help_available"]:
+        gaps.append(f"Module help source is missing: {installation['module_help_path']}")
+    if installation["missing_skills"]:
+        gaps.append("Missing installed skills: " + ", ".join(installation["missing_skills"]))
+    if installation["missing_shared_resources"]:
+        gaps.append(
+            "Missing shared resources: "
+            + ", ".join(installation["missing_shared_resources"])
+        )
+    upgrade_report = build_upgrade_report(
+        config,
+        str(module_code),
+        metadata.get("version"),
+        state,
+        sources,
+        installation,
+        project_root,
+    )
 
     result = {
         "status": "success",
         "project_root": str(project_root),
         "module": metadata,
-        "install_state": install_state(config, str(module_code), legacy_files),
+        "install_state": state,
         "config_paths": {
             "config_path": str(config_path),
             "user_config_path": str(user_config_path),
@@ -462,18 +713,22 @@ def main() -> None:
         },
         "effective_defaults": defaults,
         "default_sources": sources,
+        "config_warnings": config_warnings,
         "answers_template": defaults,
         "provided_answers": provided_answers,
         "validated_answers": validated_answers,
         "pre_overlay_missing_required_inputs": missing,
         "missing_required_inputs": remaining_missing,
-        "headless_ready": not remaining_missing,
+        "headless_ready": not remaining_missing and installation["ready"],
+        "installation_ready": installation["ready"],
         "unresolved_gaps": gaps,
         "directories_to_create": directories_to_create(
             project_root, str(module_code), metadata, validated_answers, variables
         ),
         "installed_skills_dir": skills_dir["path"],
         "installed_skills_dir_source": skills_dir["source"],
+        "installed_skill_inspection": installation,
+        "upgrade_report": upgrade_report,
     }
     if args.verbose:
         print(

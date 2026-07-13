@@ -54,6 +54,45 @@ class SyncStatusTests(unittest.TestCase):
         record.write_text(text, encoding="utf-8")
         return record
 
+    def create_baseline(self, project_root: Path, revision: int = 3) -> Path:
+        baseline = project_root / "_bmad-output" / "adp" / "memory" / "plans" / "program-baseline.md"
+        baseline.parent.mkdir(parents=True, exist_ok=True)
+        model = {
+            "schema_version": "1.0",
+            "baseline_id": "PROGRAM-BASELINE",
+            "revision": revision,
+            "confirmation_status": "approved",
+            "project": {"name": "Demo", "owner": "PMO"},
+            "default_tolerance_days": 0,
+            "gates": [],
+            "milestones": [
+                {
+                    "id": "MS-CHECKOUT-COMPLETE",
+                    "name": "Checkout migration complete",
+                    "workstream_id": "l1-checkout",
+                    "planned_date": "2026-10-15",
+                    "owner": "Checkout FDE",
+                    "confirmation_status": "approved",
+                    "source": {
+                        "type": "approved-plan",
+                        "reference": "docs/delivery-plan.md#checkout",
+                        "confirmed_by": "PMO",
+                    },
+                    "dependencies": ["GATE-DESIGN-APPROVED"],
+                    "baseline_revision": revision,
+                }
+            ],
+            "critical_path": ["MS-CHECKOUT-COMPLETE"],
+            "weighting": {"enabled": False, "completion_measure": None, "source": None},
+        }
+        baseline.write_text(
+            "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+            + json.dumps(model, indent=2)
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        return baseline
+
     def test_update_replaces_volatile_fields_and_appends_daily_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -196,6 +235,253 @@ class SyncStatusTests(unittest.TestCase):
             daily_log = Path(result["updates"][0]["daily_log"])
             self.assertTrue(daily_log.exists())
             self.assertIn("no reliable field change", daily_log.read_text(encoding="utf-8"))
+
+    def test_milestone_update_maps_to_baseline_and_preserves_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            baseline = self.create_baseline(project_root)
+            baseline_before = baseline.read_text(encoding="utf-8")
+            updates_file = project_root / "milestones.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "baseline_revision": 3,
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "source": "owner update",
+                                "milestones": [
+                                    {
+                                        "milestone_id": "MS-CHECKOUT-COMPLETE",
+                                        "status": "at-risk",
+                                        "forecast": "2026-10-20",
+                                        "evidence": ["workstreams/l1-checkout/evidence.md#forecast-20261020"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["baseline_revision"], 3)
+            self.assertEqual(result["updates"][0]["milestones_updated"], ["MS-CHECKOUT-COMPLETE"])
+            updated = record.read_text(encoding="utf-8")
+            self.assertIn("## Roadmap", updated)
+            self.assertIn("| Milestone ID | Milestone |", updated)
+            self.assertIn(
+                "| MS-CHECKOUT-COMPLETE | Checkout migration complete | checkpoint | at-risk | 2026-10-15 | 2026-10-20 | TBD | Checkout FDE | low | GATE-DESIGN-APPROVED | workstreams/l1-checkout/evidence.md#forecast-20261020 | 3 |",
+                updated,
+            )
+            self.assertEqual(baseline.read_text(encoding="utf-8"), baseline_before)
+            daily_log = Path(result["updates"][0]["daily_log"]).read_text(encoding="utf-8")
+            self.assertIn("MS-CHECKOUT-COMPLETE: at-risk (forecast 2026-10-20)", daily_log)
+            self.assertIn("Evidence: workstreams/l1-checkout/evidence.md#forecast-20261020", daily_log)
+
+    def test_milestone_update_is_idempotent_by_stable_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            self.create_baseline(project_root)
+            updates_file = project_root / "milestones.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "milestones": [
+                                    {
+                                        "milestone_id": "MS-CHECKOUT-COMPLETE",
+                                        "status": "done",
+                                        "actual": "2026-10-14",
+                                        "evidence": "workstreams/l1-checkout/evidence.md#accepted",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command = [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)]
+            subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8")
+            second = subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8")
+            second_result = json.loads(second.stdout)
+
+            self.assertEqual(record.read_text(encoding="utf-8").count("MS-CHECKOUT-COMPLETE"), 1)
+            self.assertEqual(second_result["updates"][0]["milestones_updated"], [])
+
+    def test_milestone_dry_run_preserves_legacy_roadmap_table(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            legacy_roadmap = """
+
+## Roadmap
+
+| Milestone | Type | Status | Planned | Forecast | Actual | Owner | Confidence | Depends On | Source |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Legacy release | delivery-window | planned | 2026-09-01 | TBD | TBD | FDE-A | low | TBD | docs/legacy-plan.md#release |
+"""
+            record = self.create_record(project_root, text=RECORD.replace("\n## Record Rule", legacy_roadmap + "\n## Record Rule"))
+            self.create_baseline(project_root)
+            before = record.read_text(encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "update",
+                    str(project_root),
+                    "--id",
+                    "l1-checkout",
+                    "--milestone-id",
+                    "MS-CHECKOUT-COMPLETE",
+                    "--milestone-status",
+                    "planned",
+                    "--milestone-evidence",
+                    "owner-update#milestone",
+                    "--dry-run",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["dry_run"])
+            self.assertEqual(result["updates"][0]["milestones_updated"], ["MS-CHECKOUT-COMPLETE"])
+            self.assertEqual(record.read_text(encoding="utf-8"), before)
+            self.assertIn("Legacy release", before)
+            self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "daily").exists())
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "update",
+                    str(project_root),
+                    "--id",
+                    "l1-checkout",
+                    "--milestone-id",
+                    "MS-CHECKOUT-COMPLETE",
+                    "--milestone-status",
+                    "planned",
+                    "--milestone-evidence",
+                    "owner-update#milestone",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            migrated = record.read_text(encoding="utf-8")
+            self.assertIn("| Milestone ID | Milestone |", migrated)
+            self.assertIn("|  | Legacy release | delivery-window |", migrated)
+            self.assertIn("| MS-CHECKOUT-COMPLETE | Checkout migration complete |", migrated)
+
+    def test_unknown_milestone_blocks_all_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            self.create_baseline(project_root)
+            before = record.read_text(encoding="utf-8")
+            updates_file = project_root / "invalid.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "owner": "FDE-A",
+                                        "action": "Should not be written",
+                                        "source": "meeting#1",
+                                    }
+                                ],
+                                "milestones": [
+                                    {
+                                        "milestone_id": "MS-UNKNOWN",
+                                        "status": "planned",
+                                        "evidence": ["owner-update#1"],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("unknown baseline milestone MS-UNKNOWN", result["error"])
+            self.assertEqual(record.read_text(encoding="utf-8"), before)
+            self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md").exists())
+            self.assertFalse((project_root / "_bmad-output" / "adp" / "memory" / "daily").exists())
+
+    def test_milestone_workstream_and_revision_must_match_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root, "l2-search", RECORD.replace("l1-checkout", "l2-search"))
+            self.create_baseline(project_root, revision=4)
+            for workstream_id, expected_revision, expected_error in [
+                ("l2-search", 4, "belongs to workstream l1-checkout"),
+                ("l1-checkout", 3, "expected baseline revision 3, found 4"),
+            ]:
+                if workstream_id == "l1-checkout":
+                    self.create_record(project_root)
+                updates_file = project_root / f"invalid-{workstream_id}.json"
+                updates_file.write_text(
+                    json.dumps(
+                        {
+                            "baseline_revision": expected_revision,
+                            "updates": [
+                                {
+                                    "id": workstream_id,
+                                    "milestones": [
+                                        {
+                                            "milestone_id": "MS-CHECKOUT-COMPLETE",
+                                            "status": "planned",
+                                            "evidence": ["owner-update#1"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                completed = subprocess.run(
+                    [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertIn(expected_error, json.loads(completed.stdout)["error"])
 
     def test_updates_file_registers_actions_in_ledger_and_merges_wdr_next_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

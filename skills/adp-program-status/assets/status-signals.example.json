@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "signals": [
+    {
+      "id": "SIG-DESIGN-GATE",
+      "constraint_type": "gate",
+      "constraint_id": "GATE-DESIGN-APPROVED",
+      "status": "on-plan",
+      "critical": true,
+      "summary": "Design gate was approved with linked evidence.",
+      "source": {
+        "type": "decision",
+        "reference": "_bmad-output/adp/memory/decisions/decision-log.md#design-approved"
+      },
+      "observed_at": "2026-09-01",
+      "baseline_revision": 1
+    },
+    {
+      "id": "SIG-PAYMENT-READINESS",
+      "constraint_type": "readiness",
+      "status": "at-risk",
+      "critical": true,
+      "summary": "Payment acceptance evidence is incomplete.",
+      "source": {
+        "type": "readiness",
+        "reference": "_bmad-output/adp/memory/views/acceptance-readiness.md#payment"
+      },
+      "observed_at": "2026-09-08",
+      "baseline_revision": 1
+    }
+  ]
+}

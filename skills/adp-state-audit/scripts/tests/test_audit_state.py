@@ -1,5 +1,6 @@
 import hashlib
 import json
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,15 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "audit_state.py"
+SCRIPT_GLOBALS = runpy.run_path(str(SCRIPT))
+SCENARIO_CAPABILITIES = SCRIPT_GLOBALS["SCENARIO_CAPABILITIES"]
+STABLE_INPUT_AUDIT_ID = SCRIPT_GLOBALS["stable_input_audit_id"]
+AUDIT_CONTENT_HASH = SCRIPT_GLOBALS["audit_content_hash"]
+VALIDATE_RENDER_CONTRACT = SCRIPT_GLOBALS["validate_render_contract"]
+PREPASS_SCRIPT = SCRIPT.parents[2] / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
+LOCALE_CATALOG_PATH = SCRIPT.parents[2] / "adp-plan-baseline" / "assets" / "locale-catalog.json"
+LOCALE_CATALOG = json.loads(LOCALE_CATALOG_PATH.read_text(encoding="utf-8"))
+LOCALE_CATALOG_FINGERPRINT = hashlib.sha256(LOCALE_CATALOG_PATH.read_bytes()).hexdigest()
 
 
 RECORD = """# Workstream Delivery Record
@@ -68,6 +78,26 @@ class AdpStateAuditTests(unittest.TestCase):
         if headless:
             self.assertTrue(result["memlog"])
             self.assertTrue(Path(result["memlog"]).exists())
+
+    def test_scenario_capabilities_are_accepted_by_installed_prepass(self) -> None:
+        project_root = SCRIPT.parents[3]
+        for scenario, capability in SCENARIO_CAPABILITIES.items():
+            with self.subTest(scenario=scenario, capability=capability):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(PREPASS_SCRIPT),
+                        str(project_root),
+                        "--activation",
+                        "--capability",
+                        capability,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
 
     @staticmethod
     def typed_gap(category: str, blocking: bool, workflow: str) -> dict:
@@ -186,6 +216,761 @@ class AdpStateAuditTests(unittest.TestCase):
         )
         return memory_root
 
+    def write_valid_baseline(
+        self,
+        project_root: Path,
+        memory_root: Path,
+        milestones: list[dict] | None = None,
+        *,
+        configure_language: bool = True,
+    ) -> Path:
+        if configure_language:
+            config = project_root / "_bmad" / "adp" / "config.yaml"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(
+                "communication_language: English\ndocument_output_language: English\n",
+                encoding="utf-8",
+            )
+        model = {
+            "schema_version": "1.0",
+            "baseline_id": "PROGRAM-BASELINE",
+            "revision": 1,
+            "confirmation_status": "approved",
+            "project": {
+                "name": "Audit test",
+                "owner": "PMO",
+                "target_date": "2026-12-31",
+                "source": {
+                    "type": "charter",
+                    "reference": "project-charter.md#target",
+                    "confirmed_by": "PMO",
+                },
+            },
+            "default_tolerance_days": 0,
+            "gates": [],
+            "milestones": milestones or [],
+            "critical_path": [item["id"] for item in (milestones or []) if item.get("critical_path")],
+            "weighting": {"enabled": False, "completion_measure": None, "source": None},
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+        baseline = memory_root / "plans" / "program-baseline.md"
+        baseline.parent.mkdir(parents=True, exist_ok=True)
+        baseline.write_text(
+            "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+            + json.dumps(model, indent=2)
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        return baseline
+
+    @staticmethod
+    def milestone(
+        milestone_id: str,
+        workstream_id: str,
+        planned_date: str,
+    ) -> dict:
+        return {
+            "id": milestone_id,
+            "name": milestone_id.replace("-", " ").title(),
+            "workstream_id": workstream_id,
+            "planned_date": planned_date,
+            "owner": "FDE-A",
+            "confirmation_status": "approved",
+            "source": {
+                "type": "approved-plan",
+                "reference": f"project-charter.md#{milestone_id.lower()}",
+                "confirmed_by": "PMO",
+            },
+            "dependencies": [],
+            "critical_path": True,
+            "baseline_revision": 1,
+        }
+
+    def write_minimal_prepass(self, project_root: Path, memory_root: Path, **overrides: object) -> Path:
+        payload = {
+            "ok": True,
+            "schema_version": 2,
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "sources_read": [],
+            "missing_sources": [],
+            "workstreams": [],
+            "gaps": [],
+            "cross_reference_gaps": [],
+            "action_cross_check": [],
+            "ledger_actions": [],
+            "counts": {},
+        }
+        payload.update(overrides)
+        path = project_root / "prepass-vnext.json"
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def seal_input_audit(payload: dict) -> dict:
+        sealed = {
+            "audit_type": "input",
+            "audit_schema_version": 1,
+            "schema_version": 1,
+            "generator_version": "2.0.0",
+            "scenario": "global",
+            "as_of": "2026-07-10",
+            "execution_disposition": "ready",
+            "audit_status": "pass",
+            "safe_to_generate": True,
+            "safe_to_generate_green_report": True,
+            "report_confidence": "high",
+            "recommended_workflows": [],
+            "baseline_revision": 1,
+            "baseline_fingerprint": "baseline-hash",
+            "locale": "en",
+            "locale_fallback": False,
+            "source_fingerprints": {"source.md": "source-hash"},
+            "blocking_gaps": [],
+            "warnings": [],
+            "duplicate_candidates": [],
+            "overlap_claims": [],
+            "conflicts": [],
+            "stale_items": [],
+            **payload,
+        }
+        sealed["input_audit_id"] = STABLE_INPUT_AUDIT_ID(sealed)
+        sealed["audit_content_hash"] = AUDIT_CONTENT_HASH(sealed)
+        return sealed
+
+    @staticmethod
+    def render_contract(locale_value: str) -> dict:
+        title = LOCALE_CATALOG[locale_value]["status.title"]
+        return {
+            "catalog_locale": locale_value,
+            "catalog_fingerprint": LOCALE_CATALOG_FINGERPRINT,
+            "message_keys": ["status.title"],
+            "unresolved_message_keys": [],
+            "source_fact_translation_persisted": False,
+            "localized_system_text": [title],
+        }
+
+    def test_missing_baseline_blocks_input_audit_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            completed = self.run_script(
+                project_root,
+                "--memory-root",
+                str(memory_root),
+                "--prepass-json",
+                str(prepass),
+                "--as-of",
+                "2026-07-10",
+            )
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["audit_type"], "input")
+            self.assertEqual(result["execution_disposition"], "blocked")
+            self.assertFalse(audit["safe_to_generate"])
+            baseline_findings = [item for item in audit["blocking_gaps"] if item.get("code") == "baseline.missing"]
+            self.assertEqual(len(baseline_findings), 1)
+            self.assertEqual(baseline_findings[0]["recommended_workflow"], "adp-plan-baseline")
+
+    def test_due_actual_missing_degrades_but_future_actual_is_not_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(
+                project_root,
+                memory_root,
+                [
+                    self.milestone("MS-DUE", "l1-checkout", "2026-07-01"),
+                    self.milestone("MS-TODAY", "l1-checkout", "2026-07-10"),
+                    {**self.milestone("MS-TOLERANCE", "l1-checkout", "2026-07-05"), "tolerance_days": 7},
+                    self.milestone("MS-FUTURE", "l1-checkout", "2026-08-01"),
+                ],
+            )
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            completed = self.run_script(
+                project_root,
+                "--memory-root",
+                str(memory_root),
+                "--prepass-json",
+                str(prepass),
+                "--as-of",
+                "2026-07-10",
+            )
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+            missing = [item for item in audit["warnings"] if item.get("code") == "actual.missing"]
+
+            self.assertEqual(result["audit_status"], "warning")
+            self.assertEqual(result["execution_disposition"], "degraded")
+            self.assertTrue(audit["safe_to_generate"])
+            self.assertEqual(len(missing), 1)
+            self.assertIn("MS-DUE", missing[0]["summary"])
+            self.assertNotIn("MS-FUTURE", "\n".join(item["summary"] for item in audit["warnings"]))
+            self.assertNotIn("MS-TODAY", "\n".join(item["summary"] for item in audit["warnings"]))
+            self.assertNotIn("MS-TOLERANCE", "\n".join(item["summary"] for item in audit["warnings"]))
+
+    def test_unmapped_actual_blocks_before_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(
+                project_root,
+                memory_root,
+                [self.milestone("MS-DUE", "l1-checkout", "2026-07-01")],
+            )
+            record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record.parent.mkdir(parents=True)
+            record.write_text(
+                "# WDR\n\n## Roadmap\n\n"
+                "| Milestone ID | Milestone | Status | Forecast | Actual | Source |\n"
+                "| --- | --- | --- | --- | --- | --- |\n"
+                "| MS-UNKNOWN | Unknown | done | 2026-07-02 | 2026-07-02 | evidence.md#done |\n",
+                encoding="utf-8",
+            )
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            completed = self.run_script(project_root, "--memory-root", str(memory_root), "--prepass-json", str(prepass), "--as-of", "2026-07-10")
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["execution_disposition"], "blocked")
+            self.assertFalse(audit["safe_to_generate"])
+            self.assertIn("actual.unmapped", {item.get("code") for item in audit["blocking_gaps"]})
+
+    def test_mapped_actual_satisfies_due_milestone_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(
+                project_root,
+                memory_root,
+                [self.milestone("MS-DUE", "l1-checkout", "2026-07-01")],
+            )
+            record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record.parent.mkdir(parents=True)
+            record.write_text(
+                "# WDR\n\n## Roadmap\n\n"
+                "| Milestone ID | Milestone | Status | Forecast | Actual | Source | Baseline Revision |\n"
+                "| --- | --- | --- | --- | --- | --- | --- |\n"
+                "| MS-DUE | Due | done | 2026-07-01 | 2026-07-01 | evidence.md#done | 1 |\n",
+                encoding="utf-8",
+            )
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            completed = self.run_script(project_root, "--memory-root", str(memory_root), "--prepass-json", str(prepass), "--as-of", "2026-07-10")
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["audit_status"], "pass")
+            self.assertEqual(result["execution_disposition"], "ready")
+            self.assertTrue(audit["safe_to_generate_green_report"])
+            self.assertNotIn("actual.missing", {item.get("code") for item in audit["warnings"]})
+
+    def test_mapped_actual_must_match_current_baseline_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root, [self.milestone("MS-DUE", "l1-checkout", "2026-07-01")])
+            record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record.parent.mkdir(parents=True)
+            record.write_text(
+                "# WDR\n\n## Roadmap\n\n"
+                "| Milestone ID | Status | Actual | Source | Baseline Revision |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| MS-DUE | done | 2026-07-01 | evidence.md#done | 0 |\n",
+                encoding="utf-8",
+            )
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            result = json.loads(
+                self.run_script(project_root, "--memory-root", str(memory_root), "--prepass-json", str(prepass), "--as-of", "2026-07-10").stdout
+            )
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["execution_disposition"], "blocked")
+            self.assertIn("actual.baseline_revision_mismatch", {item.get("code") for item in audit["blocking_gaps"]})
+
+    def test_locale_fallback_is_explicit_degraded_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root, configure_language=False)
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            completed = self.run_script(project_root, "--memory-root", str(memory_root), "--prepass-json", str(prepass))
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["execution_disposition"], "degraded")
+            self.assertTrue(audit["locale_fallback"])
+            self.assertIn("locale.fallback", {item.get("code") for item in audit["warnings"]})
+
+    def test_artifact_validation_detects_stale_snapshot_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            audits = memory_root / "audits"
+            snapshots = memory_root / "snapshots" / "program-status"
+            audits.mkdir(parents=True)
+            snapshots.mkdir(parents=True)
+            input_audit = audits / "input.json"
+            sealed_audit = self.seal_input_audit(
+                {
+                    "baseline_revision": 2,
+                    "source_fingerprints": {"plans/program-baseline.md": "abc123"},
+                }
+            )
+            input_audit.write_text(
+                json.dumps(sealed_audit),
+                encoding="utf-8",
+            )
+            artifact = snapshots / "snapshot.json"
+            artifact.write_text(
+                json.dumps(
+                    {
+                        "title": LOCALE_CATALOG["en"]["status.title"],
+                        "generated_at": "2026-06-01T00:00:00Z",
+                        "as_of": "2026-06-01",
+                        "reporting_period": {"start": "2026-05-25", "end": "2026-06-01"},
+                        "report_confidence": "high",
+                        "scenario": "global",
+                        "input_audit_id": sealed_audit["input_audit_id"],
+                        "baseline_revision": 2,
+                        "source_fingerprints": {"plans/program-baseline.md": "abc123"},
+                        "locale": "en",
+                        "locale_fallback": False,
+                        "render_contract": self.render_contract("en"),
+                        "generator_version": "1.0.0",
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = artifact.read_bytes()
+
+            completed = self.run_script(
+                project_root,
+                "--phase",
+                "artifact",
+                "--memory-root",
+                str(memory_root),
+                "--input-audit-json",
+                str(input_audit),
+                "--artifact",
+                str(artifact),
+                "--as-of",
+                "2026-07-10",
+                "--max-age-days",
+                "7",
+            )
+            result = json.loads(completed.stdout)
+            validation = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["audit_type"], "artifact")
+            self.assertEqual(result["execution_disposition"], "degraded")
+            self.assertTrue(result["safe_to_publish"])
+            self.assertIn("artifact.stale_snapshot", {item.get("code") for item in validation["warnings"]})
+            self.assertEqual(artifact.read_bytes(), before)
+            self.assertNotEqual(Path(result["outputs"]["json"]), artifact)
+
+    def test_artifact_locale_and_lineage_mismatch_block_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            input_audit = project_root / "input.json"
+            sealed_audit = self.seal_input_audit(
+                {
+                    "baseline_revision": 1,
+                    "locale": "zh",
+                    "source_fingerprints": {"source.md": "expected"},
+                }
+            )
+            input_audit.write_text(
+                json.dumps(sealed_audit),
+                encoding="utf-8",
+            )
+            artifact = project_root / "artifact.json"
+            artifact.write_text(
+                json.dumps(
+                    {
+                        "title": LOCALE_CATALOG["en"]["status.title"],
+                        "generated_at": "2026-07-10T00:00:00Z",
+                        "as_of": "2026-07-10",
+                        "reporting_period": "2026-07-04/2026-07-10",
+                        "report_confidence": "high",
+                        "scenario": "global",
+                        "input_audit_id": "input-audit-wrong",
+                        "baseline_revision": 1,
+                        "source_fingerprints": {"source.md": "expected"},
+                        "locale": "en",
+                        "locale_fallback": False,
+                        "render_contract": self.render_contract("en"),
+                        "generator_version": "1.0.0",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = self.run_script(
+                project_root,
+                "--phase",
+                "artifact",
+                "--memory-root",
+                str(memory_root),
+                "--input-audit-json",
+                str(input_audit),
+                "--artifact",
+                str(artifact),
+                check=True,
+            )
+            result = json.loads(completed.stdout)
+            validation = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["execution_disposition"], "blocked")
+            self.assertFalse(result["safe_to_publish"])
+            codes = {item.get("code") for item in validation["blocking_gaps"]}
+            self.assertTrue({"artifact.input_audit_mismatch", "artifact.locale_mismatch"}.issubset(codes))
+
+    def test_artifact_validation_detects_sources_changed_after_input_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            source = memory_root / "source.md"
+            source.write_text("current", encoding="utf-8")
+            sealed_audit = self.seal_input_audit({"source_fingerprints": {"source.md": "stale-hash"}})
+            input_audit = project_root / "input.json"
+            input_audit.write_text(json.dumps(sealed_audit), encoding="utf-8")
+            artifact = project_root / "artifact.json"
+            artifact.write_text(
+                json.dumps(
+                    {
+                        "title": LOCALE_CATALOG["en"]["status.title"],
+                        "generated_at": "2026-07-10T00:00:00Z",
+                        "as_of": "2026-07-10",
+                        "reporting_period": "2026-07-04/2026-07-10",
+                        "report_confidence": "high",
+                        "scenario": "global",
+                        "input_audit_id": sealed_audit["input_audit_id"],
+                        "baseline_revision": 1,
+                        "source_fingerprints": {"source.md": "stale-hash"},
+                        "locale": "en",
+                        "locale_fallback": False,
+                        "render_contract": self.render_contract("en"),
+                        "generator_version": "1.0.0",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            validation = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(result["execution_disposition"], "degraded")
+            self.assertIn("artifact.input_sources_changed", {item.get("code") for item in validation["warnings"]})
+
+    def test_localized_markdown_uses_stable_machine_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            source = memory_root / "source.md"
+            source.write_text("事实", encoding="utf-8")
+            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            sealed_audit = self.seal_input_audit(
+                {"locale": "zh", "scenario": "roadmap", "source_fingerprints": {"source.md": source_hash}}
+            )
+            input_audit = project_root / "input.json"
+            input_audit.write_text(json.dumps(sealed_audit, ensure_ascii=False), encoding="utf-8")
+            metadata = {
+                "generated_at": "2026-07-10T00:00:00Z",
+                "as_of": "2026-07-10",
+                "reporting_period": "2026-07-04/2026-07-10",
+                "report_confidence": "high",
+                "scenario": "roadmap",
+                "input_audit_id": sealed_audit["input_audit_id"],
+                "baseline_revision": 1,
+                "source_fingerprints": {"source.md": source_hash},
+                "locale": "zh",
+                "locale_fallback": False,
+                "render_contract": self.render_contract("zh"),
+                "generator_version": "1.0.0",
+            }
+            artifact = project_root / "状态.md"
+            artifact.write_text(
+                f"# {LOCALE_CATALOG['zh']['status.title']}\n\n<!-- adp:artifact-metadata:v1 -->\n\n```json\n"
+                + json.dumps(metadata, ensure_ascii=False, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+
+            result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+
+            self.assertEqual(result["audit_status"], "pass")
+            self.assertEqual(result["execution_disposition"], "ready")
+            self.assertEqual(result["scenario"], "roadmap")
+            self.assertTrue(result["safe_to_publish"])
+
+            artifact.write_text(
+                "# Project Status\n\n<!-- adp:artifact-metadata:v1 -->\n\n```json\n"
+                + json.dumps(metadata, ensure_ascii=False, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            negative = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            negative_validation = json.loads(Path(negative["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(negative["execution_disposition"], "blocked")
+            self.assertIn("artifact.render_contract_invalid", {item.get("code") for item in negative_validation["blocking_gaps"]})
+
+    def test_known_render_profile_rejects_underdeclared_message_coverage(self) -> None:
+        contract = self.render_contract("en")
+        contract["coverage_profile"] = "adp-program-status-markdown"
+
+        errors = VALIDATE_RENDER_CONTRACT(
+            contract,
+            "en",
+            LOCALE_CATALOG["en"]["status.title"],
+            LOCALE_CATALOG,
+            LOCALE_CATALOG_FINGERPRINT,
+        )
+
+        self.assertTrue(any("missing required message keys" in error for error in errors))
+        self.assertTrue(any("missing message-key families" in error for error in errors))
+
+    def test_forged_input_audit_and_invalid_generated_at_are_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            sealed_audit = self.seal_input_audit({})
+            input_audit = project_root / "input.json"
+            forged = dict(sealed_audit)
+            forged["locale"] = "zh"
+            input_audit.write_text(json.dumps(forged), encoding="utf-8")
+            artifact = project_root / "artifact.json"
+            artifact.write_text("{}", encoding="utf-8")
+
+            forged_result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    check=False,
+                ).stdout
+            )
+            self.assert_failure_contract(forged_result)
+            self.assertEqual(forged_result["audit_type"], "artifact")
+            self.assertFalse(forged_result["safe_to_publish"])
+
+            input_audit.write_text(json.dumps(sealed_audit), encoding="utf-8")
+            metadata = {
+                "title": LOCALE_CATALOG["en"]["status.title"],
+                "generated_at": "not-a-time",
+                "as_of": "2026-07-10",
+                "reporting_period": "2026-07-04/2026-07-10",
+                "report_confidence": "high",
+                "scenario": "global",
+                "input_audit_id": sealed_audit["input_audit_id"],
+                "baseline_revision": 1,
+                "source_fingerprints": {"source.md": "source-hash"},
+                "locale": "en",
+                "locale_fallback": False,
+                "render_contract": self.render_contract("en"),
+                "generator_version": "1.0.0",
+            }
+            artifact.write_text(json.dumps(metadata), encoding="utf-8")
+            invalid_result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            validation = json.loads(Path(invalid_result["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(invalid_result["execution_disposition"], "blocked")
+            self.assertIn("artifact.generated_at_invalid", {item.get("code") for item in validation["blocking_gaps"]})
+
+            metadata["generated_at"] = "2026-07-11T00:00:00Z"
+            artifact.write_text(json.dumps(metadata), encoding="utf-8")
+            future_result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            future_validation = json.loads(Path(future_result["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertIn("artifact.generated_at_future", {item.get("code") for item in future_validation["blocking_gaps"]})
+
+    def test_tampered_immutable_audit_is_rejected_on_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root)
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+            args = ("--memory-root", str(memory_root), "--prepass-json", str(prepass), "--as-of", "2026-07-10")
+            first = json.loads(self.run_script(project_root, *args).stdout)
+            audit_path = Path(first["outputs"]["json"])
+            payload = json.loads(audit_path.read_text(encoding="utf-8"))
+            payload["execution_disposition"] = "blocked"
+            audit_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+            second_run = self.run_script(project_root, *args, check=False)
+            second = json.loads(second_run.stdout)
+
+            self.assertEqual(second_run.returncode, 2)
+            self.assert_failure_contract(second)
+            self.assertIn("integrity validation", second["error"])
+
+    def test_stable_audit_id_changes_when_gate_semantics_change(self) -> None:
+        base = self.seal_input_audit(
+            {
+                "audit_status": "warning",
+                "execution_disposition": "degraded",
+                "warnings": [
+                    {
+                        "id": "finding-1",
+                        "code": "actual.missing",
+                        "severity": "warning",
+                        "execution_disposition": "degraded",
+                        "kind": "input_contract",
+                        "source_type": "fact",
+                        "sources": ["workstreams/l1/delivery-record.md"],
+                        "workstreams": ["l1"],
+                        "owner": "FDE-A",
+                        "summary": "actual is missing",
+                        "category": "vnext_input",
+                        "gap_type": "actual.missing",
+                        "recommended_workflow": "adp-status-sync",
+                    }
+                ],
+            }
+        )
+        changed = json.loads(json.dumps(base))
+        changed["warnings"][0]["execution_disposition"] = "blocked"
+
+        self.assertNotEqual(STABLE_INPUT_AUDIT_ID(base), STABLE_INPUT_AUDIT_ID(changed))
+
+    def test_input_audit_is_stable_and_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root)
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+            args = ("--memory-root", str(memory_root), "--prepass-json", str(prepass), "--as-of", "2026-07-10")
+
+            first = json.loads(self.run_script(project_root, *args).stdout)
+            first_path = Path(first["outputs"]["json"])
+            first_bytes = first_path.read_bytes()
+            second = json.loads(self.run_script(project_root, *args).stdout)
+
+            self.assertEqual(first["input_audit_id"], second["input_audit_id"])
+            self.assertEqual(first["outputs"], second["outputs"])
+            self.assertEqual(first_path.read_bytes(), first_bytes)
+
+    def test_input_audit_fingerprints_only_durable_fact_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            (memory_root / "views").mkdir(parents=True)
+            (memory_root / "decisions").mkdir(parents=True)
+            (memory_root / "views" / "program-status.json").write_text("{}", encoding="utf-8")
+            (memory_root / "decisions" / "decision-log.md").write_text("# Decisions", encoding="utf-8")
+            self.write_valid_baseline(project_root, memory_root)
+            prepass = self.write_minimal_prepass(
+                project_root,
+                memory_root,
+                sources_read=[
+                    {"path": "views/program-status.json", "modified": "2026-07-10"},
+                    {"path": "decisions/decision-log.md", "modified": "2026-07-10"},
+                ],
+            )
+
+            result = json.loads(self.run_script(project_root, "--memory-root", str(memory_root), "--prepass-json", str(prepass)).stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertNotIn("views/program-status.json", audit["source_fingerprints"])
+            self.assertIn("decisions/decision-log.md", audit["source_fingerprints"])
+
     def test_writes_audit_artifacts_and_reports_quality_categories(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -213,6 +998,7 @@ class AdpStateAuditTests(unittest.TestCase):
             required_finding_fields = {
                 "id",
                 "severity",
+                "execution_disposition",
                 "kind",
                 "source_type",
                 "sources",
@@ -233,6 +1019,7 @@ class AdpStateAuditTests(unittest.TestCase):
                     self.assertTrue(required_finding_fields.issubset(finding), (group, finding))
             self.assertIn("adp-status-sync", result["recommended_workflows"])
             self.assertEqual(Path(result["outputs"]["json"]).parent, memory_root / "audits")
+            self.assertTrue(audit["input_audit_id"].startswith("input-audit-"))
 
     def test_terminal_business_decision_statuses_are_closed(self) -> None:
         terminal_statuses = ["accepted", "closed", "done", "cancelled", "rejected", "superseded"]
@@ -532,6 +1319,7 @@ class AdpStateAuditTests(unittest.TestCase):
             project_root = Path(temp_dir)
             memory_root = project_root / "memory"
             memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root)
             prepass_path = project_root / "prepass.json"
             prepass_path.write_text(
                 json.dumps(
@@ -644,6 +1432,7 @@ class AdpStateAuditTests(unittest.TestCase):
             project_root = Path(temp_dir)
             memory_root = project_root / "memory"
             memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root)
             typed_gap = {
                 "gap": "owner is missing",
                 "category": "completeness",
@@ -699,6 +1488,7 @@ class AdpStateAuditTests(unittest.TestCase):
             project_root = Path(temp_dir)
             memory_root = project_root / "memory"
             memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root)
             gaps = [
                 self.typed_gap("freshness", True, "wf-freshness"),
                 self.typed_gap("completeness", False, "wf-completeness"),

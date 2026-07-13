@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib.util
 import json
 import sys
 from datetime import datetime, timezone
@@ -15,10 +16,8 @@ from pathlib import Path
 from typing import Any
 
 
-REPORT_TITLES = {
-    "acceptance": "Acceptance Readiness Report",
-    "cutover": "Cutover Readiness Report",
-}
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 VALID_ROADMAP_STATUSES = {"planned", "at-risk", "done", "blocked"}
 GENERATED_START = "<!-- ADP readiness generated: start -->"
 GENERATED_END = "<!-- ADP readiness generated: end -->"
@@ -51,6 +50,8 @@ def parse_args() -> argparse.Namespace:
         help="Also update workstreams/{id}/readiness.md with a generated score/gap block.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Return planned report paths without writing files.")
+    parser.add_argument("--language", help="Override document_output_language for this derived view.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
@@ -108,7 +109,7 @@ def score_text(section: dict[str, Any]) -> str:
     return f"{score} / {max_score}" if max_score else score
 
 
-def primary_gap(section: dict[str, Any]) -> str:
+def primary_gap(section: dict[str, Any], message) -> str:
     gaps = section.get("gaps") or []
     if gaps:
         first = gaps[0]
@@ -119,7 +120,7 @@ def primary_gap(section: dict[str, Any]) -> str:
     for item in dimensions:
         if isinstance(item, dict) and text(item.get("gap"), "") not in {"", "TBD", "None"}:
             return text(item.get("gap"))
-    return "None reported"
+    return message("common.none_reported")
 
 
 def rows(items: list[Any], columns: list[tuple[str, str]]) -> list[str]:
@@ -131,16 +132,16 @@ def rows(items: list[Any], columns: list[tuple[str, str]]) -> list[str]:
     return rendered
 
 
-def table(title: str, items: list[Any], columns: list[tuple[str, str]]) -> list[str]:
+def table(title: str, items: list[Any], columns: list[tuple[str, str]], message) -> list[str]:
     if not items:
-        return [f"### {title}", "", "- None reported.", ""]
+        return [f"### {title}", "", f"- {message('common.none_reported')}", ""]
     header = "| " + " | ".join(label for _, label in columns) + " |"
     sep = "| " + " | ".join("---" for _ in columns) + " |"
     return [f"### {title}", "", header, sep, *rows(items, columns), ""]
 
 
-def render_markdown(packet: dict[str, Any], report_type: str) -> str:
-    title = REPORT_TITLES[report_type]
+def render_markdown(packet: dict[str, Any], report_type: str, message) -> str:
+    title = message(f"readiness.title.{report_type}")
     generated = text(
         packet.get("generated_at"),
         datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
@@ -148,17 +149,17 @@ def render_markdown(packet: dict[str, Any], report_type: str) -> str:
     lines = [
         f"# {title}",
         "",
-        f"- Project: {text(packet.get('project_name'), 'ADP project')}",
-        f"- Generated: {generated}",
-        f"- Source: {text(packet.get('source'), 'ADP readiness review')}",
+        f"- {message('common.project')}: {text(packet.get('project_name'), message('common.adp_project'))}",
+        f"- {message('common.generated')}: {generated}",
+        f"- {message('common.source')}: {text(packet.get('source'), message('readiness.default_source'))}",
         "",
-        "## Summary",
+        f"## {message('common.summary')}",
         "",
-        text(packet.get(f"{report_type}_summary") or packet.get("summary"), "No summary provided."),
+        text(packet.get(f"{report_type}_summary") or packet.get("summary"), message("common.no_summary")),
         "",
-        "## Workstreams",
+        f"## {message('common.workstreams')}",
         "",
-        "| Workstream | Owner | Score | Status | Roadmap Status | Primary gap |",
+        "| " + " | ".join(message(key) for key in ["common.workstream", "common.owner", "common.score", "common.status", "readiness.roadmap_status", "readiness.primary_gap"]) + " |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for workstream in packet["workstreams"]:
@@ -172,7 +173,7 @@ def render_markdown(packet: dict[str, Any], report_type: str) -> str:
                     escape_md(score_text(section)),
                     escape_md(section.get("status")),
                     escape_md(section.get("roadmap_status")),
-                    escape_md(primary_gap(section)),
+                    escape_md(primary_gap(section, message)),
                 ],
             )
             + " |",
@@ -184,158 +185,166 @@ def render_markdown(packet: dict[str, Any], report_type: str) -> str:
             [
                 f"## {text(workstream.get('id'))} - {text(workstream.get('name'))}",
                 "",
-                f"- Owner: {text(workstream.get('owner'))}",
-                f"- Score: {score_text(section)}",
-                f"- Status: {text(section.get('status'))}",
-                f"- Roadmap status: {text(section.get('roadmap_status'))}",
+                f"- {message('common.owner')}: {text(workstream.get('owner'))}",
+                f"- {message('common.score')}: {score_text(section)}",
+                f"- {message('common.status')}: {text(section.get('status'))}",
+                f"- {message('readiness.roadmap_status')}: {text(section.get('roadmap_status'))}",
             ],
         )
         if report_type == "cutover":
-            lines.append(f"- Go/no-go: {text(section.get('go_no_go'))}")
+            lines.append(f"- {message('readiness.go_no_go')}: {text(section.get('go_no_go'))}")
         lines.append("")
         lines.extend(
             table(
-                "Dimension Scores",
+                message("readiness.dimension_scores"),
                 section.get("dimensions") or [],
                 [
-                    ("dimension", "Dimension"),
-                    ("score", "Score"),
-                    ("gap", "Gap"),
-                    ("owner", "Owner"),
-                    ("action", "Action"),
-                    ("due", "Due / Trigger"),
-                    ("severity", "Severity"),
+                    ("dimension", message("common.dimension")),
+                    ("score", message("common.score")),
+                    ("gap", message("common.gap")),
+                    ("owner", message("common.owner")),
+                    ("action", message("common.action")),
+                    ("due", message("common.due_trigger")),
+                    ("severity", message("common.severity")),
                 ],
+                message,
             ),
         )
         lines.extend(
             table(
-                "Evidence Coverage",
+                message("readiness.evidence_coverage"),
                 workstream.get("evidence") or [],
                 [
-                    ("criterion", "Acceptance Criterion"),
-                    ("proof", "Proof"),
-                    ("status", "Status"),
-                    ("gap", "Gap"),
+                    ("criterion", message("readiness.acceptance_criterion")),
+                    ("proof", message("readiness.proof")),
+                    ("status", message("common.status")),
+                    ("gap", message("common.gap")),
                 ],
+                message,
             ),
         )
         lines.extend(
             table(
-                "Pending Confirmations",
+                message("readiness.pending_confirmations"),
                 workstream.get("confirmations") or [],
                 [
-                    ("item", "Item"),
-                    ("owner", "Owner"),
-                    ("status", "Status"),
-                    ("action", "Action"),
+                    ("item", message("common.item")),
+                    ("owner", message("common.owner")),
+                    ("status", message("common.status")),
+                    ("action", message("common.action")),
                 ],
+                message,
             ),
         )
         lines.extend(
             table(
-                "Gap Actions",
+                message("readiness.gap_actions"),
                 section.get("gaps") or [],
                 [
-                    ("gap", "Gap"),
-                    ("dimension", "Dimension"),
-                    ("owner", "Owner"),
-                    ("action", "Action"),
-                    ("due", "Due / Trigger"),
-                    ("severity", "Severity"),
-                    ("escalation", "Escalation"),
+                    ("gap", message("common.gap")),
+                    ("dimension", message("common.dimension")),
+                    ("owner", message("common.owner")),
+                    ("action", message("common.action")),
+                    ("due", message("common.due_trigger")),
+                    ("severity", message("common.severity")),
+                    ("escalation", message("common.escalation")),
                 ],
+                message,
             ),
         )
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_readiness_block(workstream: dict[str, Any]) -> str:
+def render_readiness_block(workstream: dict[str, Any], message) -> str:
     acceptance = workstream.get("acceptance") if isinstance(workstream.get("acceptance"), dict) else {}
     cutover = workstream.get("cutover") if isinstance(workstream.get("cutover"), dict) else {}
     lines = [
         GENERATED_START,
         "",
-        "## Generated Readiness Review",
+        f"## {message('readiness.generated_review')}",
         "",
-        f"- Workstream: {text(workstream.get('id'))} - {text(workstream.get('name'))}",
-        f"- Owner: {text(workstream.get('owner'))}",
-        f"- Acceptance score: {score_text(acceptance)}",
-        f"- Acceptance status: {text(acceptance.get('status'))}",
-        f"- Acceptance roadmap status: {text(acceptance.get('roadmap_status'))}",
+        f"- {message('common.workstream')}: {text(workstream.get('id'))} - {text(workstream.get('name'))}",
+        f"- {message('common.owner')}: {text(workstream.get('owner'))}",
+        f"- {message('readiness.acceptance_score')}: {score_text(acceptance)}",
+        f"- {message('readiness.acceptance_status')}: {text(acceptance.get('status'))}",
+        f"- {message('readiness.acceptance_roadmap_status')}: {text(acceptance.get('roadmap_status'))}",
     ]
     if cutover:
         lines.extend(
             [
-                f"- Cutover score: {score_text(cutover)}",
-                f"- Cutover status: {text(cutover.get('status'))}",
-                f"- Cutover roadmap status: {text(cutover.get('roadmap_status'))}",
-                f"- Go/no-go: {text(cutover.get('go_no_go'))}",
+                f"- {message('readiness.cutover_score')}: {score_text(cutover)}",
+                f"- {message('readiness.cutover_status')}: {text(cutover.get('status'))}",
+                f"- {message('readiness.cutover_roadmap_status')}: {text(cutover.get('roadmap_status'))}",
+                f"- {message('readiness.go_no_go')}: {text(cutover.get('go_no_go'))}",
             ],
         )
     lines.append("")
-    for title, section in [("Acceptance Dimensions", acceptance), ("Cutover Dimensions", cutover)]:
+    for title_key, gap_title_key, section in [("readiness.acceptance_dimensions", "readiness.acceptance_gap_actions", acceptance), ("readiness.cutover_dimensions", "readiness.cutover_gap_actions", cutover)]:
         if not section:
             continue
         lines.extend(
             table(
-                title,
+                message(title_key),
                 section.get("dimensions") or [],
                 [
-                    ("dimension", "Dimension"),
-                    ("score", "Score"),
-                    ("gap", "Gap"),
-                    ("owner", "Owner"),
-                    ("action", "Action"),
-                    ("due", "Due / Trigger"),
-                    ("severity", "Severity"),
+                    ("dimension", message("common.dimension")),
+                    ("score", message("common.score")),
+                    ("gap", message("common.gap")),
+                    ("owner", message("common.owner")),
+                    ("action", message("common.action")),
+                    ("due", message("common.due_trigger")),
+                    ("severity", message("common.severity")),
                 ],
+                message,
             ),
         )
         lines.extend(
             table(
-                title.replace("Dimensions", "Gap Actions"),
+                message(gap_title_key),
                 section.get("gaps") or [],
                 [
-                    ("gap", "Gap"),
-                    ("dimension", "Dimension"),
-                    ("owner", "Owner"),
-                    ("action", "Action"),
-                    ("due", "Due / Trigger"),
-                    ("severity", "Severity"),
-                    ("escalation", "Escalation"),
+                    ("gap", message("common.gap")),
+                    ("dimension", message("common.dimension")),
+                    ("owner", message("common.owner")),
+                    ("action", message("common.action")),
+                    ("due", message("common.due_trigger")),
+                    ("severity", message("common.severity")),
+                    ("escalation", message("common.escalation")),
                 ],
+                message,
             ),
         )
     lines.extend(
         table(
-            "Evidence Coverage",
+            message("readiness.evidence_coverage"),
             workstream.get("evidence") or [],
             [
-                ("criterion", "Acceptance Criterion"),
-                ("proof", "Proof"),
-                ("status", "Status"),
-                ("gap", "Gap"),
+                ("criterion", message("readiness.acceptance_criterion")),
+                ("proof", message("readiness.proof")),
+                ("status", message("common.status")),
+                ("gap", message("common.gap")),
             ],
+            message,
         ),
     )
     lines.extend(
         table(
-            "Pending Confirmations",
+            message("readiness.pending_confirmations"),
             workstream.get("confirmations") or [],
             [
-                ("item", "Item"),
-                ("owner", "Owner"),
-                ("status", "Status"),
-                ("action", "Action"),
+                ("item", message("common.item")),
+                ("owner", message("common.owner")),
+                ("status", message("common.status")),
+                ("action", message("common.action")),
             ],
+            message,
         ),
     )
     lines.append(GENERATED_END)
     return "\n".join(lines).rstrip() + "\n"
 
 
-def replace_generated_block(existing: str, generated: str) -> str:
+def replace_generated_block(existing: str, generated: str, message) -> str:
     if GENERATED_START in existing and GENERATED_END in existing:
         before = existing.split(GENERATED_START, 1)[0].rstrip()
         after = existing.split(GENERATED_END, 1)[1].lstrip()
@@ -343,22 +352,22 @@ def replace_generated_block(existing: str, generated: str) -> str:
         return "\n\n".join(parts) + "\n"
     if existing.strip():
         return existing.rstrip() + "\n\n" + generated
-    return "# Readiness\n\n" + generated
+    return f"# {message('readiness.readiness')}\n\n" + generated
 
 
-def write_workstream_readiness(memory_root: Path, workstream: dict[str, Any], dry_run: bool) -> dict[str, str]:
+def write_workstream_readiness(memory_root: Path, workstream: dict[str, Any], dry_run: bool, message) -> dict[str, str]:
     workstream_id = text(workstream.get("id"), "")
     if not workstream_id:
         raise ValueError("workstream id is required to write readiness.md")
     path = memory_root / "workstreams" / workstream_id / "readiness.md"
-    generated = render_readiness_block(workstream)
+    generated = render_readiness_block(workstream, message)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    content = replace_generated_block(existing, generated)
+    content = replace_generated_block(existing, generated, message)
     status = write_report(path, content, dry_run)
     return {"workstream_id": workstream_id, "path": str(path), "status": status}
 
 
-def render_html(markdown: str, title: str) -> str:
+def render_html(markdown: str, title: str, locale: str) -> str:
     body_lines = []
     in_table = False
     for line in markdown.splitlines():
@@ -402,7 +411,7 @@ def render_html(markdown: str, title: str) -> str:
         body_lines.append("</table>")
     body = "\n".join(body_lines)
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{locale}">
 <head>
   <meta charset="utf-8">
   <title>{html.escape(title)}</title>
@@ -438,7 +447,7 @@ def emit(result: dict[str, Any], output: str | None) -> None:
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
     else:
-        print(payload)
+        sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
 
 
 def main() -> int:
@@ -447,6 +456,14 @@ def main() -> int:
     if not project_root.is_dir():
         emit({"ok": False, "error": "project_root is not an existing directory"}, args.output)
         return 2
+    config_module = load_module(Path(args.config_script), "adp_readiness_effective_config")
+    overrides = {"document_output_language": args.language} if args.language else None
+    config_code, config = config_module.resolve_effective_config(project_root, overrides)
+    if config_code != 0 or not config.get("ok"):
+        emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
+        return 2
+    locale = str(config.get("document_locale") or "en")
+    message = lambda key: config_module.message(key, locale)
     try:
         packet = load_packet(resolve_path(project_root, args.input))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -458,8 +475,8 @@ def main() -> int:
     report_types = ["acceptance", "cutover"] if args.mode == "both" else [args.mode]
     reports = []
     for report_type in report_types:
-        markdown = render_markdown(packet, report_type)
-        html_doc = render_html(markdown, REPORT_TITLES[report_type])
+        markdown = render_markdown(packet, report_type, message)
+        html_doc = render_html(markdown, message(f"readiness.title.{report_type}"), locale)
         for suffix, content in [("md", markdown), ("html", html_doc)]:
             path = output_dir / f"{report_type}-readiness.{suffix}"
             status = write_report(path, content, args.dry_run)
@@ -469,7 +486,7 @@ def main() -> int:
     readiness_updates = []
     if args.write_workstream_readiness:
         for workstream in packet["workstreams"]:
-            readiness_updates.append(write_workstream_readiness(memory_root, workstream, args.dry_run))
+            readiness_updates.append(write_workstream_readiness(memory_root, workstream, args.dry_run, message))
     emit(
         {
             "ok": True,
@@ -479,10 +496,29 @@ def main() -> int:
             "output_dir": str(output_dir),
             "reports": reports,
             "readiness_updates": readiness_updates,
+            "language": language_metadata(config, locale),
         },
         args.output,
     )
     return 0
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load shared ADP config module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def language_metadata(config: dict[str, Any], locale: str) -> dict[str, Any]:
+    return {
+        "locale": locale,
+        "document_output_language": config.get("values", {}).get("document_output_language", "English"),
+        "fallback": "document_output_language" in config.get("fallbacks", []),
+        "warnings": config.get("warnings", []),
+    }
 
 
 if __name__ == "__main__":

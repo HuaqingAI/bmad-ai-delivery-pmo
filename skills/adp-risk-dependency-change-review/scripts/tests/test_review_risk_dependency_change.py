@@ -110,6 +110,25 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             risk_text = (memory / "views" / "risk-matrix.md").read_text(encoding="utf-8")
             self.assertIn("no workstream records found", risk_text)
 
+    def test_language_golden_localizes_views_and_preserves_source_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+
+            chinese = run_script(project, "--language", "Chinese")
+            risk_text = (memory / "views" / "risk-matrix.md").read_text(encoding="utf-8")
+            self.assertEqual(chinese["language"]["locale"], "zh")
+            self.assertIn("# ADP 风险矩阵", risk_text)
+            self.assertIn("Payment API contract not baseline", risk_text)
+            self.assertIn("critical", risk_text)
+
+            english = run_script(project, "--language", "English")
+            english_text = (memory / "views" / "risk-matrix.md").read_text(encoding="utf-8")
+            self.assertEqual(english["language"]["locale"], "en")
+            self.assertIn("# ADP Risk Matrix", english_text)
+            self.assertIn("Payment API contract not baseline", english_text)
+
 
 def run_script(project: Path, *extra: str) -> dict:
     proc = subprocess.run(
@@ -117,6 +136,7 @@ def run_script(project: Path, *extra: str) -> dict:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return json.loads(proc.stdout)
 

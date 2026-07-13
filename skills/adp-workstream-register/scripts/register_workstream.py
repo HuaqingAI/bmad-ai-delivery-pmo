@@ -7,14 +7,18 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "assets" / "workstream-templates"
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 TEMPLATE_FILES = ["delivery-record.md", "evidence.md", "decisions.md", "readiness.md"]
 CORE_MEMORY_FILES = [
     "index.md",
@@ -65,6 +69,8 @@ def parse_args() -> argparse.Namespace:
         help="Allow writing when kickoff-created ADP core files are missing.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report planned writes without creating files.")
+    parser.add_argument("--language", help="Override document_output_language for reviewable output.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
@@ -139,51 +145,51 @@ def patch_plan_name(workstream_root: Path) -> str:
     return f"registration-patch-plan-{index}.md"
 
 
-def patch_plan_content(args: argparse.Namespace, workstream_id: str, artifacts: dict[str, str], gaps: list[str], now: str) -> str:
+def patch_plan_content(args: argparse.Namespace, workstream_id: str, artifacts: dict[str, str], gaps: list[str], now: str, message) -> str:
     artifact_rows = artifact_table(artifacts)
     depends_on = bullet_list(args.depends_on)
     impacts = bullet_list(args.impacts)
     l0_references = bullet_list(args.l0_reference)
     gaps_list = bullet_list(gaps)
-    return f"""# Registration Patch Plan
+    return f"""# {message('workstream.patch.title')}
 
-Generated: {now}
-Workstream: {workstream_id} - {args.name}
+{message('common.generated')}: {now}
+{message('common.workstream')}: {workstream_id} - {args.name}
 
-This plan captures supplied registration facts for an existing workstream. Review and apply the relevant items to `delivery-record.md`, `evidence.md`, `decisions.md`, and `readiness.md`; the script did not overwrite existing user state.
+{message('workstream.patch.note')}
 
-## Identity Updates
+## {message('workstream.patch.identity')}
 
-- FDE owner: {args.owner}
-- Business owner: {args.business_owner}
-- Current BMM phase: {args.phase}
-- Proposed ADP status: {args.status}
+- {message('workstream.fde_owner')}: {args.owner}
+- {message('workstream.business_owner')}: {args.business_owner}
+- {message('workstream.bmm_phase')}: {args.phase}
+- {message('workstream.proposed_status')}: {args.status}
 
-## Scope Update
+## {message('workstream.patch.scope')}
 
-- In scope: {args.scope}
+- {message('workstream.in_scope')}: {args.scope}
 
-## BMM Artifact Index Candidates
+## {message('workstream.patch.artifacts')}
 
-| Artifact | Path / Link | Baseline Status | Notes |
+| {message('workstream.artifact')} | {message('workstream.path_link')} | {message('workstream.baseline_status')} | {message('workstream.notes')} |
 | --- | --- | --- | --- |
 {artifact_rows}
 
-## Cross-Workstream Link Candidates
+## {message('workstream.patch.links')}
 
-Depends on:
+{message('workstream.depends_on')}:
 
 {depends_on}
 
-Impacts:
+{message('workstream.impacts')}:
 
 {impacts}
 
-L0 references:
+{message('workstream.l0_references')}:
 
 {l0_references}
 
-## Visible Gaps
+## {message('workstream.patch.gaps')}
 
 {gaps_list}
 """
@@ -225,6 +231,15 @@ def main() -> int:
     if not project_root.exists() or not project_root.is_dir():
         emit({"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}, args.output)
         return 2
+
+    config_module = load_module(Path(args.config_script), "adp_workstream_effective_config")
+    overrides = {"document_output_language": args.language} if args.language else None
+    config_code, config = config_module.resolve_effective_config(project_root, overrides)
+    if config_code != 0 or not config.get("ok"):
+        emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
+        return 2
+    locale = str(config.get("document_locale") or "en")
+    message = lambda key: config_module.message(key, locale)
 
     try:
         workstream_id = normalize_id(args.id)
@@ -279,7 +294,7 @@ def main() -> int:
     if is_update:
         patch_plan_path = write_patch_plan(
             workstream_root,
-            patch_plan_content(args, workstream_id, artifacts, gaps, now),
+            patch_plan_content(args, workstream_id, artifacts, gaps, now, message),
             args.dry_run,
         )
         files_created.append(patch_plan_path)
@@ -302,11 +317,8 @@ def main() -> int:
         "warnings": warnings,
         "visible_gaps": gaps,
         "errors": errors,
-        "next_actions": [
-            "Fill delivery-record.md scope, acceptance, dependency, and next-action gaps.",
-            "Run adp-bmm-checkpoint-sync when a PRD, architecture, epic/story, or validation artifact is ready to sync.",
-            "Run adp-acceptance-readiness-review before stakeholder acceptance or cutover review.",
-        ],
+        "next_actions": [message("workstream.next.fill"), message("workstream.next.checkpoint"), message("workstream.next.readiness")],
+        "language": language_metadata(config, locale),
     }
     emit(result, args.output)
     return 0 if result["ok"] else 1
@@ -328,12 +340,30 @@ def compute_initial_gaps(args: argparse.Namespace, artifacts: dict[str, str]) ->
     return gaps
 
 
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load shared ADP config module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def language_metadata(config: dict[str, Any], locale: str) -> dict[str, Any]:
+    return {
+        "locale": locale,
+        "document_output_language": config.get("values", {}).get("document_output_language", "English"),
+        "fallback": "document_output_language" in config.get("fallbacks", []),
+        "warnings": config.get("warnings", []),
+    }
+
+
 def emit(result: dict, output: str | None) -> None:
     payload = json.dumps(result, ensure_ascii=False, indent=2)
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
     else:
-        print(payload)
+        sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

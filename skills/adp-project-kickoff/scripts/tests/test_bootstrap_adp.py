@@ -39,6 +39,24 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertTrue((memory_root / "views" / "weekly-report.md").exists())
             self.assertTrue((memory_root / "views" / "roadmap.md").exists())
             self.assertTrue((memory_root / "views" / "roadmap.json").exists())
+            self.assertTrue((memory_root / "plans" / "baseline-history").is_dir())
+            self.assertTrue((memory_root / "plans" / "README.md").exists())
+            self.assertFalse((memory_root / "plans" / "program-baseline.md").exists())
+            self.assertTrue((memory_root / "schemas" / "program-baseline.md").exists())
+            self.assertTrue((memory_root / "schemas" / "program-status.md").exists())
+            self.assertTrue((memory_root / "snapshots" / "program-status" / "README.md").exists())
+            self.assertTrue((memory_root / "intake" / "program-baseline-candidate.json").exists())
+            self.assertTrue((memory_root / "intake" / "program-baseline-intake.md").exists())
+            candidate = json.loads(
+                (memory_root / "intake" / "program-baseline-candidate.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(candidate["project"]["name"], "Demo ADP")
+            self.assertEqual(candidate["confirmation_status"], "candidate")
+            self.assertTrue((memory_root / "views" / "program-status.md").exists())
+            self.assertTrue((memory_root / "views" / "program-status.json").exists())
+            self.assertEqual(result["baseline_onboarding"]["status"], "gap")
+            self.assertFalse(result["baseline_onboarding"]["baseline_exists"])
+            self.assertEqual(result["baseline_onboarding"]["owner_skill"], "adp-plan-baseline")
 
     def test_second_run_preserves_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -56,6 +74,49 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertEqual(ledger.read_text(encoding="utf-8"), "custom ledger\n")
             self.assertIn(str(charter), second["files_existing"])
             self.assertIn(str(ledger), second["files_existing"])
+
+    def test_update_adds_vnext_scaffold_without_overwriting_existing_baseline_or_view(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "_bmad-output" / "adp" / "memory"
+            baseline = memory_root / "plans" / "program-baseline.md"
+            status_view = memory_root / "views" / "program-status.json"
+            baseline.parent.mkdir(parents=True)
+            status_view.parent.mkdir(parents=True)
+            baseline.write_text("approved baseline\n", encoding="utf-8")
+            status_view.write_text('{"custom": true}\n', encoding="utf-8")
+
+            result = self.run_script(project_root)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["baseline_onboarding"]["status"], "ready")
+            self.assertTrue(result["baseline_onboarding"]["baseline_exists"])
+            self.assertEqual(baseline.read_text(encoding="utf-8"), "approved baseline\n")
+            self.assertEqual(status_view.read_text(encoding="utf-8"), '{"custom": true}\n')
+            self.assertIn(str(status_view), result["files_existing"])
+            self.assertTrue((memory_root / "schemas" / "program-status.md").exists())
+            self.assertTrue((memory_root / "snapshots" / "program-status").is_dir())
+
+    def test_captures_project_timezone_and_fde_recurring_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self.run_script(
+                Path(temp_dir),
+                "--timezone",
+                "Asia/Shanghai",
+                "--fde-days",
+                "Tue,Thu",
+                "--fde-cadence-override",
+                "Approved in decision D-17.",
+            )
+            memory_root = Path(result["memory_root"])
+            cadence = (memory_root / "cadence.md").read_text(encoding="utf-8")
+
+            self.assertEqual(result["meeting_cadence"]["project_timezone"], "Asia/Shanghai")
+            self.assertEqual(result["meeting_cadence"]["fde_meeting_days"], ["Tuesday", "Thursday"])
+            self.assertEqual(result["meeting_cadence"]["long_term_override"], "Approved in decision D-17.")
+            self.assertIn("Project timezone: Asia/Shanghai", cadence)
+            self.assertIn("Recurring weekdays: Tuesday, Thursday", cadence)
+            self.assertIn("Long-term override: Approved in decision D-17.", cadence)
 
     def test_discovers_target_adp_config_language_and_bmad_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -75,6 +136,9 @@ class BootstrapAdpTests(unittest.TestCase):
                         "document_output_language: Chinese",
                         'planning_artifacts: "{project-root}/_bmad-output/planning-artifacts"',
                         'implementation_artifacts: "{project-root}/_bmad-output/implementation-artifacts"',
+                        "adp:",
+                        "  default_reporting_cadence: biweekly",
+                        "  project_timezone: Asia/Shanghai",
                     ]
                 )
                 + "\n",
@@ -90,6 +154,12 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertEqual(result["status"], "complete")
             self.assertEqual(result["language"]["communication_language"], "Chinese")
             self.assertEqual(result["language"]["document_output_language"], "Chinese")
+            self.assertEqual(result["cadence"], "biweekly")
+            self.assertEqual(result["meeting_cadence"]["project_timezone"], "Asia/Shanghai")
+            self.assertEqual(
+                result["meeting_cadence"]["fde_meeting_days"],
+                ["Monday", "Wednesday", "Friday"],
+            )
             self.assertEqual(result["config_sources"], [str(adp_config)])
             self.assertEqual(result["discovered_bmad_artifacts"]["counts"]["planning"], 1)
             self.assertEqual(result["discovered_bmad_artifacts"]["counts"]["implementation"], 1)
@@ -289,7 +359,7 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertTrue(keep_legacy["legacy_memory"]["using_legacy_memory_root"])
             self.assertEqual((legacy / "project-charter.md").read_text(encoding="utf-8"), "legacy memory\n")
 
-    def test_dry_run_reports_audit_meeting_pack_and_roadmap_starter_files(self) -> None:
+    def test_dry_run_reports_vnext_starter_files_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result = self.run_script(Path(temp_dir), "--dry-run")
             memory_root = Path(result["memory_root"])
@@ -302,8 +372,17 @@ class BootstrapAdpTests(unittest.TestCase):
             )
             self.assertIn(str(memory_root / "views" / "roadmap.md"), result["files_created"])
             self.assertIn(str(memory_root / "views" / "roadmap.json"), result["files_created"])
+            self.assertIn(str(memory_root / "plans" / "baseline-history"), result["directories_created"])
+            self.assertIn(str(memory_root / "snapshots" / "program-status"), result["directories_created"])
+            self.assertIn(str(memory_root / "schemas" / "program-baseline.md"), result["files_created"])
+            self.assertIn(str(memory_root / "schemas" / "program-status.md"), result["files_created"])
+            self.assertIn(str(memory_root / "intake" / "program-baseline-candidate.json"), result["files_created"])
+            self.assertIn(str(memory_root / "views" / "program-status.json"), result["files_created"])
+            self.assertEqual(result["baseline_onboarding"]["status"], "gap")
             self.assertFalse((memory_root / "audits" / "README.md").exists())
             self.assertFalse((memory_root / "views" / "roadmap.md").exists())
+            self.assertFalse((memory_root / "plans" / "baseline-history").exists())
+            self.assertFalse((memory_root / "snapshots" / "program-status").exists())
 
 
 if __name__ == "__main__":

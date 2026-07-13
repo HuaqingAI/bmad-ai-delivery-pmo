@@ -5,7 +5,7 @@ description: Bootstraps shared ADP project memory. Use when the user says "adp-p
 
 ## Overview
 
-This workflow initializes an AI Delivery PMO project by creating the shared ADP memory structure, starter schemas, L0 reference placeholders, decision logs, daily logs, audits, meeting-pack folders, roadmap starter views, and report views. Act as a delivery setup facilitator: keep startup cheap, preserve existing work, and leave the user with a usable project state surface rather than a long questionnaire.
+This workflow initializes shared ADP memory, including plan and snapshot directories, schemas, baseline intake, L0 placeholders, decision logs, audits, meeting-pack folders, and starter views. Act as a delivery setup facilitator: preserve existing work and leave a usable state surface without a long questionnaire.
 
 The consumer is the FDE team, project lead, and later ADP workflows. They need files that make project state consistent across workstreams without replacing BMM lifecycle artifacts. BMM outputs remain the source of truth; Workstream Delivery Records are the project-level synchronization surface.
 
@@ -51,6 +51,8 @@ Headless callers get the script JSON directly. If PRDs are discovered without `-
 
 Accept a brief when the user provides one, but do not block setup for missing details. Combine the brief with discovered artifact paths as kickoff source context. Capture only reliable facts into `project-charter.md`; leave unknown objectives, stakeholders, cadence exceptions, L0 references, and escalation paths as explicit placeholders.
 
+Kickoff never creates `plans/program-baseline.md`; that file is owned by `adp-plan-baseline`. When it is absent, report `baseline_onboarding.status: gap`, point to `intake/program-baseline-candidate.json`, and route the user to confirm source-backed targets, gates, milestones, dependencies, and critical-path facts. A missing baseline is not evidence of delay.
+
 ## Build
 
 Run the scaffold script:
@@ -64,37 +66,16 @@ Use optional flags only when the user gives the facts:
 - `--project-name "<name>"` for the charter/index heading.
 - `--profile generic-delivery|migration-cutover` for the project profile.
 - `--cadence weekly|biweekly|custom` for the default rhythm.
+- `--timezone "<IANA timezone or project label>"` for date-window calculations.
+- `--fde-days "Monday,Wednesday,Friday"` for a confirmed recurring FDE weekday schedule; the default is Monday/Wednesday/Friday.
+- `--fde-cadence-override "<source-backed note>"` only for a confirmed long-term departure from those weekdays.
 - `--memory-root <path>` when ADP memory should live outside `{project-root}/_bmad-output/adp/memory`.
 - `--source "<brief or path summary>"` to record the kickoff source.
 - `--workstream-plan <json-file>` after the user confirms which discovered PRD lines should be written to the registration intake plan.
 - `--yes` or `--headless` only when the user explicitly wants non-interactive kickoff after discovery.
 - `--dry-run` to preview without writing.
 
-The workstream plan JSON is a confirmed input, not an auto-detected guess. Use this shape:
-
-```json
-{
-  "workstreams": [
-    {
-      "id": "l1-checkout",
-      "name": "Checkout Migration",
-      "fde_owner": "TBD",
-      "business_owner": "TBD",
-      "phase": "PRD",
-      "status": "draft",
-      "scope": "Project-level summary or TBD",
-      "acceptance": "Acceptance summary or TBD",
-      "prd_path": "{project-root}/_bmad-output/planning-artifacts/checkout-prd.md",
-      "dependencies": [],
-      "impacts": [],
-      "l0_references": [],
-      "risks": [],
-      "open_questions": [],
-      "next_actions": ["Confirm PRD-derived baseline with the FDE owner."]
-    }
-  ]
-}
-```
+The workstream plan is confirmed input, never an auto-detected guess. Start from `assets/workstream-plan.example.json` and retain source-backed facts or explicit `TBD` values.
 
 If the script cannot run, create the same folders and files from `assets/adp-memory-templates/` manually. Never overwrite an existing file during fallback; report it as existing instead.
 
@@ -107,6 +88,8 @@ After setup, report:
 - the ADP memory root
 - created files and already-existing files
 - the workstream registration plan path, when confirmed PRD lines were supplied
+- baseline onboarding status and its `adp-plan-baseline` recovery action
+- project timezone, recurring FDE weekdays, and any long-term cadence override
 - any script errors or skipped writes
 - the next useful action, usually running `adp-workstream-register` for each confirmed line in the plan
 
@@ -114,7 +97,7 @@ Do not claim the project is ready just because the scaffold exists. The kickoff 
 
 ## Files Created
 
-The scaffold writes the files and folders represented by `assets/adp-memory-templates/` into the ADP memory root, preserving existing files. Use the script JSON for exact created/existing paths. `actions/action-ledger.md` remains the durable action source of truth; `views/fde-actions.md`, `views/meeting-packs/*`, and `views/roadmap.*` are derived. When a confirmed PRD workstream plan is supplied, the script also writes `intake/workstream-registration-plan.json` and `intake/workstream-registration-plan.md` without overwriting existing files.
+The scaffold copies `assets/adp-memory-templates/` into ADP memory while preserving existing files; use script JSON for exact paths. `actions/action-ledger.md` remains the durable action source; `views/fde-actions.md`, `views/meeting-packs/*`, `views/program-status.*`, and `views/roadmap.*` are derived. A confirmed PRD plan additionally creates the two `intake/workstream-registration-plan.*` files without overwriting either.
 
 ## Guardrails
 
@@ -122,4 +105,6 @@ The scaffold writes the files and folders represented by `assets/adp-memory-temp
 - Keep ADP as a coordination layer over BMM; do not duplicate PRD, architecture, story, code, or validation details into kickoff templates.
 - Keep kickoff out of workstream file ownership. It may create registration intake, but `adp-workstream-register` creates or normalizes Workstream Delivery Records and starter workstream files.
 - Make gaps visible rather than filling them with invented defaults.
+- Preserve baseline ownership: kickoff scaffolds intake and history only; `adp-plan-baseline` alone writes or versions the approved baseline.
+- Preserve snapshot ownership: kickoff creates the snapshot directory and guidance only; `adp-program-status` alone writes immutable status snapshots.
 - For migration or cutover projects, initialize the same structure and mark the profile; readiness and L0 workflows own detailed cutover judgment later.

@@ -272,13 +272,17 @@ class DingTalkIntakeTests(unittest.TestCase):
             raw = project_root / "notes.txt"
             raw.write_text("raw notes", encoding="utf-8")
 
-            result = self.run_script(project_root, "--raw-evidence", str(raw), "--raw-evidence-label", "notes")
+            result = self.run_script(
+                project_root, "--raw-evidence", str(raw), "--raw-evidence-label", "notes", "--language", "Chinese"
+            )
 
             self.assertTrue(result["ok"])
             preserved = Path(result["raw_evidence_path"])
             self.assertTrue(preserved.exists())
             self.assertTrue(preserved.is_relative_to(memory_root))
             self.assertEqual(preserved.read_text(encoding="utf-8"), "raw notes")
+            self.assertEqual(result["language"]["locale"], "zh")
+            self.assertEqual(result["next_actions"], ["在会议同步计划中使用 raw_evidence_path。"])
 
 
 if __name__ == "__main__":

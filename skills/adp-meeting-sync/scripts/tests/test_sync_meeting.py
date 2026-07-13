@@ -13,6 +13,20 @@ DEFAULT_PACKET_TEMPLATE = SKILL_ROOT / "assets" / "meeting-sync-templates" / "bu
 
 
 class SyncMeetingTests(unittest.TestCase):
+    def vnext_lineage(self, scenario: str = "fde-morning") -> dict:
+        return {
+            "meeting_pack_id": f"2026-07-10-{scenario}",
+            "meeting_pack_path": f"views/meeting-packs/{scenario}/2026-07-10.md",
+            "scenario": scenario,
+            "audit_path": f"audits/2026-07-10-{scenario}-audit.json",
+            "roadmap_version": "2026-07-10T08:00:00+08:00" if scenario == "business-biweekly" else "not-applicable",
+            "program_status_snapshot_id": "ps-meeting-pack-fixture",
+            "baseline_revision": 2,
+            "source_fingerprints": {"plans/program-baseline.md": "sha256:fixture"},
+            "input_audit_id": "audit-program-status-fixture",
+            "generator_version": "2.0.0",
+        }
+
     def run_script(self, project_root: Path, plan: dict) -> dict:
         plan_path = project_root / "plan.json"
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
@@ -137,7 +151,8 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual(intake["updates"][0]["id"], "l1-checkout")
             self.assertEqual(intake["updates"][0]["source"], "adp-meeting-sync")
             self.assertEqual(intake["updates"][0]["actions"][0]["owner"], "FDE-A")
-            self.assertEqual(intake["updates"][0]["actions"][0]["source"], "meetings/2026-07-01-fde-internal-sync-checkout-blockers.md#M-001")
+            archive_rel = Path(result["touched"]["meeting_archives"][0]).relative_to(memory_root).as_posix()
+            self.assertEqual(intake["updates"][0]["actions"][0]["source"], f"{archive_rel}#M-001")
             self.assertIn("--updates-file", result["next_actions"][0])
             decision_log = (memory_root / "decisions" / "decision-log.md").read_text(encoding="utf-8")
             self.assertIn("Choose checkout fallback copy", decision_log)
@@ -159,13 +174,9 @@ class SyncMeetingTests(unittest.TestCase):
                     "source": "meeting pack",
                     "participants": ["Biz-A", "FDE-A"],
                     "summary": "Close the current roadmap decisions.",
-                    "lineage": {
-                        "meeting_pack_id": "2026-07-10-business-biweekly",
-                        "meeting_pack_path": "views/meeting-packs/business-biweekly/2026-07-10.md",
-                        "scenario": "business-biweekly",
-                        "audit_path": "audits/2026-07-10-business-biweekly-audit.json",
-                        "roadmap_version": "2026-07-10T08:00:00+08:00",
-                    },
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:30:00+08:00",
+                    "lineage": self.vnext_lineage("business-biweekly"),
                 },
                 "items": [
                     {
@@ -182,13 +193,7 @@ class SyncMeetingTests(unittest.TestCase):
 
             result = self.run_script(project_root, plan)
 
-            expected_lineage = {
-                "meeting_pack_id": "2026-07-10-business-biweekly",
-                "meeting_pack_path": "views/meeting-packs/business-biweekly/2026-07-10.md",
-                "scenario": "business-biweekly",
-                "audit_path": "audits/2026-07-10-business-biweekly-audit.json",
-                "roadmap_version": "2026-07-10T08:00:00+08:00",
-            }
+            expected_lineage = self.vnext_lineage("business-biweekly")
             self.assertEqual(result["meeting"]["lineage"], expected_lineage)
             archive = Path(result["touched"]["meeting_archives"][0]).read_text(encoding="utf-8")
             daily = (memory_root / "daily" / "2026-07-10.md").read_text(encoding="utf-8")
@@ -197,6 +202,107 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertIn("2026-07-10-business-biweekly", daily)
             intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
             self.assertEqual(intake["meeting"]["lineage"], expected_lineage)
+            self.assertEqual(intake["meeting"]["meeting_instance_id"], result["meeting"]["meeting_instance_id"])
+            receipt = json.loads(Path(result["receipt"]).read_text(encoding="utf-8"))
+            self.assertEqual(receipt["status"], "applied")
+            self.assertEqual(receipt["lineage"], expected_lineage)
+            cursor = json.loads(Path(result["cursor"]["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(cursor["meeting_instance_id"], result["meeting"]["meeting_instance_id"])
+            self.assertEqual(cursor["ended_at"], "2026-07-10T09:30:00+08:00")
+
+    def test_meeting_pack_distillate_injects_verified_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            lineage = self.vnext_lineage()
+            distillate_path = project_root / "meeting-pack.json"
+            distillate_path.write_text(
+                json.dumps(
+                    {
+                        **lineage,
+                        "next_workflow_payload": {
+                            **lineage,
+                            "lineage": lineage,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = {
+                "meeting": {
+                    "date": "2026-07-10",
+                    "type": "FDE morning",
+                    "title": "Lineage injection",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                },
+                "items": [{"id": "M-001", "classification": "no_op", "text": "No state change", "no_op_reason": "Fixture"}],
+            }
+
+            result = self.run_script_with_args(
+                project_root,
+                plan,
+                "--meeting-pack-distillate",
+                str(distillate_path),
+            )
+
+            self.assertEqual(result["meeting"]["lineage"], lineage)
+
+    def test_meeting_pack_distillate_rejects_conflicting_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            lineage = self.vnext_lineage()
+            distillate_path = project_root / "meeting-pack.json"
+            distillate_path.write_text(
+                json.dumps(
+                    {
+                        **lineage,
+                        "meeting_pack_id": "conflicting-pack-id",
+                        "next_workflow_payload": {**lineage, "lineage": lineage},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan_path = project_root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "meeting": {
+                            "date": "2026-07-10",
+                            "started_at": "2026-07-10T09:00:00+08:00",
+                            "ended_at": "2026-07-10T09:20:00+08:00",
+                        },
+                        "items": [{"id": "M-001", "classification": "no_op", "text": "No change", "no_op_reason": "Fixture"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--plan",
+                    str(plan_path),
+                    "--meeting-pack-distillate",
+                    str(distillate_path),
+                    "--meeting-note-template",
+                    str(DEFAULT_MEETING_TEMPLATE),
+                    "--business-decision-packet-template",
+                    str(DEFAULT_PACKET_TEMPLATE),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+            result = json.loads(completed.stdout)
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("distillate lineage conflicts", result["error"])
 
     def test_sync_preserves_raw_evidence_reports_gaps_and_cleans_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -298,6 +404,51 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual(action["workstream"], "program")
             self.assertEqual(action["affected_workstreams"], ["l1-checkout", "l2-search"])
             self.assertIn("Affected workstreams: l1-checkout, l2-search", action["reason"])
+
+    def test_action_quality_uses_explicit_gaps_not_phrase_matching(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-13",
+                    "type": "FDE internal sync",
+                    "title": "Action judgment boundary",
+                    "source": "notes.md",
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "action",
+                        "text": "Publish the signed acceptance record.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "owner": "Project delivery team",
+                        "due": "2099-07-15",
+                        "closure_criteria": "Daily log contains the signed acceptance record and checksum.",
+                    },
+                    {
+                        "id": "M-002",
+                        "classification": "action",
+                        "text": "Close the rollout evidence gap.",
+                        "affected_workstreams": ["l2-search"],
+                        "owner": "FDE-A",
+                        "due": "2099-07-16",
+                        "closure_criteria": "Owner updates WDR/daily/status-sync.",
+                        "closure_gap": "Process updates do not identify the deliverable that proves completion.",
+                    },
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+
+            audit = result["action_quality_audit"]
+            self.assertEqual(audit["owner_gap_count"], 0)
+            self.assertEqual(audit["closure_gap_count"], 1)
+            intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
+            actions = {action["action"]: action for update in intake["updates"] for action in update["actions"]}
+            self.assertEqual(actions["Publish the signed acceptance record."]["status"], "open")
+            self.assertEqual(actions["Close the rollout evidence gap."]["status"], "blocked")
+            self.assertEqual(actions["Close the rollout evidence gap."]["closure_criteria"], "TBD")
 
     def test_invalid_plan_fails_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -401,6 +552,284 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertIn("affected workstream is missing", "\n".join(result["unresolved_gaps"]))
             self.assertTrue(any("adp-workstream-register" in action for action in result["next_actions"]))
 
+    def test_dry_run_does_not_create_receipt_cursor_or_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-10",
+                    "type": "FDE morning",
+                    "title": "Dry run",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                    "lineage": self.vnext_lineage(),
+                },
+                "items": [{"id": "M-001", "classification": "no_op", "text": "No change", "no_op_reason": "Dry run fixture"}],
+            }
+
+            result = self.run_script_with_args(project_root, plan, "--dry-run")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["replay_status"], "planned")
+            self.assertFalse(Path(result["planned_receipt"]).exists())
+            self.assertFalse(Path(result["planned_cursor"]).exists())
+            self.assertEqual(list((memory_root / "meetings").glob("*.md")), [])
+
+    def test_same_instance_replay_is_noop_without_duplicate_appends(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "meeting_instance_id": "mi-replay-fixture",
+                    "date": "2026-07-10",
+                    "type": "FDE morning",
+                    "title": "Replay safety",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                    "lineage": self.vnext_lineage(),
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "decision",
+                        "text": "Keep the rollout gate.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "confirmer": "FDE-A",
+                    }
+                ],
+            }
+
+            first = self.run_script(project_root, plan)
+            daily_path = memory_root / "daily" / "2026-07-10.md"
+            wdr_path = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            decision_path = memory_root / "decisions" / "decision-log.md"
+            before = (daily_path.read_text(encoding="utf-8"), wdr_path.read_text(encoding="utf-8"), decision_path.read_text(encoding="utf-8"))
+            cursor_path = Path(first["cursor"]["path"])
+            cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
+            cursor["archive"] = "meetings/missing.md"
+            cursor_path.write_text(json.dumps(cursor), encoding="utf-8")
+            second = self.run_script(project_root, plan)
+
+            self.assertEqual(first["replay_status"], "applied")
+            self.assertEqual(second["replay_status"], "idempotent-no-op")
+            self.assertEqual(second["cursor"]["status"], "repaired")
+            repaired_cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
+            self.assertTrue((memory_root / repaired_cursor["archive"]).is_file())
+            self.assertEqual(before, (daily_path.read_text(encoding="utf-8"), wdr_path.read_text(encoding="utf-8"), decision_path.read_text(encoding="utf-8")))
+            self.assertEqual(len(list((memory_root / "meetings").glob("*.md"))), 1)
+            self.assertEqual(len(list((memory_root / "meetings" / "receipts").glob("*.json"))), 1)
+
+    def test_same_instance_changed_plan_is_explicit_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "meeting_instance_id": "mi-conflict-fixture",
+                    "date": "2026-07-10",
+                    "type": "FDE morning",
+                    "title": "Conflict safety",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                    "lineage": self.vnext_lineage(),
+                },
+                "items": [{"id": "M-001", "classification": "fact", "text": "Original fact"}],
+            }
+            self.run_script(project_root, plan)
+            plan["items"][0]["text"] = "Changed fact"
+            plan_path = project_root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--plan",
+                    str(plan_path),
+                    "--meeting-note-template",
+                    str(DEFAULT_MEETING_TEMPLATE),
+                    "--business-decision-packet-template",
+                    str(DEFAULT_PACKET_TEMPLATE),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+            result = json.loads(completed.stdout)
+            self.assertEqual(completed.returncode, 1)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "conflict")
+            self.assertIn("different plan fingerprint", result["error"])
+
+    def test_applying_receipt_resumes_without_duplicate_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "meeting_instance_id": "mi-resume-fixture",
+                    "date": "2026-07-10",
+                    "type": "FDE morning",
+                    "title": "Resume safety",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                    "lineage": self.vnext_lineage(),
+                },
+                "items": [{"id": "M-001", "classification": "fact", "text": "Resume fact", "affected_workstreams": ["l1-checkout"]}],
+            }
+            first = self.run_script(project_root, plan)
+            receipt_path = Path(first["receipt"])
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["status"] = "applying"
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            daily_path = memory_root / "daily" / "2026-07-10.md"
+            before = daily_path.read_text(encoding="utf-8")
+
+            resumed = self.run_script(project_root, plan)
+
+            self.assertEqual(resumed["replay_status"], "resumed")
+            self.assertEqual(before, daily_path.read_text(encoding="utf-8"))
+            final_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(final_receipt["status"], "applied")
+
+    def test_older_successful_meeting_does_not_move_cursor_backwards(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            base_meeting = {
+                "type": "FDE morning",
+                "title": "Cursor ordering",
+                "source": "meeting pack",
+                "lineage": self.vnext_lineage(),
+            }
+            newer = {
+                "meeting": {
+                    **base_meeting,
+                    "meeting_instance_id": "mi-newer-fixture",
+                    "date": "2026-07-10",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                },
+                "items": [{"id": "M-001", "classification": "no_op", "text": "Newer", "no_op_reason": "Fixture"}],
+            }
+            older = {
+                "meeting": {
+                    **base_meeting,
+                    "meeting_instance_id": "mi-older-fixture",
+                    "date": "2026-07-09",
+                    "started_at": "2026-07-09T09:00:00+08:00",
+                    "ended_at": "2026-07-09T09:20:00+08:00",
+                },
+                "items": [{"id": "M-001", "classification": "no_op", "text": "Older", "no_op_reason": "Fixture"}],
+            }
+
+            first = self.run_script(project_root, newer)
+            second = self.run_script(project_root, older)
+
+            self.assertEqual(second["cursor"]["status"], "not-advanced")
+            cursor = json.loads(Path(first["cursor"]["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(cursor["meeting_instance_id"], "mi-newer-fixture")
+
+    def test_non_ascii_item_ids_get_distinct_append_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-10",
+                    "type": "FDE internal sync",
+                    "title": "中文条目",
+                    "source": "notes.md",
+                },
+                "items": [
+                    {"id": "决定一", "classification": "decision", "text": "保留门禁一。", "affected_workstreams": ["l1-checkout"], "confirmer": "FDE-A"},
+                    {"id": "决定二", "classification": "decision", "text": "保留门禁二。", "affected_workstreams": ["l1-checkout"], "confirmer": "FDE-A"},
+                ],
+            }
+
+            self.run_script(project_root, plan)
+
+            wdr = (memory_root / "workstreams" / "l1-checkout" / "delivery-record.md").read_text(encoding="utf-8")
+            decisions = (memory_root / "workstreams" / "l1-checkout" / "decisions.md").read_text(encoding="utf-8")
+            self.assertIn("保留门禁一。", wdr)
+            self.assertIn("保留门禁二。", wdr)
+            self.assertIn("保留门禁一。", decisions)
+            self.assertIn("保留门禁二。", decisions)
+
+    def test_source_backed_milestone_actual_and_forecast_enter_status_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-10",
+                    "type": "FDE morning",
+                    "title": "Milestone handoff",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                    "lineage": self.vnext_lineage(),
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "fact",
+                        "text": "Checkout milestone completed and the next forecast moved.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "milestones": [
+                            {
+                                "milestone_id": "MS-CHECKOUT-COMPLETE",
+                                "status": "done",
+                                "forecast": "2026-07-10",
+                                "actual": "2026-07-10",
+                                "evidence": ["meetings/raw/transcript.txt#checkout-complete"],
+                            }
+                        ],
+                    },
+                    {
+                        "id": "M-002",
+                        "classification": "fact",
+                        "text": "An unverified milestone claim was mentioned.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "milestone": {"milestone_id": "MS-UNVERIFIED", "status": "at-risk"},
+                    },
+                    {
+                        "id": "M-003",
+                        "classification": "fact",
+                        "text": "A milestone supplied an invalid explicit revision.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "milestone": {
+                            "milestone_id": "MS-BAD-REVISION",
+                            "status": "planned",
+                            "evidence": ["meeting#bad-revision"],
+                            "baseline_revision": 0,
+                        },
+                    },
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+
+            intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
+            milestone = intake["updates"][0]["milestones"][0]
+            self.assertEqual(milestone["milestone_id"], "MS-CHECKOUT-COMPLETE")
+            self.assertEqual(milestone["actual"], "2026-07-10")
+            self.assertEqual(milestone["baseline_revision"], 2)
+            self.assertTrue(milestone["source"].endswith("#M-001"))
+            self.assertEqual(result["milestone_quality_audit"]["milestones_seen"], 3)
+            self.assertEqual(result["milestone_quality_audit"]["ledger_ready_milestones"], 1)
+            self.assertIn("milestone evidence is missing", "\n".join(result["unresolved_gaps"]))
+            self.assertIn("milestone baseline_revision is missing or invalid", "\n".join(result["unresolved_gaps"]))
+
     def test_custom_templates_are_consumed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -446,6 +875,42 @@ class SyncMeetingTests(unittest.TestCase):
             packet = Path(result["touched"]["business_decision_packets"][0]).read_text(encoding="utf-8")
             self.assertIn("CUSTOM MEETING Template check", meeting)
             self.assertIn("CUSTOM PACKET Decide rollout", packet)
+
+    def test_language_golden_localizes_archive_and_preserves_lineage_and_facts(self) -> None:
+        def run(language: str) -> tuple[dict, str]:
+            temp = tempfile.TemporaryDirectory()
+            self.addCleanup(temp.cleanup)
+            project_root = Path(temp.name)
+            self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-13",
+                    "type": "FDE internal sync",
+                    "title": "Checkout facts",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "Checkout validation is running.",
+                    "started_at": "2026-07-13T09:00:00+08:00",
+                    "ended_at": "2026-07-13T09:20:00+08:00",
+                    "lineage": self.vnext_lineage(),
+                },
+                "items": [{"id": "M-001", "classification": "fact", "text": "Payment API remains candidate.", "affected_workstreams": ["l1-checkout"]}],
+            }
+            result = self.run_script_with_args(project_root, plan, "--language", language)
+            archive = Path(result["touched"]["meeting_archives"][0]).read_text(encoding="utf-8")
+            return result, archive
+
+        chinese, chinese_text = run("Chinese")
+        english, english_text = run("English")
+        self.assertEqual(chinese["language"]["locale"], "zh")
+        self.assertIn("## 摘要", chinese_text)
+        self.assertIn("Payment API remains candidate.", chinese_text)
+        self.assertIn("| M-001 | fact |", chinese_text)
+        self.assertIn("ps-meeting-pack-fixture", chinese_text)
+        self.assertEqual(english["language"]["locale"], "en")
+        self.assertIn("## Summary", english_text)
+        self.assertIn("Payment API remains candidate.", english_text)
+        self.assertIn("ps-meeting-pack-fixture", english_text)
 
 
 if __name__ == "__main__":

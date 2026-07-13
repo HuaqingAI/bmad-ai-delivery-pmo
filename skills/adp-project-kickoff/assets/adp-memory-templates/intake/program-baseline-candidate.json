@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "baseline_id": "PROGRAM-BASELINE",
+  "confirmation_status": "candidate",
+  "project": {
+    "name": "{{PROJECT_NAME}}",
+    "owner": "TBD",
+    "target_date": "TBD",
+    "source": {
+      "type": "charter",
+      "reference": "project-charter.md#objective",
+      "confirmed_by": "TBD"
+    }
+  },
+  "default_tolerance_days": 0,
+  "gates": [],
+  "milestones": [],
+  "critical_path": [],
+  "weighting": {
+    "enabled": false,
+    "completion_measure": null,
+    "source": null
+  }
+}

@@ -1,6 +1,14 @@
 # Cadence
 
 Default cadence: {{DEFAULT_CADENCE}}
+Project timezone: {{PROJECT_TIMEZONE}}
+
+## FDE Morning Meeting
+
+- Recurring weekdays: {{FDE_MEETING_DAYS}}
+- Long-term override: {{FDE_CADENCE_OVERRIDE}}
+- Incremental windows advance only after a successful `adp-meeting-sync` archive, not when a meeting pack is generated.
+- First runs, non-recurring weekdays, missed expected meetings, holidays, and temporary reschedules require explicit period confirmation.
 
 ## Status Sync
 
@@ -40,6 +48,8 @@ Every project meeting, offline sync, or supplemental note should become at least
 
 ## Cadence Gaps
 
+- Confirm the project timezone before date-window automation.
 - Confirm recurring meeting names and dates.
+- Record any approved long-term FDE weekday override with its source.
 - Confirm report recipients.
 - Confirm missing-update handling.

@@ -7,11 +7,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 
 
 L0_FILES = [
@@ -62,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--workstream", action="append", default=[], help="Limit gap scan to a workstream id.")
     parser.add_argument("--dry-run", action="store_true", help="Report planned writes without creating files.")
+    parser.add_argument("--language", help="Override document_output_language for derived L0 views.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
@@ -492,6 +499,75 @@ def render_files(plan: dict[str, Any], generated_at: str) -> dict[str, str]:
     return {filename: all_rendered[filename] for filename in target_files}
 
 
+L0_SYSTEM_COPY = {
+    "# L0 Reference Index": "l0.title.reference_index",
+    "# Extracted Freeze Model": "l0.title.freeze_model",
+    "# Extracted Contract Inventory": "l0.title.contract_inventory",
+    "# Extracted Gates": "l0.title.gates",
+    "# Extracted NFR": "l0.title.nfr",
+    "# Extracted Evidence Rules": "l0.title.evidence_rules",
+    "# Extracted L0 Impacts": "l0.title.impacts",
+    "# Extracted Decision Gates": "l0.title.decision_gates",
+    "# L0 Exceptions and Open Questions": "l0.title.exceptions",
+    "## Source Artifacts": "l0.section.source_artifacts",
+    "## Extracted Summaries": "l0.section.extracted_summaries",
+    "## ADP Question": "l0.section.adp_question",
+    "## Freeze Windows": "l0.section.freeze_windows",
+    "## Rules": "l0.section.rules",
+    "## Open Questions": "l0.section.open_questions",
+    "## Gate Gaps": "l0.section.gate_gaps",
+    "## NFR Gaps": "l0.section.nfr_gaps",
+    "## Evidence Gaps": "l0.section.evidence_gaps",
+    "## Unmapped Impacts": "l0.section.unmapped_impacts",
+    "## Business Decision Routing": "l0.section.business_routing",
+    "| Artifact | Path / Link | Baseline Status | Owner | Version | Notes |": "l0.table.reference_index",
+    "| Window | Scope | Start | End | Owner | Affected Workstreams |": "l0.table.freeze_windows",
+    "| Contract / Interface | Owner | Consumers | Stability | Evidence Required | Notes |": "l0.table.contracts",
+    "| Gate | Meaning | Required Evidence | Owner | Affected Workstreams | Status |": "l0.table.gates",
+    "| NFR | Threshold | Primary Owner | Evidence Owner | Gate Impact | Affected Workstreams |": "l0.table.nfr",
+    "| Evidence Type | Required For | Accepted Form | Owner | Notes |": "l0.table.evidence_rules",
+    "| L0 Constraint | Affected Workstream | Impact | Required Action | Owner | Status |": "l0.table.impacts",
+    "| Gate | Decision Needed | Owner | Affected Workstreams | Status | Next Action |": "l0.table.decision_gates",
+    "| Date | Item | Type | Owner | Affected Workstreams | Status | Next Action |": "l0.table.exceptions",
+    "L0 is a BMM-managed workstream and reference baseline. ADP records source paths and extracted project-level implications; it does not own or rewrite L0 governance.": "l0.note.ownership",
+    "The ADP question is not whether L0 is good. It is: which L0 constraints can workstreams reference, which workstreams are affected, which WDR/readiness files lack references or evidence, and which questions must return to L0 or a business decision process?": "l0.note.adp_question",
+    "- See `exceptions-and-open-questions.md`": "l0.note.see_exceptions",
+    "- See `extracted-impacts.md` and `exceptions-and-open-questions.md`": "l0.note.see_impacts_exceptions",
+    "- See `extracted-impacts.md` and downstream WDR gap suggestions from the sync run.": "l0.note.see_evidence_gaps",
+    "- Items an FDE cannot decide alone should become Business Decision Packets.": "l0.note.business_routing",
+}
+
+L0_SYSTEM_PREFIXES = {
+    "Source artifact(s)": "l0.label.source_artifacts",
+    "Last extracted": "l0.label.last_extracted",
+    "Last synced": "l0.label.last_synced",
+}
+
+
+def localize_rendered_files(rendered: dict[str, str], locale: str, config_module) -> dict[str, str]:
+    if locale == "en":
+        return rendered
+    localized: dict[str, str] = {}
+    for name, content in rendered.items():
+        lines: list[str] = []
+        for line in content.splitlines():
+            key = L0_SYSTEM_COPY.get(line)
+            if key:
+                lines.append(config_module.message(key, locale))
+            else:
+                replaced = False
+                for prefix, prefix_key in L0_SYSTEM_PREFIXES.items():
+                    marker = prefix + ": "
+                    if line.startswith(marker):
+                        lines.append(f"{config_module.message(prefix_key, locale)}: {line[len(marker):]}")
+                        replaced = True
+                        break
+                if not replaced:
+                    lines.append(line)
+        localized[name] = "\n".join(lines).rstrip() + "\n"
+    return localized
+
+
 def files_for_sections(sections: set[str]) -> list[str]:
     mapping = {
         "source_artifacts": "reference-index.md",
@@ -657,6 +733,14 @@ def main() -> int:
         emit({"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}, args.output)
         return 2
 
+    config_module = load_module(Path(args.config_script), "adp_l0_effective_config")
+    overrides = {"document_output_language": args.language} if args.language else None
+    config_code, config = config_module.resolve_effective_config(project_root, overrides)
+    if config_code != 0 or not config.get("ok"):
+        emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
+        return 2
+    locale = str(config.get("document_locale") or "en")
+
     try:
         plan, warnings = load_plan(args.plan, args.source_artifact)
     except (OSError, ValueError) as exc:
@@ -666,7 +750,7 @@ def main() -> int:
     memory_root = resolve_memory_root(project_root, args.memory_root)
     l0_root = memory_root / "l0"
     generated_at = plan["generated_at"]
-    rendered = render_files(plan, generated_at)
+    rendered = localize_rendered_files(render_files(plan, generated_at), locale, config_module)
 
     if args.verbose:
         print(f"Using memory root: {memory_root}", file=sys.stderr)
@@ -686,19 +770,38 @@ def main() -> int:
         "files_unchanged": files_unchanged,
         "workstream_gap_suggestions": gaps,
         "warnings": warnings,
-        "next_actions": next_actions(gaps, plan),
+        "next_actions": next_actions(gaps, plan, lambda key: config_module.message(key, locale)),
+        "language": language_metadata(config, locale),
     }
     emit(result, args.output)
     return 0
 
 
-def next_actions(gaps: list[dict[str, str]], plan: dict[str, Any]) -> list[str]:
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load shared ADP config module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def language_metadata(config: dict[str, Any], locale: str) -> dict[str, Any]:
+    return {
+        "locale": locale,
+        "document_output_language": config.get("values", {}).get("document_output_language", "English"),
+        "fallback": "document_output_language" in config.get("fallbacks", []),
+        "warnings": config.get("warnings", []),
+    }
+
+
+def next_actions(gaps: list[dict[str, str]], plan: dict[str, Any], message) -> list[str]:
     actions = []
     if gaps:
-        actions.append("Confirm suggested WDR L0 references with each affected FDE owner before editing records.")
+        actions.append(message("l0.next.confirm_references"))
     if plan["exceptions_open_questions"] or plan["decision_gates"]:
-        actions.append("Route open L0 questions to the L0 workstream or create Business Decision Packets where FDE cannot decide alone.")
-    actions.append("Run adp-acceptance-readiness-review after WDR L0 references and evidence expectations are updated.")
+        actions.append(message("l0.next.route_questions"))
+    actions.append(message("l0.next.readiness"))
     return actions
 
 
@@ -707,7 +810,7 @@ def emit(result: dict[str, Any], output: str | None) -> None:
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
     else:
-        print(payload)
+        sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

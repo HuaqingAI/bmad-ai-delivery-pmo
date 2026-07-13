@@ -29,9 +29,26 @@ VOLATILE_FIELDS = {
 }
 
 ACTION_LEDGER_REL = Path("actions") / "action-ledger.md"
+BASELINE_REL = Path("plans") / "program-baseline.md"
+BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 ACTION_STATUSES = {"open", "in-progress", "blocked", "done", "cancelled"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 PROJECT_ACTION_IDS = {"program", "project", "adp-program"}
+MILESTONE_STATUSES = {"planned", "at-risk", "done", "blocked"}
+ROADMAP_FIELDS = [
+    "Milestone ID",
+    "Milestone",
+    "Type",
+    "Status",
+    "Planned",
+    "Forecast",
+    "Actual",
+    "Owner",
+    "Confidence",
+    "Depends On",
+    "Source",
+    "Baseline Revision",
+]
 ACTION_FIELDS = [
     "Action ID",
     "Status",
@@ -64,6 +81,16 @@ class ActionUpdate:
 
 
 @dataclass
+class MilestoneUpdate:
+    milestone_id: str
+    status: str
+    forecast: str | None = None
+    actual: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    expected_baseline_revision: int | None = None
+
+
+@dataclass
 class StatusUpdate:
     workstream_id: str
     status: str | None = None
@@ -75,6 +102,7 @@ class StatusUpdate:
     change_notes: list[str] = field(default_factory=list)
     next_actions: list[str] = field(default_factory=list)
     actions: list[ActionUpdate] = field(default_factory=list)
+    milestones: list[MilestoneUpdate] = field(default_factory=list)
     source: str = "status sync"
 
     def has_reliable_delta(self) -> bool:
@@ -89,6 +117,7 @@ class StatusUpdate:
                 self.change_notes,
                 self.next_actions,
                 self.actions,
+                self.milestones,
             ]
         )
 
@@ -108,6 +137,12 @@ def parse_args() -> argparse.Namespace:
     update.add_argument("--dependency", action="append", default=[], help="Dependency change to set; repeat as needed.")
     update.add_argument("--change-note", action="append", default=[], help="Scope or change note; repeat as needed.")
     update.add_argument("--next-action", action="append", default=[], help="Next action; repeat as needed.")
+    update.add_argument("--milestone-id", help="Baseline milestone ID for a single structured milestone update.")
+    update.add_argument("--milestone-status", choices=sorted(MILESTONE_STATUSES), help="Canonical milestone status.")
+    update.add_argument("--milestone-forecast", help="Forecast date in ISO YYYY-MM-DD format.")
+    update.add_argument("--milestone-actual", help="Actual date in ISO YYYY-MM-DD format.")
+    update.add_argument("--milestone-evidence", action="append", default=[], help="Traceable milestone evidence; repeat as needed.")
+    update.add_argument("--baseline-revision", type=int, help="Expected current program baseline revision.")
     update.add_argument("--source", default="status sync", help="Source label for daily log entry.")
     update.add_argument("--updates-file", help="JSON file containing a list or {'updates': [...]} batch payload.")
     update.add_argument(
@@ -161,12 +196,13 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
     if args.updates_file:
         payload = json.loads(Path(args.updates_file).read_text(encoding="utf-8"))
         items = payload.get("updates", payload) if isinstance(payload, dict) else payload
+        payload_revision = parse_optional_revision(payload.get("baseline_revision"), "baseline_revision") if isinstance(payload, dict) else None
         if not isinstance(items, list):
             raise ValueError("updates-file must contain a list or an object with an 'updates' list")
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError("each batch update must be a JSON object")
-            updates.append(update_from_mapping(item, default_source=args.source))
+            updates.append(update_from_mapping(item, default_source=args.source, default_revision=payload_revision))
 
     single_has_fields = any(
         [
@@ -178,6 +214,11 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
             args.dependency,
             args.change_note,
             args.next_action,
+            args.milestone_id,
+            args.milestone_status,
+            args.milestone_forecast,
+            args.milestone_actual,
+            args.milestone_evidence,
         ]
     )
     if args.id or single_has_fields:
@@ -195,6 +236,7 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
                 change_notes=clean_list(args.change_note),
                 next_actions=clean_list(args.next_action),
                 actions=[],
+                milestones=milestones_from_cli(args),
                 source=args.source,
             )
         )
@@ -204,7 +246,7 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
     return updates
 
 
-def update_from_mapping(item: dict[str, Any], default_source: str) -> StatusUpdate:
+def update_from_mapping(item: dict[str, Any], default_source: str, default_revision: int | None = None) -> StatusUpdate:
     raw_id = item.get("id") or item.get("workstream_id")
     if not raw_id:
         raise ValueError("batch update is missing id/workstream_id")
@@ -219,8 +261,103 @@ def update_from_mapping(item: dict[str, Any], default_source: str) -> StatusUpda
         change_notes=clean_list(item.get("change_notes", item.get("changeNotes", []))),
         next_actions=clean_list(item.get("next_actions", item.get("nextActions", []))),
         actions=actions_from_mapping(item, default_workstream=normalize_id(str(raw_id)), default_source=default_source),
+        milestones=milestones_from_mapping(
+            item,
+            default_revision=parse_optional_revision(item.get("baseline_revision"), "baseline_revision") or default_revision,
+        ),
         source=str(item.get("source") or default_source),
     )
+
+
+def milestones_from_cli(args: argparse.Namespace) -> list[MilestoneUpdate]:
+    supplied = any(
+        [
+            args.milestone_id,
+            args.milestone_status,
+            args.milestone_forecast,
+            args.milestone_actual,
+            args.milestone_evidence,
+        ]
+    )
+    if not supplied:
+        return []
+    if not args.milestone_id:
+        raise ValueError("--milestone-id is required when milestone fields are supplied")
+    if not args.milestone_status:
+        raise ValueError("--milestone-status is required for a milestone update")
+    evidence = clean_list(args.milestone_evidence)
+    if not evidence:
+        raise ValueError("--milestone-evidence is required for a milestone update")
+    return [
+        MilestoneUpdate(
+            milestone_id=args.milestone_id.strip(),
+            status=args.milestone_status,
+            forecast=clean_iso_date(args.milestone_forecast, "milestone forecast"),
+            actual=clean_iso_date(args.milestone_actual, "milestone actual"),
+            evidence=evidence,
+            expected_baseline_revision=parse_optional_revision(args.baseline_revision, "baseline_revision"),
+        )
+    ]
+
+
+def milestones_from_mapping(item: dict[str, Any], default_revision: int | None) -> list[MilestoneUpdate]:
+    raw_milestones = item.get("milestones", item.get("milestone_updates", []))
+    if raw_milestones is None:
+        return []
+    if not isinstance(raw_milestones, list):
+        raise ValueError("batch update milestones must be a list")
+    milestones: list[MilestoneUpdate] = []
+    for raw in raw_milestones:
+        if not isinstance(raw, dict):
+            raise ValueError("each milestone update must be a JSON object")
+        milestone_id = clean_optional(raw.get("milestone_id") or raw.get("id"))
+        if not milestone_id:
+            raise ValueError("milestone update is missing milestone_id")
+        status = (clean_optional(raw.get("status")) or "").lower()
+        if status not in MILESTONE_STATUSES:
+            raise ValueError(f"milestone {milestone_id} status must be one of: {', '.join(sorted(MILESTONE_STATUSES))}")
+        evidence = clean_list(raw.get("evidence", raw.get("sources", raw.get("source", []))))
+        if not evidence:
+            raise ValueError(f"milestone {milestone_id} requires traceable evidence")
+        revision = parse_optional_revision(raw.get("baseline_revision"), f"milestone {milestone_id} baseline_revision")
+        milestones.append(
+            MilestoneUpdate(
+                milestone_id=milestone_id,
+                status=status,
+                forecast=clean_iso_date(raw.get("forecast"), f"milestone {milestone_id} forecast"),
+                actual=clean_iso_date(raw.get("actual"), f"milestone {milestone_id} actual"),
+                evidence=evidence,
+                expected_baseline_revision=revision or default_revision,
+            )
+        )
+    return milestones
+
+
+def clean_iso_date(value: Any, label: str) -> str | None:
+    text = clean_optional(value)
+    if not text or text.upper() == "TBD":
+        return None
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a real ISO YYYY-MM-DD date") from exc
+    if parsed.isoformat() != text:
+        raise ValueError(f"{label} must use canonical ISO YYYY-MM-DD format")
+    return text
+
+
+def parse_optional_revision(value: Any, label: str) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a positive integer")
+    try:
+        revision = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer") from exc
+    if revision < 1:
+        raise ValueError(f"{label} must be a positive integer")
+    return revision
 
 
 def actions_from_mapping(
@@ -754,10 +891,181 @@ def existing_field_value(markdown: str, section_title: str, label: str) -> str:
     return ""
 
 
+def parse_program_baseline(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise ValueError("program baseline is missing; run adp-plan-baseline before syncing milestones")
+    text = path.read_text(encoding="utf-8-sig")
+    marker_index = text.find(BASELINE_MARKER)
+    if marker_index < 0:
+        raise ValueError(f"program baseline marker is missing: {BASELINE_MARKER}")
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text[marker_index:], re.DOTALL)
+    if not match:
+        raise ValueError("canonical program baseline JSON is missing")
+    value = json.loads(match.group(1))
+    if not isinstance(value, dict):
+        raise ValueError("canonical program baseline must be an object")
+    return value
+
+
+def validate_milestone_updates(memory_root: Path, updates: list[StatusUpdate]) -> dict[str, Any] | None:
+    requested = [(update, milestone) for update in updates for milestone in update.milestones]
+    if not requested:
+        return None
+    baseline_path = memory_root / BASELINE_REL
+    baseline = parse_program_baseline(baseline_path)
+    revision = parse_optional_revision(baseline.get("revision"), "program baseline revision")
+    if revision is None:
+        raise ValueError("program baseline revision is missing")
+    milestones = baseline.get("milestones")
+    if not isinstance(milestones, list):
+        raise ValueError("program baseline milestones must be a list")
+    index: dict[str, dict[str, Any]] = {}
+    for item in milestones:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        if item["id"] in index:
+            raise ValueError(f"program baseline contains duplicate milestone ID {item['id']}")
+        index[item["id"]] = item
+    for update, milestone in requested:
+        baseline_item = index.get(milestone.milestone_id)
+        if baseline_item is None:
+            raise ValueError(
+                f"unknown baseline milestone {milestone.milestone_id}; status sync never creates baseline milestones implicitly"
+            )
+        baseline_workstream = normalize_id(str(baseline_item.get("workstream_id", "")))
+        if baseline_workstream != update.workstream_id:
+            raise ValueError(
+                f"milestone {milestone.milestone_id} belongs to workstream {baseline_workstream}, not {update.workstream_id}"
+            )
+        if milestone.expected_baseline_revision is not None and milestone.expected_baseline_revision != revision:
+            raise ValueError(
+                f"milestone {milestone.milestone_id} expected baseline revision "
+                f"{milestone.expected_baseline_revision}, found {revision}"
+            )
+        record_path = memory_root / "workstreams" / update.workstream_id / "delivery-record.md"
+        if not record_path.exists():
+            raise ValueError(f"delivery-record.md not found for milestone workstream {update.workstream_id}")
+    return {"path": baseline_path, "revision": revision, "milestones": index}
+
+
+def apply_milestone_updates(
+    markdown: str,
+    milestone_updates: list[MilestoneUpdate],
+    baseline_context: dict[str, Any],
+) -> tuple[str, list[dict[str, str]]]:
+    if not milestone_updates:
+        return markdown, []
+    headers, rows, section_start, table_start, table_end = parse_roadmap_table(markdown)
+    extra_headers = [header for header in headers if header not in ROADMAP_FIELDS]
+    output_headers = [*ROADMAP_FIELDS, *extra_headers]
+    changes: list[dict[str, str]] = []
+    baseline_revision = str(baseline_context["revision"])
+
+    for update in milestone_updates:
+        baseline = baseline_context["milestones"][update.milestone_id]
+        name = str(baseline.get("name") or update.milestone_id)
+        row = next(
+            (
+                candidate
+                for candidate in rows
+                if candidate.get("Milestone ID") == update.milestone_id
+                or (not candidate.get("Milestone ID") and candidate.get("Milestone") == name)
+            ),
+            None,
+        )
+        if row is None:
+            row = {header: "" for header in output_headers}
+            rows.append(row)
+        before = json.dumps(row, ensure_ascii=False, sort_keys=True)
+        row["Milestone ID"] = update.milestone_id
+        row["Milestone"] = name
+        row["Type"] = str(baseline.get("type") or row.get("Type") or "checkpoint")
+        row["Status"] = update.status
+        row["Planned"] = str(baseline.get("planned_date") or "TBD")
+        if update.forecast:
+            row["Forecast"] = update.forecast
+        elif not row.get("Forecast"):
+            row["Forecast"] = "TBD"
+        if update.actual:
+            row["Actual"] = update.actual
+        elif not row.get("Actual"):
+            row["Actual"] = "TBD"
+        row["Owner"] = str(baseline.get("owner") or row.get("Owner") or "TBD")
+        row["Confidence"] = row.get("Confidence") or "low"
+        dependencies = baseline.get("dependencies", [])
+        row["Depends On"] = "; ".join(str(value) for value in dependencies) if dependencies else "TBD"
+        row["Source"] = "; ".join(update.evidence)
+        row["Baseline Revision"] = baseline_revision
+        after = json.dumps(row, ensure_ascii=False, sort_keys=True)
+        if before != after:
+            changes.append(
+                {
+                    "field": f"Milestone {update.milestone_id}",
+                    "before": before if before != "{}" else "",
+                    "after": after,
+                }
+            )
+
+    table_lines = [
+        "| " + " | ".join(output_headers) + " |",
+        "| " + " | ".join("---" for _ in output_headers) + " |",
+    ]
+    table_lines.extend(
+        "| " + " | ".join(table_cell(row.get(header, "")) for header in output_headers) + " |"
+        for row in rows
+    )
+    lines = markdown.splitlines()
+    if table_start is not None and table_end is not None:
+        lines[table_start:table_end] = table_lines
+    elif section_start is not None:
+        _, section_end = find_section(lines, "Roadmap")
+        insert_at = section_end
+        while insert_at > section_start + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines[insert_at:insert_at] = ["", *table_lines]
+    else:
+        insert_at = next((index for index, line in enumerate(lines) if re.match(r"^##\s+Record Rule\s*$", line, re.IGNORECASE)), len(lines))
+        block = ["## Roadmap", "", *table_lines, ""]
+        if insert_at and lines[insert_at - 1].strip():
+            block.insert(0, "")
+        lines[insert_at:insert_at] = block
+    return "\n".join(lines).rstrip() + "\n", changes
+
+
+def parse_roadmap_table(markdown: str) -> tuple[list[str], list[dict[str, str]], int | None, int | None, int | None]:
+    lines = markdown.splitlines()
+    section_start, section_end = find_section(lines, "Roadmap")
+    if section_start is None:
+        return [], [], None, None, None
+    table_start = next(
+        (index for index in range(section_start + 1, section_end) if lines[index].strip().startswith("|")),
+        None,
+    )
+    if table_start is None or table_start + 1 >= section_end:
+        return [], [], section_start, None, None
+    headers = split_markdown_row(lines[table_start])
+    divider = split_markdown_row(lines[table_start + 1])
+    if len(headers) != len(divider) or not all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in divider):
+        raise ValueError("existing Roadmap table has an invalid header divider")
+    rows: list[dict[str, str]] = []
+    table_end = table_start + 2
+    while table_end < section_end and lines[table_end].strip().startswith("|"):
+        cells = split_markdown_row(lines[table_end])
+        if len(cells) != len(headers):
+            raise ValueError("existing Roadmap table has a malformed row")
+        row = dict(zip(headers, cells, strict=True))
+        placeholder_id = row.get("Milestone ID", "").strip().upper()
+        if not (row.get("Milestone", "").strip().upper() == "TBD" and placeholder_id in {"", "TBD"}):
+            rows.append(row)
+        table_end += 1
+    return headers, rows, section_start, table_start, table_end
+
+
 def apply_update(
     memory_root: Path,
     update: StatusUpdate,
     ledger_actions: list[dict[str, str]],
+    baseline_context: dict[str, Any] | None,
     dry_run: bool,
 ) -> dict[str, Any]:
     record_path = memory_root / "workstreams" / update.workstream_id / "delivery-record.md"
@@ -840,6 +1148,13 @@ def apply_update(
         if did_change:
             changed_fields.append({"field": label, "before": old_value, "after": value})
 
+    milestone_changes: list[dict[str, str]] = []
+    if update.milestones:
+        if baseline_context is None:
+            raise ValueError("internal error: milestone update has no baseline context")
+        updated, milestone_changes = apply_milestone_updates(updated, update.milestones, baseline_context)
+        changed_fields.extend(milestone_changes)
+
     daily_log = append_daily_log(memory_root, update, changed_fields, timestamp, dry_run)
     if changed_fields and not dry_run:
         record_path.write_text(updated, encoding="utf-8", newline="\n")
@@ -850,6 +1165,11 @@ def apply_update(
         "record": str(record_path),
         "daily_log": str(daily_log),
         "changed_fields": changed_fields,
+        "milestones_updated": [
+            item.milestone_id
+            for item in update.milestones
+            if any(change["field"] == f"Milestone {item.milestone_id}" for change in milestone_changes)
+        ],
         "action_candidates": active_summaries or update.next_actions,
         "actions_registered": [],
         "actions_updated": [],
@@ -869,6 +1189,7 @@ def has_wdr_delta(update: StatusUpdate) -> bool:
             update.dependencies,
             update.change_notes,
             update.next_actions,
+            update.milestones,
         ]
     )
 
@@ -891,6 +1212,8 @@ def update_values(update: StatusUpdate, timestamp: str) -> dict[str, str]:
         values["change_notes"] = "; ".join(update.change_notes)
     if update.next_actions:
         values["next_actions"] = "; ".join(update.next_actions)
+    if update.milestones:
+        values["last_status_sync"] = timestamp
     if values:
         values["last_status_sync"] = timestamp
     return values
@@ -975,6 +1298,18 @@ def append_daily_log(
         for action in update.actions:
             action_ref = action.action_id or action.action
             lines.append(f"  - {action.status}: {action_ref}")
+    if update.milestones:
+        lines.append("- Milestones:")
+        for milestone in update.milestones:
+            date_parts = compact_values(
+                [
+                    f"forecast {milestone.forecast}" if milestone.forecast else "",
+                    f"actual {milestone.actual}" if milestone.actual else "",
+                ]
+            )
+            suffix = f" ({', '.join(date_parts)})" if date_parts else ""
+            lines.append(f"  - {milestone.milestone_id}: {milestone.status}{suffix}")
+            lines.extend(f"    - Evidence: {evidence}" for evidence in milestone.evidence)
     daily_path.write_text(content + "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return daily_path
 
@@ -986,9 +1321,13 @@ def extend_items(lines: list[str], label: str, items: list[str]) -> None:
     lines.extend(f"  - {item}" for item in items)
 
 
+def compact_values(values: list[str]) -> list[str]:
+    return [value for value in values if value]
+
+
 def unresolved_gaps(update: StatusUpdate) -> list[str]:
     gaps: list[str] = []
-    if not any([update.status, update.progress, update.blockers, update.risks, update.dependencies, update.next_actions, update.actions]):
+    if not any([update.status, update.progress, update.blockers, update.risks, update.dependencies, update.next_actions, update.actions, update.milestones]):
         gaps.append("status note contained no reliable volatile field update")
     if update.blockers and not update.next_actions:
         gaps.append("blockers were recorded without next actions")
@@ -1048,6 +1387,7 @@ def run_update(args: argparse.Namespace) -> int:
     project_root = require_project_root(args.project_root)
     memory_root = resolve_memory_root(project_root, args.memory_root)
     updates = updates_from_args(args)
+    baseline_context = validate_milestone_updates(memory_root, updates)
     timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     action_updates = [action for update in updates for action in update.actions]
     ledger_path = memory_root / ACTION_LEDGER_REL
@@ -1064,7 +1404,7 @@ def run_update(args: argparse.Namespace) -> int:
         }
     ledger_rows = ledger_result["rows"]
     hydrate_action_updates_from_ledger(updates, ledger_rows)
-    results = [apply_update(memory_root, update, ledger_rows, args.dry_run) for update in updates]
+    results = [apply_update(memory_root, update, ledger_rows, baseline_context, args.dry_run) for update in updates]
     for result, update in zip(results, updates, strict=True):
         update_action_ids = {action.action_id for action in update.actions if action.action_id}
         update_keys = {
@@ -1085,6 +1425,8 @@ def run_update(args: argparse.Namespace) -> int:
         "dry_run": args.dry_run,
         "project_root": str(project_root),
         "memory_root": str(memory_root),
+        "baseline_path": str(baseline_context["path"]) if baseline_context else None,
+        "baseline_revision": baseline_context["revision"] if baseline_context else None,
         "action_ledger": str(ledger_path),
         "actions_registered": ledger_result["actions_registered"],
         "actions_updated": ledger_result["actions_updated"],

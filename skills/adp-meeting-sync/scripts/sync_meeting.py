@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -16,6 +18,9 @@ from typing import Any
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+SKILLS_ROOT = SKILL_ROOT.parent
+DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
+LANGUAGE_CONTEXT: dict[str, Any] = {"locale": "en", "module": None, "metadata": {}}
 
 CLASSIFICATIONS = {
     "fact",
@@ -25,6 +30,7 @@ CLASSIFICATIONS = {
     "business_decision_needed",
     "no_op",
 }
+MILESTONE_STATUSES = {"planned", "at-risk", "done", "blocked"}
 
 DECISION_TYPE_DEFAULTS = {
     "decision": "FDE internal decision",
@@ -37,7 +43,18 @@ MEETING_LINEAGE_FIELDS = (
     "scenario",
     "audit_path",
     "roadmap_version",
+    "program_status_snapshot_id",
+    "baseline_revision",
+    "source_fingerprints",
+    "input_audit_id",
+    "generator_version",
 )
+
+GENERATOR_VERSION = "2.0.0"
+
+
+class MeetingSyncConflict(RuntimeError):
+    """Raised when replay would change an already landed destination."""
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -51,6 +68,10 @@ def parse_args() -> argparse.Namespace:
         "--plan",
         required=True,
         help="Path to meeting sync JSON plan, or '-' to read from stdin.",
+    )
+    parser.add_argument(
+        "--meeting-pack-distillate",
+        help="Meeting-pack distillate JSON whose next_workflow_payload.lineage is injected and verified.",
     )
     parser.add_argument(
         "--memory-root",
@@ -69,6 +90,8 @@ def parse_args() -> argparse.Namespace:
         help="Business Decision Packet template path. Relative paths resolve from the skill root.",
     )
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    parser.add_argument("--language", help="Override document_output_language for rendered meeting artifacts.")
+    parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
 
@@ -99,9 +122,21 @@ def main() -> int:
         )
         return 2
 
+    config_module = load_module(Path(args.config_script), "adp_meeting_sync_effective_config")
+    overrides = {"document_output_language": args.language} if args.language else None
+    config_code, config = config_module.resolve_effective_config(project_root, overrides)
+    if config_code != 0 or not config.get("ok"):
+        emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
+        return 2
+    locale = str(config.get("document_locale") or "en")
+    LANGUAGE_CONTEXT.update({"locale": locale, "module": config_module, "metadata": language_metadata(config, locale)})
+
     try:
         plan = load_plan(args.plan)
+        if args.meeting_pack_distillate:
+            merge_meeting_pack_lineage(plan, project_root, args.meeting_pack_distillate)
         normalized = normalize_plan(plan)
+        attach_meeting_identity(normalized)
         templates = resolve_templates(args.meeting_note_template, args.business_decision_packet_template)
     except ValueError as exc:
         emit({"ok": False, "error": str(exc)}, args.output)
@@ -123,6 +158,7 @@ def main() -> int:
         print(f"Using memory root: {memory_root}", file=sys.stderr)
 
     result = apply_plan(project_root, memory_root, normalized, templates, args.dry_run)
+    result["language"] = LANGUAGE_CONTEXT["metadata"]
     emit(result, args.output)
     return 0 if result["ok"] else 1
 
@@ -169,6 +205,45 @@ def load_plan(raw_plan: str) -> dict[str, Any]:
     return data
 
 
+def merge_meeting_pack_lineage(plan: dict[str, Any], project_root: Path, raw_path: str) -> None:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = project_root / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"meeting-pack distillate file not found: {path}")
+    try:
+        distillate = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"meeting-pack distillate is not valid JSON: {exc}") from exc
+    if not isinstance(distillate, dict):
+        raise ValueError("meeting-pack distillate root must be a JSON object")
+    payload = distillate.get("next_workflow_payload")
+    if not isinstance(payload, dict):
+        raise ValueError("meeting-pack distillate needs next_workflow_payload")
+    source_lineage = payload.get("lineage")
+    if not isinstance(source_lineage, dict):
+        raise ValueError("meeting-pack distillate needs next_workflow_payload.lineage")
+    missing = [field for field in MEETING_LINEAGE_FIELDS if not source_lineage.get(field)]
+    if missing:
+        raise ValueError("meeting-pack distillate lineage is missing: " + ", ".join(missing))
+    lineage = {field: source_lineage[field] for field in MEETING_LINEAGE_FIELDS}
+    for label, container in (("distillate", distillate), ("next_workflow_payload", payload)):
+        conflicts = [field for field in MEETING_LINEAGE_FIELDS if field in container and container[field] != lineage[field]]
+        if conflicts:
+            raise ValueError(
+                f"meeting-pack {label} lineage conflicts with next_workflow_payload.lineage: {', '.join(conflicts)}"
+            )
+
+    meeting = plan.get("meeting")
+    if not isinstance(meeting, dict):
+        raise ValueError("plan.meeting must be an object")
+    existing = meeting.get("lineage")
+    if existing not in (None, {}) and existing != lineage:
+        raise ValueError("plan meeting.lineage conflicts with meeting-pack distillate")
+    meeting["lineage"] = lineage
+
+
 def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
     meeting = plan.get("meeting")
     items = plan.get("items")
@@ -199,18 +274,27 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         item["closure_criteria"] = string_value(item.get("closure_criteria"))
         item["status_confirmation"] = string_value(item.get("status_confirmation"))
         item["owner_gap"] = string_value(item.get("owner_gap"))
+        item["closure_gap"] = string_value(item.get("closure_gap"))
         item["confirmer_gap"] = string_value(item.get("confirmer_gap"))
         item["speaker_label_gap"] = string_value(item.get("speaker_label_gap"))
         item["gap"] = string_value(item.get("gap"))
+        item["milestones"] = normalize_milestone_updates(
+            item.get("milestones", item.get("milestone_updates", item.get("milestone")))
+        )
         item["packet"] = item.get("packet") if isinstance(item.get("packet"), dict) else {}
         normalized_items.append(item)
 
     raw_lineage = meeting.get("lineage") if isinstance(meeting.get("lineage"), dict) else {}
-    lineage = {
-        field: string_value(raw_lineage.get(field) or meeting.get(field))
-        for field in MEETING_LINEAGE_FIELDS
-    }
-    if not any(lineage.values()):
+    lineage: dict[str, Any] = {}
+    for field in MEETING_LINEAGE_FIELDS:
+        raw_value = raw_lineage.get(field, meeting.get(field))
+        if field == "source_fingerprints":
+            lineage[field] = normalize_fingerprints(raw_value)
+        elif field == "baseline_revision":
+            lineage[field] = raw_value if isinstance(raw_value, int) and not isinstance(raw_value, bool) else string_value(raw_value)
+        else:
+            lineage[field] = string_value(raw_value)
+    if not any(value not in (None, "", {}) for value in lineage.values()):
         lineage = {}
 
     return {
@@ -224,10 +308,32 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "participants": normalize_people(meeting.get("participants")),
             "participant_gaps": normalize_gap_list(meeting.get("participant_gaps")),
             "summary": string_value(meeting.get("summary")) or "TBD",
+            "meeting_instance_id": string_value(meeting.get("meeting_instance_id") or meeting.get("instance_id")),
+            "started_at": string_value(meeting.get("started_at") or meeting.get("actual_started_at")),
+            "ended_at": string_value(meeting.get("ended_at") or meeting.get("actual_ended_at")),
             "lineage": lineage,
         },
         "items": normalized_items,
     }
+
+
+def attach_meeting_identity(plan: dict[str, Any]) -> None:
+    meeting = plan["meeting"]
+    if not meeting["meeting_instance_id"]:
+        identity = {
+            "date": meeting["date"],
+            "type": meeting["type"],
+            "title": meeting["title"],
+            "source": meeting["source"],
+            "started_at": meeting["started_at"],
+            "ended_at": meeting["ended_at"],
+            "scenario": meeting.get("lineage", {}).get("scenario", ""),
+            "meeting_pack_id": meeting.get("lineage", {}).get("meeting_pack_id", ""),
+        }
+        identity_hash = fingerprint_json(identity).split(":", 1)[1][:12]
+        identity_label = slugify(meeting.get("lineage", {}).get("scenario") or meeting["type"])
+        meeting["meeting_instance_id"] = f"mi-{meeting['date']}-{identity_label}-{identity_hash}"
+    meeting["plan_fingerprint"] = fingerprint_json(plan)
 
 
 def validate_plan(plan: dict[str, Any]) -> list[str]:
@@ -235,11 +341,24 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
     meeting = plan["meeting"]
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", meeting["date"]):
         errors.append("meeting.date must use YYYY-MM-DD")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", meeting["meeting_instance_id"]):
+        errors.append("meeting.meeting_instance_id must be a path-safe identifier")
     lineage = meeting.get("lineage", {})
     if lineage:
         missing_lineage = [field for field in MEETING_LINEAGE_FIELDS if not lineage.get(field)]
         if missing_lineage:
             errors.append("meeting.lineage is missing: " + ", ".join(missing_lineage))
+        if not meeting["started_at"] or not meeting["ended_at"]:
+            errors.append("meeting.started_at and meeting.ended_at are required for meeting-pack lineage")
+        if not isinstance(lineage.get("source_fingerprints"), dict):
+            errors.append("meeting.lineage.source_fingerprints must be an object")
+    if meeting["started_at"] or meeting["ended_at"]:
+        started_at = parse_timestamp(meeting["started_at"])
+        ended_at = parse_timestamp(meeting["ended_at"])
+        if started_at is None or ended_at is None:
+            errors.append("meeting.started_at and meeting.ended_at must be ISO-8601 timestamps")
+        elif ended_at < started_at:
+            errors.append("meeting.ended_at must not be before meeting.started_at")
 
     item_ids: set[str] = set()
     for item in plan["items"]:
@@ -269,8 +388,152 @@ def apply_plan(
     dry_run: bool,
 ) -> dict[str, Any]:
     meeting = plan["meeting"]
+    receipt_path = meeting_receipt_path(memory_root, meeting)
+    try:
+        existing_receipt = load_json_object(receipt_path)
+    except MeetingSyncConflict as exc:
+        return {
+            "ok": False,
+            "dry_run": dry_run,
+            "status": "conflict",
+            "error": str(exc),
+            "meeting": meeting,
+            "receipt": str(receipt_path),
+        }
+    if existing_receipt:
+        if existing_receipt.get("plan_fingerprint") != meeting["plan_fingerprint"]:
+            return replay_conflict_result(memory_root, meeting, receipt_path, existing_receipt)
+        if existing_receipt.get("status") == "applied":
+            try:
+                cursor = advance_meeting_cursor(memory_root, meeting, existing_receipt, dry_run)
+            except MeetingSyncConflict as exc:
+                return {
+                    "ok": False,
+                    "dry_run": dry_run,
+                    "status": "conflict",
+                    "error": str(exc),
+                    "meeting": meeting,
+                    "receipt": str(receipt_path),
+                }
+            result = dict(existing_receipt.get("result", {}))
+            result.update(
+                {
+                    "ok": True,
+                    "dry_run": dry_run,
+                    "replay_status": "idempotent-no-op",
+                    "meeting": meeting,
+                    "receipt": str(receipt_path),
+                    "cursor": cursor,
+                }
+            )
+            return result
+
+    run_timestamp = string_value(existing_receipt.get("started_at")) if existing_receipt else ""
+    if not run_timestamp:
+        run_timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    if not dry_run:
+        write_json_atomic(
+            receipt_path,
+            {
+                "schema_version": 1,
+                "meeting_instance_id": meeting["meeting_instance_id"],
+                "plan_fingerprint": meeting["plan_fingerprint"],
+                "status": "applying",
+                "started_at": run_timestamp,
+                "generator_version": GENERATOR_VERSION,
+            },
+        )
+
+    try:
+        result = _apply_plan_once(project_root, memory_root, plan, templates, dry_run, run_timestamp)
+    except MeetingSyncConflict as exc:
+        conflict = {
+            "ok": False,
+            "dry_run": dry_run,
+            "status": "conflict",
+            "error": str(exc),
+            "meeting": meeting,
+            "receipt": str(receipt_path),
+        }
+        if not dry_run:
+            write_json_atomic(
+                receipt_path,
+                {
+                    "schema_version": 1,
+                    "meeting_instance_id": meeting["meeting_instance_id"],
+                    "plan_fingerprint": meeting["plan_fingerprint"],
+                    "status": "conflict",
+                    "started_at": run_timestamp,
+                    "conflict": str(exc),
+                    "generator_version": GENERATOR_VERSION,
+                },
+            )
+        return conflict
+
+    if dry_run:
+        result.update(
+            {
+                "replay_status": "planned",
+                "planned_receipt": str(receipt_path),
+                "planned_cursor": planned_cursor_path(memory_root, meeting),
+            }
+        )
+        return result
+
+    applied_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    receipt = {
+        "schema_version": 1,
+        "meeting_instance_id": meeting["meeting_instance_id"],
+        "plan_fingerprint": meeting["plan_fingerprint"],
+        "status": "applied",
+        "started_at": run_timestamp,
+        "applied_at": applied_at,
+        "archive": rel_to_memory(memory_root, Path(result["touched"]["meeting_archives"][0])),
+        "lineage": meeting.get("lineage", {}),
+        "generator_version": GENERATOR_VERSION,
+        "result": result,
+    }
+    write_json_atomic(receipt_path, receipt)
+    try:
+        cursor = advance_meeting_cursor(memory_root, meeting, receipt, False)
+    except MeetingSyncConflict as exc:
+        return {
+            "ok": False,
+            "dry_run": False,
+            "status": "conflict",
+            "error": str(exc),
+            "meeting": meeting,
+            "receipt": str(receipt_path),
+            "replay_status": "applied-with-cursor-conflict",
+        }
+    result.update(
+        {
+            "replay_status": "applied" if not existing_receipt else "resumed",
+            "receipt": str(receipt_path),
+            "cursor": cursor,
+        }
+    )
+    result.setdefault("touched", {}).setdefault("write_receipts", []).append(str(receipt_path))
+    if cursor.get("path") and cursor.get("status") in {"advanced", "unchanged", "repaired"}:
+        result["touched"].setdefault("meeting_cursors", []).append(cursor["path"])
+    result["touched"] = dedupe_touched(result["touched"])
+    receipt["result"] = result
+    receipt["cursor"] = cursor
+    write_json_atomic(receipt_path, receipt)
+    return result
+
+
+def _apply_plan_once(
+    project_root: Path,
+    memory_root: Path,
+    plan: dict[str, Any],
+    templates: dict[str, Path],
+    dry_run: bool,
+    run_timestamp: str,
+) -> dict[str, Any]:
+    meeting = plan["meeting"]
     items = plan["items"]
-    now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    now = run_timestamp
     ensure_directories(memory_root, dry_run)
 
     touched: dict[str, list[str]] = {
@@ -285,10 +548,9 @@ def apply_plan(
     }
     unresolved_gaps: list[str] = []
 
-    meeting_path = unique_path(
-        memory_root / "meetings",
-        f"{meeting['date']}-{slugify(meeting['type'])}-{slugify(meeting['title'])}.md",
-        dry_run,
+    instance_suffix = meeting_instance_suffix(meeting)
+    meeting_path = memory_root / "meetings" / (
+        f"{meeting['date']}-{slugify(meeting['type'])}-{slugify(meeting['title'])}-{instance_suffix}.md"
     )
     raw_evidence_path, raw_evidence_gap = copy_raw_evidence(project_root, memory_root, meeting, dry_run)
     if raw_evidence_path:
@@ -328,6 +590,9 @@ def apply_plan(
     lineage_block = render_meeting_lineage(meeting)
     if lineage_block:
         meeting_content = meeting_content.rstrip() + "\n\n" + lineage_block + "\n"
+    identity_block = render_meeting_identity(meeting)
+    meeting_content = meeting_content.rstrip() + "\n\n" + identity_block + "\n"
+    meeting_content = localize_system_copy(meeting_content)
     write_file(meeting_path, meeting_content, dry_run)
     touched["meeting_archives"].append(str(meeting_path))
 
@@ -389,7 +654,14 @@ def apply_plan(
                         f"{item['id']}: WDR update references missing workstream {workstream_id}"
                     )
 
-    status_sync_intake, action_quality_audit = build_status_sync_intake(memory_root, meeting_path, meeting, items)
+    status_sync_intake, action_quality_audit, milestone_quality_audit = build_status_sync_intake(
+        memory_root, meeting_path, meeting, items
+    )
+    unresolved_gaps.extend(
+        f"{item['item_id']}: {gap}"
+        for item in milestone_quality_audit["blocked_milestones"]
+        for gap in item["gaps"]
+    )
     if status_sync_intake:
         intake_path = status_sync_intake_path(memory_root, meeting, dry_run)
         write_file(
@@ -407,6 +679,7 @@ def apply_plan(
         "touched": dedupe_touched(touched),
         "unresolved_gaps": sorted(set(unresolved_gaps)),
         "action_quality_audit": action_quality_audit,
+        "milestone_quality_audit": milestone_quality_audit,
         "next_actions": next_actions(
             project_root,
             memory_root,
@@ -421,6 +694,8 @@ def ensure_directories(memory_root: Path, dry_run: bool) -> None:
     for rel in [
         "meetings",
         "meetings/raw",
+        "meetings/receipts",
+        "meetings/cursors",
         "daily",
         "decisions",
         "decisions/business-decision-packets",
@@ -451,11 +726,11 @@ def copy_raw_evidence(
 
     target_name = (
         f"{meeting['date']}-{slugify(meeting['type'])}-{slugify(meeting['title'])}-"
-        f"{slugify(meeting['raw_evidence_label'])}{source.suffix or '.txt'}"
+        f"{slugify(meeting['raw_evidence_label'])}-{meeting_instance_suffix(meeting)}{source.suffix or '.txt'}"
     )
-    target = unique_path(memory_root / "meetings" / "raw", target_name, dry_run)
+    target = memory_root / "meetings" / "raw" / target_name
     if not dry_run:
-        target.write_bytes(source.read_bytes())
+        write_bytes_once(target, source.read_bytes())
     return target, ""
 
 
@@ -473,7 +748,7 @@ def render_item_outputs(
     for item in items:
         item_destinations = planned_destinations(memory_root, meeting_path, meeting, item)
         destinations[item["id"]] = item_destinations
-        gap = item_gap(item)
+        gap = item_gap(meeting, item)
         if gap:
             unresolved_gaps.append(f"{item['id']}: {gap}")
         closure_rows.append(
@@ -521,17 +796,17 @@ def planned_destinations(
     return destinations
 
 
-def item_gap(item: dict[str, Any]) -> str:
+def item_gap(meeting: dict[str, Any], item: dict[str, Any]) -> str:
     gaps: list[str] = []
     if item["classification"] in {"action", "wdr_update"} and not item["affected_workstreams"]:
         gaps.append("affected workstream is missing")
     if item["classification"] == "action":
-        if is_generic_owner(item["owner"]):
-            gaps.append("action owner is missing or generic")
+        if is_missing_owner(item["owner"]):
+            gaps.append("action owner is missing")
         if is_missing_due(item["due"]):
             gaps.append("action due trigger is missing")
-        if is_generic_closure_criteria(item["closure_criteria"]):
-            gaps.append("action closure criteria is missing or not verifiable")
+        if is_missing_closure_criteria(item["closure_criteria"]):
+            gaps.append("action closure criteria is missing")
     if item["classification"] in {"decision", "business_decision_needed"} and item["confirmer"] == "TBD":
         gaps.append("confirmer is missing")
     if item["classification"] == "wdr_update" and not item["wdr_update"]:
@@ -540,12 +815,15 @@ def item_gap(item: dict[str, Any]) -> str:
         gap
         for gap in [
             item["owner_gap"],
+            item["closure_gap"],
             item["confirmer_gap"],
             item["speaker_label_gap"],
             item["gap"],
         ]
         if gap
     )
+    for milestone in item["milestones"]:
+        gaps.extend(milestone_handoff_gaps(meeting, item, milestone))
     return "; ".join(gaps)
 
 
@@ -591,13 +869,17 @@ def render_daily_block(
             ),
         )
     lineage_lines = [
-        f"- {field.replace('_', ' ').title()}: `{value}`"
+        f"- {field.replace('_', ' ').title()}: `{render_metadata_value(value)}`"
         for field, value in meeting.get("lineage", {}).items()
     ]
     return "\n".join(
         [
+            operation_marker(meeting, "daily"),
             f"## Meeting Sync: {meeting['title']}",
             "",
+            f"- Meeting instance ID: `{meeting['meeting_instance_id']}`",
+            f"- Actual start: `{meeting.get('started_at') or 'TBD'}`",
+            f"- Actual end: `{meeting.get('ended_at') or 'TBD'}`",
             f"- Type: {meeting['type']}",
             f"- Source: {meeting['source']}",
             *lineage_lines,
@@ -623,7 +905,21 @@ def render_meeting_lineage(meeting: dict[str, Any]) -> str:
         [
             "## Meeting Pack Lineage",
             "",
-            *[f"- {field}: `{lineage[field]}`" for field in MEETING_LINEAGE_FIELDS],
+            *[f"- {field}: `{render_metadata_value(lineage[field])}`" for field in MEETING_LINEAGE_FIELDS],
+        ]
+    )
+
+
+def render_meeting_identity(meeting: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "## Meeting Instance",
+            "",
+            f"- meeting_instance_id: `{meeting['meeting_instance_id']}`",
+            f"- plan_fingerprint: `{meeting['plan_fingerprint']}`",
+            f"- started_at: `{meeting.get('started_at') or 'TBD'}`",
+            f"- ended_at: `{meeting.get('ended_at') or 'TBD'}`",
+            f"- generator_version: `{GENERATOR_VERSION}`",
         ]
     )
 
@@ -655,14 +951,16 @@ def upsert_decision_rows(path: Path, rows: list[str], dry_run: bool) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(default_decision_log() + "\n", encoding="utf-8", newline="\n")
+        write_text_atomic(path, default_decision_log() + "\n")
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     lines = [line for line in lines if not is_placeholder_decision_row(line)]
+    existing_rows = set(lines)
+    rows = [row for row in rows if row not in existing_rows]
     insert_at = find_decision_table_insert_index(lines)
     for row in reversed(rows):
         lines.insert(insert_at, row)
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8", newline="\n")
+    write_text_atomic(path, "\n".join(lines).rstrip() + "\n")
 
 
 def find_decision_table_insert_index(lines: list[str]) -> int:
@@ -727,6 +1025,7 @@ def create_business_packet(
             "RISKS_TRADEOFFS": string_value(packet.get("risks_tradeoffs")) or "TBD",
         },
     )
+    content = localize_system_copy(content)
     write_file(packet_path, content, dry_run)
     return packet_path
 
@@ -738,8 +1037,8 @@ def business_packet_path(
     dry_run: bool,
 ) -> Path:
     title = decision_text(item)
-    filename = f"{meeting['date']}-{slugify(item['id'])}-{slugify(title)}.md"
-    return unique_path(memory_root / "decisions" / "business-decision-packets", filename, dry_run)
+    filename = f"{meeting['date']}-{slugify(item['id'])}-{slugify(title)}-{meeting_instance_suffix(meeting)}.md"
+    return memory_root / "decisions" / "business-decision-packets" / filename
 
 
 def decision_text(item: dict[str, Any]) -> str:
@@ -758,6 +1057,7 @@ def render_workstream_decision_block(
 ) -> str:
     return "\n".join(
         [
+            operation_marker(meeting, f"workstream-decision:{item['id']}"),
             f"## Meeting Decision: {meeting['date']} - {item['id']}",
             "",
             f"- Source: `{rel_to_memory(memory_root, meeting_path)}`",
@@ -780,6 +1080,7 @@ def render_wdr_block(
     update = item["wdr_update"] or item["text"]
     return "\n".join(
         [
+            operation_marker(meeting, f"wdr:{item['id']}"),
             f"## Meeting Sync Update: {meeting['date']} - {item['id']}",
             "",
             f"- Source: `{rel_to_memory(memory_root, meeting_path)}`",
@@ -804,7 +1105,7 @@ def build_status_sync_intake(
     meeting_path: Path,
     meeting: dict[str, Any],
     items: list[dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     audit = {
         "actions_seen": 0,
         "canonical_actions": 0,
@@ -821,6 +1122,11 @@ def build_status_sync_intake(
         "status_calibrations": [],
     }
     canonical_actions: dict[str, dict[str, Any]] = {}
+    milestone_audit = {
+        "milestones_seen": 0,
+        "ledger_ready_milestones": 0,
+        "blocked_milestones": [],
+    }
 
     for item in items:
         if item["classification"] != "action":
@@ -830,7 +1136,7 @@ def build_status_sync_intake(
         affected_workstreams = item["affected_workstreams"]
         blocking_gaps = action_blocking_gaps(item)
         closure_criteria = item["closure_criteria"]
-        closure_gap = is_generic_closure_criteria(closure_criteria)
+        closure_gap = is_missing_closure_criteria(closure_criteria) or bool(item["closure_gap"])
         if closure_gap:
             audit["closure_gap_count"] += 1
             closure_criteria = "TBD"
@@ -859,7 +1165,7 @@ def build_status_sync_intake(
         if affected_workstreams:
             reason_parts.append(f"Affected workstreams: {', '.join(affected_workstreams)}")
         if closure_gap:
-            reason_parts.append("Closure criteria is missing or not verifiable")
+            reason_parts.append(item["closure_gap"] or "Closure criteria is missing")
             if status == "open":
                 status = "blocked"
                 audit["status_calibrated_count"] += 1
@@ -926,12 +1232,37 @@ def build_status_sync_intake(
                 update["next_actions"].append(action["action"])
         update["actions"].append(action)
 
+    for item in items:
+        for milestone in item["milestones"]:
+            milestone_audit["milestones_seen"] += 1
+            gaps = milestone_handoff_gaps(meeting, item, milestone)
+            if gaps:
+                milestone_audit["blocked_milestones"].append(
+                    {"item_id": item["id"], "milestone_id": milestone.get("milestone_id"), "gaps": gaps}
+                )
+                continue
+            workstream_id = item["affected_workstreams"][0]
+            payload = dict(milestone)
+            if payload.get("baseline_revision") in (None, ""):
+                payload["baseline_revision"] = meeting.get("lineage", {}).get("baseline_revision")
+            payload["source"] = f"{rel_to_memory(memory_root, meeting_path)}#{item['id']}"
+            update = updates_by_workstream.setdefault(
+                workstream_id,
+                {"id": workstream_id, "source": "adp-meeting-sync", "next_actions": [], "actions": []},
+            )
+            update.setdefault("milestones", []).append(payload)
+            milestone_audit["ledger_ready_milestones"] += 1
+
     audit["canonical_actions"] = len(canonical_actions)
     audit["ledger_ready_actions"] = sum(len(update["actions"]) for update in updates_by_workstream.values())
     if not updates_by_workstream:
-        return {}, audit
+        return {}, audit, milestone_audit
     meeting_payload = {
+        "meeting_instance_id": meeting["meeting_instance_id"],
+        "plan_fingerprint": meeting["plan_fingerprint"],
         "date": meeting["date"],
+        "started_at": meeting.get("started_at"),
+        "ended_at": meeting.get("ended_at"),
         "title": meeting["title"],
         "source": meeting["source"],
         "archive": rel_to_memory(memory_root, meeting_path),
@@ -942,16 +1273,17 @@ def build_status_sync_intake(
         "generated_by": "adp-meeting-sync",
         "meeting": meeting_payload,
         "action_quality_audit": audit,
+        "milestone_quality_audit": milestone_audit,
         "updates": list(updates_by_workstream.values()),
-    }, audit
+    }, audit, milestone_audit
 
 
 def action_blocking_gaps(item: dict[str, Any]) -> list[dict[str, str]]:
     gaps: list[dict[str, str]] = []
     if not item["affected_workstreams"]:
         gaps.append({"type": "workstream", "message": "affected workstream is missing"})
-    if is_generic_owner(item["owner"]) or item["owner_gap"]:
-        gaps.append({"type": "owner", "message": item["owner_gap"] or "action owner is missing or generic"})
+    if is_missing_owner(item["owner"]) or item["owner_gap"]:
+        gaps.append({"type": "owner", "message": item["owner_gap"] or "action owner is missing"})
     if is_missing_due(item["due"]):
         gaps.append({"type": "due", "message": "action due trigger is missing"})
     return gaps
@@ -998,16 +1330,148 @@ def normalize_action_status(raw: Any) -> str:
     return "open"
 
 
+def meeting_receipt_path(memory_root: Path, meeting: dict[str, Any]) -> Path:
+    return memory_root / "meetings" / "receipts" / f"{meeting['meeting_instance_id']}.json"
+
+
+def planned_cursor_path(memory_root: Path, meeting: dict[str, Any]) -> str | None:
+    scenario = string_value(meeting.get("lineage", {}).get("scenario"))
+    if not scenario or not meeting.get("started_at") or not meeting.get("ended_at"):
+        return None
+    return str(memory_root / "meetings" / "cursors" / f"{slugify(scenario)}.json")
+
+
+def advance_meeting_cursor(
+    memory_root: Path,
+    meeting: dict[str, Any],
+    receipt: dict[str, Any],
+    dry_run: bool,
+) -> dict[str, Any]:
+    raw_path = planned_cursor_path(memory_root, meeting)
+    if raw_path is None:
+        return {"status": "not-applicable", "reason": "meeting has no scenario lineage with actual timestamps"}
+    path = Path(raw_path)
+    archive = string_value(receipt.get("archive"))
+    if not archive:
+        raise MeetingSyncConflict("applied receipt is missing its meeting archive")
+    archive_path = memory_root / archive
+    if not archive_path.is_file():
+        raise MeetingSyncConflict(f"applied receipt archive is missing: {archive_path}")
+
+    cursor = {
+        "schema_version": 1,
+        "scenario": meeting["lineage"]["scenario"],
+        "meeting_instance_id": meeting["meeting_instance_id"],
+        "meeting_date": meeting["date"],
+        "started_at": meeting["started_at"],
+        "ended_at": meeting["ended_at"],
+        "archive": archive,
+        "receipt": rel_to_memory(memory_root, meeting_receipt_path(memory_root, meeting)),
+        "plan_fingerprint": meeting["plan_fingerprint"],
+        "lineage": meeting["lineage"],
+        "advanced_at": string_value(receipt.get("applied_at")),
+        "generator_version": GENERATOR_VERSION,
+    }
+    existing = load_json_object(path)
+    if existing:
+        if existing.get("meeting_instance_id") == meeting["meeting_instance_id"]:
+            if existing.get("plan_fingerprint") != meeting["plan_fingerprint"]:
+                raise MeetingSyncConflict(f"scenario cursor points to the same meeting instance with a different plan: {path}")
+            if existing == cursor:
+                return {"status": "unchanged", "path": str(path), "meeting_instance_id": meeting["meeting_instance_id"]}
+            if dry_run:
+                return {"status": "planned-repair", "path": str(path), "meeting_instance_id": meeting["meeting_instance_id"]}
+            write_json_atomic(path, cursor)
+            return {"status": "repaired", "path": str(path), "meeting_instance_id": meeting["meeting_instance_id"]}
+        existing_end = parse_timestamp(string_value(existing.get("ended_at")))
+        new_end = parse_timestamp(meeting["ended_at"])
+        if existing_end is None:
+            raise MeetingSyncConflict(f"scenario cursor has an invalid ended_at timestamp: {path}")
+        existing_key = (existing_end, string_value(existing.get("meeting_instance_id")))
+        new_key = (new_end, meeting["meeting_instance_id"]) if new_end is not None else None
+        if new_key is not None and existing_key > new_key:
+            return {
+                "status": "not-advanced",
+                "reason": "an older meeting cannot move the scenario cursor backwards",
+                "path": str(path),
+                "meeting_instance_id": existing.get("meeting_instance_id"),
+            }
+    if dry_run:
+        return {"status": "planned", "path": str(path), "meeting_instance_id": meeting["meeting_instance_id"]}
+    write_json_atomic(path, cursor)
+    return {"status": "advanced", "path": str(path), "meeting_instance_id": meeting["meeting_instance_id"]}
+
+
+def replay_conflict_result(
+    memory_root: Path,
+    meeting: dict[str, Any],
+    receipt_path: Path,
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "dry_run": False,
+        "status": "conflict",
+        "error": "meeting instance already exists with a different plan fingerprint",
+        "memory_root": str(memory_root),
+        "meeting": meeting,
+        "receipt": str(receipt_path),
+        "existing_plan_fingerprint": receipt.get("plan_fingerprint"),
+        "incoming_plan_fingerprint": meeting["plan_fingerprint"],
+    }
+
+
 def status_sync_intake_path(memory_root: Path, meeting: dict[str, Any], dry_run: bool) -> Path:
-    filename = f"{meeting['date']}-{slugify(meeting['title'])}-actions.json"
-    return unique_path(memory_root / "intake" / "status-sync", filename, dry_run)
+    filename = f"{meeting['date']}-{slugify(meeting['title'])}-{meeting_instance_suffix(meeting)}-actions.json"
+    return memory_root / "intake" / "status-sync" / filename
 
 
 def write_file(path: Path, content: str, dry_run: bool) -> None:
     if dry_run:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content.rstrip() + "\n", encoding="utf-8", newline="\n")
+    normalized = content.rstrip() + "\n"
+    if path.exists():
+        if path.read_text(encoding="utf-8") == normalized:
+            return
+        raise MeetingSyncConflict(f"destination already exists with different content: {path}")
+    write_text_atomic(path, normalized)
+
+
+def write_bytes_once(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() == content:
+            return
+        raise MeetingSyncConflict(f"destination already exists with different content: {path}")
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_bytes(content)
+    temporary.replace(path)
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    write_text_atomic(path, content)
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(content, encoding="utf-8", newline="\n")
+    temporary.replace(path)
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MeetingSyncConflict(f"durable JSON state is invalid: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise MeetingSyncConflict(f"durable JSON state must be an object: {path}")
+    return payload
 
 
 def append_file(path: Path, block: str, dry_run: bool) -> None:
@@ -1015,9 +1479,12 @@ def append_file(path: Path, block: str, dry_run: bool) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(f"# {path.stem.replace('-', ' ').title()}\n\n", encoding="utf-8", newline="\n")
+        write_text_atomic(path, f"# {path.stem.replace('-', ' ').title()}\n\n")
     existing = path.read_text(encoding="utf-8").rstrip()
-    path.write_text(existing + "\n\n" + block.rstrip() + "\n", encoding="utf-8", newline="\n")
+    first_line = block.splitlines()[0] if block.splitlines() else ""
+    if first_line.startswith("<!-- adp-meeting-sync:") and first_line in existing:
+        return
+    write_text_atomic(path, existing + "\n\n" + block.rstrip() + "\n")
 
 
 def unique_path(directory: Path, filename: str, dry_run: bool = False) -> Path:
@@ -1104,6 +1571,68 @@ def normalize_gap_list(raw: Any) -> list[str]:
     return [value for value in values if value]
 
 
+def normalize_milestone_updates(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, list) else [raw]
+    milestones: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            milestones.append({"milestone_id": "", "status": "", "forecast": "", "actual": "", "evidence": []})
+            continue
+        revision = value.get("baseline_revision")
+        milestones.append(
+            {
+                "milestone_id": string_value(value.get("milestone_id") or value.get("id")),
+                "status": string_value(value.get("status")).lower().replace("_", "-"),
+                "forecast": string_value(value.get("forecast")),
+                "actual": string_value(value.get("actual")),
+                "evidence": normalize_gap_list(value.get("evidence", value.get("sources", value.get("source")))),
+                "baseline_revision": revision if isinstance(revision, int) and not isinstance(revision, bool) else string_value(revision),
+            }
+        )
+    return milestones
+
+
+def milestone_handoff_gaps(
+    meeting: dict[str, Any],
+    item: dict[str, Any],
+    milestone: dict[str, Any],
+) -> list[str]:
+    gaps: list[str] = []
+    if len(item["affected_workstreams"]) != 1:
+        gaps.append("milestone update requires exactly one affected workstream")
+    if not milestone.get("milestone_id"):
+        gaps.append("milestone_id is missing")
+    if milestone.get("status") not in MILESTONE_STATUSES:
+        gaps.append("milestone status is missing or invalid")
+    if not milestone.get("evidence"):
+        gaps.append("milestone evidence is missing")
+    for field in ("forecast", "actual"):
+        value = string_value(milestone.get(field))
+        if value and parse_iso_date(value) is None:
+            gaps.append(f"milestone {field} must use YYYY-MM-DD")
+    explicit_revision = milestone.get("baseline_revision")
+    revision = (
+        meeting.get("lineage", {}).get("baseline_revision")
+        if explicit_revision in (None, "")
+        else explicit_revision
+    )
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        gaps.append("milestone baseline_revision is missing or invalid")
+    return gaps
+
+
+def normalize_fingerprints(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        string_value(key): string_value(value)
+        for key, value in sorted(raw.items(), key=lambda item: str(item[0]))
+        if string_value(key) and string_value(value)
+    }
+
+
 def is_missing_due(value: str) -> bool:
     due = string_value(value)
     return not due or due == "TBD"
@@ -1114,41 +1643,9 @@ def is_missing_owner(value: str) -> bool:
     return not owner or owner == "TBD"
 
 
-def is_generic_owner(value: str) -> bool:
-    owner = normalize_text_key(value)
-    if not owner or owner in {"tbd", "owner", "participants", "meeting participants", "all participants"}:
-        return True
-    generic_phrases = [
-        "each workstream",
-        "fde owner",
-        "workstream fde owner",
-        "all fdes",
-        "attendees",
-        "各条线",
-        "各线",
-        "参会人员",
-        "负责人",
-        "待定",
-    ]
-    return any(phrase in owner for phrase in generic_phrases)
-
-
-def is_generic_closure_criteria(value: str) -> bool:
-    criteria = normalize_text_key(value)
-    if not criteria or criteria == "tbd":
-        return True
-    generic_phrases = [
-        "update completion status",
-        "updates completion status",
-        "wdr daily log or status sync",
-        "wdr daily log status sync",
-        "status sync update",
-        "更新完成状态",
-        "后续 status sync",
-        "对应 wdr",
-        "daily log",
-    ]
-    return any(phrase in criteria for phrase in generic_phrases)
+def is_missing_closure_criteria(value: str) -> bool:
+    criteria = string_value(value)
+    return not criteria or criteria == "TBD"
 
 
 def parse_due_date(value: str) -> date | None:
@@ -1163,6 +1660,28 @@ def parse_due_date(value: str) -> date | None:
         return None
 
 
+def parse_iso_date(value: str) -> date | None:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def parse_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
 def normalize_text_key(value: str) -> str:
     text = string_value(value).lower()
     text = re.sub(r"[\W_]+", " ", text, flags=re.UNICODE)
@@ -1175,6 +1694,26 @@ def string_value(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value).strip()
+
+
+def fingerprint_json(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def meeting_instance_suffix(meeting: dict[str, Any]) -> str:
+    return meeting["meeting_instance_id"].rsplit("-", 1)[-1]
+
+
+def operation_marker(meeting: dict[str, Any], operation: str) -> str:
+    operation_hash = hashlib.sha256(operation.encode("utf-8")).hexdigest()[:12]
+    return f"<!-- adp-meeting-sync:{meeting['meeting_instance_id']}:{slugify(operation)}-{operation_hash} -->"
+
+
+def render_metadata_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return string_value(value)
 
 
 def default_status(classification: str) -> str:
@@ -1207,21 +1746,21 @@ def next_actions(
 ) -> list[str]:
     actions: list[str] = []
     for path in status_sync_intake_files:
-        actions.append(f'Run adp-status-sync update "{project_root}" --updates-file "{path}" to register meeting actions.')
+        actions.append(runtime_message("meeting_sync.next.status_sync", project_root=project_root, path=path))
     if action_quality_audit.get("blocked_actions"):
-        actions.append("Resolve blocked meeting action gaps before ledger registration: owner, workstream, and due must be specific.")
+        actions.append(runtime_message("meeting_sync.next.resolve_actions"))
     if action_quality_audit.get("status_calibrated_count"):
-        actions.append("Review blocked past-due or weak-closure meeting actions and confirm whether they are done, cancelled, or still active.")
+        actions.append(runtime_message("meeting_sync.next.review_actions"))
     if has_missing_workstream_route(memory_root, items):
-        actions.append("Run adp-workstream-register or correct workstream ids for missing WDR references.")
+        actions.append(runtime_message("meeting_sync.next.workstream"))
     if any(item["classification"] == "business_decision_needed" for item in items):
-        actions.append("Run adp-risk-dependency-change-review for open business decision packets.")
+        actions.append(runtime_message("meeting_sync.next.risk_review"))
     has_wdr_update = any(item["classification"] == "wdr_update" for item in items)
     has_ready_actions = bool(action_quality_audit.get("ledger_ready_actions"))
     if not status_sync_intake_files and (has_wdr_update or has_ready_actions):
-        actions.append("Run adp-status-sync to refresh recurring status views from the new meeting updates.")
+        actions.append(runtime_message("meeting_sync.next.refresh_status"))
     if not actions:
-        actions.append("Review the meeting archive and continue with the next ADP workflow only if gaps remain.")
+        actions.append(runtime_message("meeting_sync.next.review_archive"))
     return actions
 
 
@@ -1243,6 +1782,110 @@ def emit(result: dict[str, Any], output: str | None) -> None:
         Path(output).write_text(payload + "\n", encoding="utf-8", newline="\n")
     else:
         sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
+
+
+MEETING_SYSTEM_LINES = {
+    "## Summary": "meeting_sync.summary",
+    "## Closure Ledger": "meeting_sync.closure_ledger",
+    "## Items": "meeting_sync.items",
+    "## Meeting Rule": "meeting_sync.meeting_rule",
+    "| ID | Classification | Workstreams | Owner | Due / Trigger | Destination | Gap |": "meeting_sync.closure_header",
+    "Every item above must close into daily log, decision, action, WDR update, Business Decision Packet, or explicit no-op.": "meeting_sync.meeting_rule_text",
+    "## Background": "meeting_sync.background",
+    "## Decision Needed": "meeting_sync.decision_needed",
+    "## Options": "meeting_sync.options",
+    "## Recommendation": "meeting_sync.recommendation",
+    "## Risks and Trade-offs": "meeting_sync.risks_tradeoffs",
+    "## Final Decision": "meeting_sync.final_decision",
+    "## Follow-up": "meeting_sync.follow_up",
+    "- Update affected WDRs after confirmation.": "meeting_sync.follow_up_wdr",
+    "- Update `decisions/decision-log.md` when the final decision is confirmed.": "meeting_sync.follow_up_decision",
+}
+
+MEETING_SYSTEM_PREFIXES = {
+    "Date": "meeting_sync.date",
+    "Type": "common.type",
+    "Source": "common.source",
+    "Raw evidence": "meeting_sync.raw_evidence",
+    "Participants": "meeting_sync.participants",
+    "Generated": "common.generated",
+    "Created": "meeting_sync.created",
+    "Source meeting": "meeting_sync.source_meeting",
+    "Affected workstreams": "meeting_sync.affected_workstreams",
+    "Status": "common.status",
+    "Confirming owner": "meeting_sync.confirming_owner",
+    "Deadline / trigger": "common.due_trigger",
+    "- Affected workstreams": "meeting_sync.affected_workstreams_bullet",
+    "- Owner": "meeting_sync.owner_bullet",
+    "- Due / trigger": "meeting_sync.due_bullet",
+    "- Decision type": "meeting_sync.decision_type_bullet",
+    "- Confirmer": "meeting_sync.confirmer_bullet",
+    "- Status": "meeting_sync.status_bullet",
+    "- Destinations": "meeting_sync.destinations_bullet",
+    "- WDR update": "meeting_sync.wdr_update_bullet",
+    "- No-op reason": "meeting_sync.no_op_bullet",
+    "- Gap": "meeting_sync.gap_bullet",
+}
+
+# These headings are canonical fact-layer structure consumed by replay, audit, and sync readers.
+MEETING_CANONICAL_FACT_COPY = {
+    "## Meeting Pack Lineage",
+    "## Meeting Instance",
+    "## Meeting Sync:",
+    "## Meeting Decision:",
+    "## Meeting Sync Update:",
+    "# Decision Log",
+    "| ID | Classification | Workstreams | Owner | Due / Trigger | Item |",
+    "| Date | Type | Decision / Question | Source | Affected Workstreams | Confirmer | Status | Link |",
+    "| Date | Type |",
+}
+
+
+def localize_system_copy(content: str) -> str:
+    locale = str(LANGUAGE_CONTEXT.get("locale") or "en")
+    module = LANGUAGE_CONTEXT.get("module")
+    if locale == "en" or module is None:
+        return content
+    lines: list[str] = []
+    for line in content.splitlines():
+        key = MEETING_SYSTEM_LINES.get(line)
+        if key:
+            lines.append(module.message(key, locale))
+            continue
+        replaced = False
+        for prefix, prefix_key in MEETING_SYSTEM_PREFIXES.items():
+            marker = prefix + ":"
+            if line.startswith(marker):
+                lines.append(module.message(prefix_key, locale) + ":" + line[len(marker):])
+                replaced = True
+                break
+        if not replaced:
+            lines.append(line)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def runtime_message(key: str, **values: Any) -> str:
+    locale = str(LANGUAGE_CONTEXT.get("locale") or "en")
+    module = LANGUAGE_CONTEXT.get("module")
+    return module.message(key, locale, **values) if module is not None else key
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load shared ADP config module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def language_metadata(config: dict[str, Any], locale: str) -> dict[str, Any]:
+    return {
+        "locale": locale,
+        "document_output_language": config.get("values", {}).get("document_output_language", "English"),
+        "fallback": "document_output_language" in config.get("fallbacks", []),
+        "warnings": config.get("warnings", []),
+    }
 
 
 if __name__ == "__main__":

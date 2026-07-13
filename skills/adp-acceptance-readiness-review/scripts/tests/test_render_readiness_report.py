@@ -164,6 +164,26 @@ class RenderReadinessReportTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertIn("acceptance.roadmap_status", result["error"])
 
+    def test_language_golden_localizes_reports_and_preserves_canonical_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            packet_path = self.write_packet(root)
+            report_path = root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md"
+
+            chinese = self.run_script(root, packet_path, "--mode", "acceptance", "--language", "Chinese")
+            chinese_text = report_path.read_text(encoding="utf-8")
+            self.assertEqual(chinese["language"]["locale"], "zh")
+            self.assertIn("# 验收就绪度报告", chinese_text)
+            self.assertIn("Payment proof missing", chinese_text)
+            self.assertIn("at-risk", chinese_text)
+
+            english = self.run_script(root, packet_path, "--mode", "acceptance", "--language", "English")
+            english_text = report_path.read_text(encoding="utf-8")
+            self.assertEqual(english["language"]["locale"], "en")
+            self.assertIn("# Acceptance Readiness Report", english_text)
+            self.assertIn("Payment proof missing", english_text)
+            self.assertIn("at-risk", english_text)
+
 
 if __name__ == "__main__":
     unittest.main()

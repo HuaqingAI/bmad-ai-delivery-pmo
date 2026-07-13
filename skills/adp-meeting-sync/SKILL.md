@@ -21,14 +21,7 @@ The consumers are FDE owners, the project lead, status-sync, risk/change review,
 
 Resolve the target `{project-root}` before any user-facing output. This is the project where ADP is installed or being run, not the module build repository.
 
-Load BMad configuration from the target project in this order:
-
-1. `{project-root}/_bmad/adp/config.yaml` (primary ADP install-time config)
-2. `{project-root}/_bmad/config.user.yaml` and `{project-root}/_bmad/config.yaml` when present
-3. `{project-root}/_bmad/core/config.yaml`
-4. `{project-root}/_bmad/bmm/config.yaml` or `{project-root}/_bmad/bmb/config.yaml` as compatibility fallbacks
-
-Use `communication_language` for all conversation and status output. Use `document_output_language` for generated project documents and report text. If no config file exists, say that explicitly and fall back to English.
+Resolve the installed `adp-plan-baseline` skill root, then run its `scripts/adp_effective_config.py` for `{project-root}` and consume the returned `values`, locales, fallbacks, and warnings. Use its resolved `communication_language` for conversation and `document_output_language` for artifacts; `--language` overrides one writer run. Localize system copy only, never source facts, canonical enums, fact-layer fields, or lineage.
 
 ## On Activation
 
@@ -49,7 +42,7 @@ Load member hints when present from the project charter, workstream records, reg
 
 Use raw meeting evidence as the source of truth: transcript text, chat excerpts, offline notes, or a file path containing that raw content. Third-party AI summaries, including DingTalk AI Minutes summaries, may help identify the meeting and display candidate metadata, but they are not reliable enough for ADP classification because they may omit project context. Do not build the sync plan from a summary alone; ask for raw content when raw evidence is missing.
 
-When the meeting follows an `adp-meeting-pack` readout, copy the distillate's `meeting_pack_id`, `meeting_pack_path`, `scenario`, `audit_path`, and `roadmap_version` into `meeting.lineage`. Preserve those values unchanged so the archive, daily log, and status-sync intake remain traceable to the exact pack and quality gate.
+For an `adp-meeting-pack` readout, pass its distillate path to the writer; the model supplies actual `started_at` / `ended_at` and meeting content, while the writer owns lineage extraction and verification.
 
 When the user has not provided raw content and DingTalk access is available, run the intake pre-pass instead of hand-listing minutes:
 
@@ -57,7 +50,7 @@ When the user has not provided raw content and DingTalk access is available, run
 uv run "{skill-root}/scripts/dingtalk_intake.py" "{project-root}" --memory-root <memory-root> -o <intake.json>
 ```
 
-Add `--query`, `--start`, or `--end` only from user-supplied project, workstream, date, or topic hints. The pre-pass lists 50 candidates by default, expands date-only filters to full local-day timestamps, and falls back to unfiltered listing plus local date filtering when DingTalk returns an empty server-filtered list. It marks processed meetings only by exact `taskUuid` or AI Minutes URL under ADP memory, emits same-date same-title memory hits as `possible_matches`, and emits processed/unprocessed reasons. Show likely unprocessed candidates and ask for confirmation unless the run supplied an exact `--task-uuid`.
+Pass only user-supplied hints, show likely unprocessed candidates, and confirm the selection unless the caller supplied an exact `--task-uuid`.
 
 For an exact meeting, rerun the pre-pass with `--task-uuid <id>`. It fetches info and paginated transcription, saves the transcript under ADP memory, and reports transcript completeness. If the pre-pass returns no complete raw transcript, ask for raw meeting content rather than classifying from a summary. Record DingTalk sources in the plan source field with the task id and evidence type, such as `DingTalk AI Minutes taskUuid=<id>; evidence=transcription`.
 
@@ -74,39 +67,37 @@ Treat the raw meeting notes as source evidence, not as the final artifact. Separ
 
 If an item is ambiguous, choose the safest classification that exposes the gap. A pending business answer is not a no-op. A decision without an accountable confirmer is open, not confirmed. A WDR update against an unknown workstream becomes an unresolved gap and should prompt `adp-workstream-register` or an id correction.
 
-An action is not closed when owner or due trigger is generic, missing, or still a raw speaker label. Use the best corrected project member name; otherwise keep the label and write explicit gap fields in the plan, such as `owner_gap`, `confirmer_gap`, `speaker_label_gap`, or `participant_gaps`; the writer only validates exact missing placeholders.
+Treat meeting actions as ledger candidates only when accountable owner, workstream route, due trigger, and observable closure criteria are specific. Put unresolved details into the schema's explicit gap fields; use the dry-run `action_quality_audit` to decide what may enter status-sync.
 
-Meeting actions are intake candidates, not ledger rows. A canonical action needs a specific accountable owner, affected workstream route, due trigger, and observable closure criteria. Generic owners such as `TBD`, `各条线 FDE owner`, or `参会人员` stay in the gap queue and do not enter the open action ledger. Closure criteria must name the deliverable or condition that proves completion; "owner updates WDR/daily/status-sync" is process evidence, not closure.
-
-Default to one canonical action for the same Source + Action. Put multiple impacted lines in `affected_workstreams`; split into separate actions only when owner, due trigger, or deliverable differs per workstream. Project-level actions use `workstream: "program"` downstream rather than being copied into every workstream.
+For confirmed milestone status/forecast/actual, attach `milestones` with exact ID, one workstream, canonical status, evidence, and baseline revision. Only complete entries reach status-sync; gaps never create baseline milestones.
 
 ## Sync Plan
 
 Before writing files, produce a compact JSON plan and inspect it for closure. Load `references/sync-plan-schema.md` whenever drafting or validating the plan. The script executes the plan; it does not infer business meaning.
 
-Keep unknown fields as `TBD` only when the gap is real and should be visible. Do not omit `id`, `classification`, or `text`; use explicit gap fields such as `owner_gap`, `confirmer_gap`, `speaker_label_gap`, `participant_gaps`, or `gap`.
-
-For historical backfills, do not default past-due actions to `open`. If later daily logs, WDRs, or status-sync records confirm the outcome, set `status` to `done`, `cancelled`, `in-progress`, or `blocked` with the evidence in `status_confirmation`. If no follow-up evidence is found, leave the action active only as `blocked` / needs status confirmation.
+Use one stable `meeting_instance_id`; the writer generates it when omitted. Same ID and plan resumes or no-ops; same ID with a changed plan fingerprint conflicts.
 
 ## Args
 
-Headless callers provide `{project-root}`, optional `--memory-root`, either exact `--task-uuid` or `--raw-evidence <path>`, optional prebuilt `--plan <plan.json>`, and one mode: `--dry-run` or `--execute`. Skip candidate confirmation only when an exact source is supplied. Return machine-readable status with touched paths, unresolved gaps, and next actions; in interactive mode, explain the same fields in prose.
+Headless callers provide `{project-root}`, optional `--memory-root`, either exact `--task-uuid` or `--raw-evidence <path>`, optional prebuilt `--plan <plan.json>`, and one mode: `--dry-run` or `--execute`. Skip candidate confirmation only for an exact source. When no plan is supplied, save the drafted plan, initialize `.memlog.md` beside it through `{project-root}/_bmad/scripts/memlog.py`, and append only material `assumption` and `decision` entries as they occur. Return machine-readable plan, memlog, dry-run/report paths, touched paths, gaps, and next actions; supplied-plan runs create no memlog.
 
 ## Write
 
 Save the plan, then validate with a mandatory dry run before durable writes:
 
+For meeting-pack input, add `--meeting-pack-distillate <distillate.json>` to both writer calls; do not transcribe its lineage into the plan.
+
 ```bash
 uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json> --memory-root <memory-root> --meeting-note-template "{workflow.meeting_note_template}" --business-decision-packet-template "{workflow.business_decision_packet_template}" --dry-run -o <dry-run-report.json>
 ```
 
-Review the dry-run report for touched paths, unresolved gaps, and `action_quality_audit`: actions seen, canonical actions, fanout suppressed, owner gaps, due gaps, closure gaps, past-due open items, blocked actions, and status calibrations. Execute the same command without `--dry-run` only after user confirmation, or in headless mode only when the caller supplied `--execute`:
+Review the dry-run report's touched paths, unresolved gaps, and `action_quality_audit`; only its ledger-ready actions may enter status-sync. Execute the same command without `--dry-run` only after user confirmation, or in headless mode only when the caller supplied `--execute`:
 
 ```bash
 uv run "{skill-root}/scripts/sync_meeting.py" "{project-root}" --plan <plan.json> --memory-root <memory-root> --meeting-note-template "{workflow.meeting_note_template}" --business-decision-packet-template "{workflow.business_decision_packet_template}" -o <execute-report.json>
 ```
 
-The script writes a structured meeting archive, appends the daily log, appends decision indexes and workstream decision files where applicable, appends WDR meeting-sync updates when the workstream exists, creates Business Decision Packets for `business_decision_needed` items, and writes a canonical status-sync action intake file under `intake/status-sync/` only for ledger-ready meeting actions. Existing files are preserved; WDRs are appended, not replaced.
+Writes use deterministic destinations and append markers. `meetings/receipts/` makes interruption resumable; only a fully applied receipt advances `meetings/cursors/<scenario>.json`. Dry-run and pack generation never do.
 
 Meeting actions are not written directly to the action ledger. After sync, run the generated intake through status-sync:
 
@@ -116,7 +107,7 @@ adp-status-sync update "{project-root}" --updates-file "<generated-intake-file>"
 
 If the runner requires direct script execution, resolve the installed `adp-status-sync` skill root from the runner first; do not invent an unresolved placeholder.
 
-If the script cannot run, manually create the same outputs from `{workflow.meeting_note_template}` and `{workflow.business_decision_packet_template}`. Preserve existing user content and report any item that could not be closed.
+If the writer cannot run, fail closed: preserve the saved plan and any diagnostic report, identify the missing dependency, and resume with the same plan after the writer is restored. Do not perform manual durable writes.
 
 ## Output Contract
 
@@ -126,8 +117,8 @@ After syncing, report:
 - the durable raw evidence path, when raw evidence was available
 - daily log, decision log, WDRs, workstream decision files, and Business Decision Packets touched
 - generated status-sync intake files for meeting actions
-- action quality audit: canonical actions, fanout suppressed, owner/due/workstream/closure gaps, past-due status calibrations, and blocked actions not sent to ledger
-- unresolved gaps, especially missing workstreams, missing owners, missing due triggers, unresolved speaker labels, missing confirmers, or no-op items without rationale
+- meeting instance ID, replay status, applied receipt, and scenario cursor disposition
+- dry-run and execute report paths, whose audits and unresolved gaps are authoritative
 - next useful workflow: usually `adp-status-sync` for cadence updates, `adp-risk-dependency-change-review` for open risk/change/business decisions, or `adp-workstream-register` for unknown workstreams
 
 Do not call a meeting closed because a note exists. It is closed when every item has a classification, destination, owner where needed, and either a durable write or a visible gap.
@@ -137,7 +128,3 @@ At the terminal stage after this report, run `{workflow.on_complete}` when non-e
 ## Guardrails
 
 - ADP records project-level coordination state; do not copy full PRD, architecture, story, code, or validation detail out of BMM artifacts.
-- Business decisions need an accountable business confirmer. FDE-only calls belong to FDE/internal decision records.
-- Risk acceptance and scope change are decisions with consequences, not generic actions.
-- Offline follow-ups and chat corrections count as meetings when they change project state.
-- No-op is a traceable closure state, not a way to skip hard items.

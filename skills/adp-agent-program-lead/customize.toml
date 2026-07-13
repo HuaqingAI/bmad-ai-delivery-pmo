@@ -1,17 +1,30 @@
 # DO NOT EDIT -- overwritten on every update.
 #
-# Agent customization surface for adp-agent-program-lead.
+# Agent and workflow customization surface for adp-agent-program-lead.
 # Team overrides:     {project-root}/_bmad/custom/adp-agent-program-lead.toml
 # Personal overrides: {project-root}/_bmad/custom/adp-agent-program-lead.user.toml
 
 [agent]
 
 # --- Metadata (install-time roster contract) ---
-# Consumed by module.yaml:agents[] and `[agents.<code>]` in central config.
 
+# Override only for a renamed installation; changing this breaks roster and central-config keys.
 code = "adp-agent-program-lead"
+# Override the display name for local terminology; it has no routing effect.
 name = "ADP Program Lead"
+# Override when the organization uses a different role title in agent menus.
 title = "AI Delivery PMO Program Lead"
+# Override only to change the roster's visual marker.
 icon = "📊"
-description = "Synthesizes ADP workstream state into project readouts, FDE actions, readiness gaps, risk/dependency judgment, and workflow routing."
+# Override to align roster copy with a narrower local remit; keep canonical-status ownership explicit.
+description = "Consumes canonical ADP program status, audit, roadmap, and meeting views for source-backed readouts, recovery routing, and delivery decisions."
+# Override only when the host supports another lifecycle; changing this alters state and continuity expectations.
 agent_type = "stateless"
+
+[workflow]
+
+# Universal activation defaults. Scalars override; arrays append across team and personal layers.
+activation_steps_prepend = []
+activation_steps_append = []
+persistent_facts = ["file:{project-root}/**/project-context.md"]
+on_complete = ""

@@ -1,31 +1,13 @@
 {
-  "ok": true,
-  "schema_version": 1,
-  "generated_at": "{{CREATED_AT}}",
-  "as_of": "{{CREATED_AT}}",
-  "project_root": "",
-  "memory_root": "{{MEMORY_ROOT}}",
-  "source_inventory": {
-    "sources_read": [],
-    "selected_workstreams": [],
-    "notes": [
-      "Run adp-roadmap-sync to populate this derived view."
-    ]
-  },
-  "milestone_timeline": [],
-  "unscheduled_milestones": [],
-  "at_risk_dates": [],
-  "blocked_by_decisions": [],
-  "blocked_by_dependencies": [],
-  "changed_since_last_roadmap": [],
-  "excluded_items": [],
-  "counts": {
-    "sources_read": 0,
-    "milestone_timeline": 0,
-    "unscheduled_milestones": 0,
-    "at_risk_dates": 0,
-    "blocked_by_decisions": 0,
-    "blocked_by_dependencies": 0,
-    "excluded_items": 0
-  }
+  "artifact_status": "not_generated",
+  "owner_skill": "adp-roadmap-sync",
+  "schema_version": 2,
+  "reason": "A baseline-aware roadmap has not been generated.",
+  "recovery_workflows": [
+    "adp-plan-baseline",
+    "adp-status-sync",
+    "adp-state-audit",
+    "adp-program-status",
+    "adp-roadmap-sync"
+  ]
 }

@@ -19,6 +19,8 @@ Installs and configures a BMad module into a project. Module identity, prompts, 
 - `{project-root}/_bmad/config.user.yaml` - personal settings intended to be gitignored: `user_name`, `communication_language`, and module variables marked `user_setting: true`.
 - `{project-root}/_bmad/module-help.csv` - module capabilities for the help system.
 
+It never writes or deletes ADP project memory, approved baselines, or status snapshots. Existing memory upgrade needs are reported and routed to `adp-project-kickoff`.
+
 The literal `{project-root}` token stays in config values. Filesystem path arguments (`--*-path`, `--*-dir`, `--target`, and the project root positional argument) must use resolved real paths; scripts reject unresolved `{project-root}` in those arguments.
 
 ## On Activation
@@ -26,10 +28,10 @@ The literal `{project-root}` token stays in config values. Filesystem path argum
 Resolve the actual project root, then inspect install state:
 
 ```bash
-uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml"
+uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml" --module-help "{skill-root}/assets/module-help.csv" --installed-skills-dir "{skill-root}/.."
 ```
 
-Use the JSON as the source of truth for module metadata, `install_state`, `effective_defaults`, `default_sources`, `answers_template`, `missing_required_inputs`, `headless_ready`, `directories_to_create`, and `installed_skills_dir`. If `status` is not `success`, surface the error and stop. If arguments provide values (for example `accept all defaults`, `--headless`, or `user name is BMad, I speak Swahili`), overlay them on `answers_template` and skip interactive prompting.
+Use the JSON as the source of truth for module metadata, `install_state`, effective values and sources, installed-skill/shared-resource inspection, `upgrade_report`, `headless_ready`, output directories, and the installed skills root. Missing skills or the shared effective-config resolver/catalog make the installation unready; route that gap to module reinstallation before writing or legacy cleanup. Memory migration notices do not authorize setup to change memory. If arguments provide values (for example `accept all defaults`, `--headless`, or inline core/module values), overlay them on `answers_template` and skip those prompts.
 
 ## Headless Contract
 
@@ -51,6 +53,9 @@ In headless mode, stdout is one JSON object and no prose:
   "directories_created": [],
   "directories_existing": [],
   "installed_skills_dir": "<resolved installed skills directory>",
+  "installation_ready": true,
+  "installed_skill_inspection": {},
+  "upgrade_report": {},
   "legacy_directories_removed": [],
   "legacy_files_removed_count": 0,
   "unresolved_gaps": [],
@@ -58,21 +63,21 @@ In headless mode, stdout is one JSON object and no prose:
 }
 ```
 
-Use `status: "blocked"` with `unresolved_gaps` when input is missing. Use `status: "error"` with `error` when a script fails. Interactive mode reports the same script results as a human summary.
+Use `status: "blocked"` with `unresolved_gaps` when input or installed resources are missing. Use `status: "error"` with `error` when a script fails. Interactive mode reports the same script results as a human summary.
 
 ## Collect Configuration
 
-Use `effective_defaults`, `default_sources`, and `missing_required_inputs` from the inspect JSON. Ask once for missing values or overrides, showing computed defaults in brackets; never tell the user to "press enter" or "leave blank" in chat.
+Use `effective_defaults`, `default_sources`, `config_warnings`, and `missing_required_inputs` from the inspect JSON. Ask once for missing values or overrides, showing computed defaults in brackets; never tell the user to "press enter" or "leave blank" in chat. The four ADP team settings are `default_reporting_cadence` (`weekly|biweekly|custom`), `status_stale_after_days` (1-90), `schedule_variance_tolerance_days` (0-90), and `meeting_pack_item_limit` (3-30).
 
 ## Write Files
 
 Write a temp JSON file from `answers_template` overlaid with collected values. Values inside this JSON keep the literal `{project-root}` token. Validate the final answer object before writing:
 
 ```bash
-uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml" --answers {temp-file}
+uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml" --module-help "{skill-root}/assets/module-help.csv" --installed-skills-dir "{skill-root}/.." --answers {temp-file}
 ```
 
-If the validation JSON has `headless_ready: false`, block headless mode and ask for the returned `missing_required_inputs`. Use `validated_answers` as the write input.
+If the validation JSON has `headless_ready: false`, do not write; surface `missing_required_inputs` and `unresolved_gaps`. Use `validated_answers` as the write input only when ready.
 
 In the commands below, replace `{project-root}` in every path argument with the actual project root before running; these are filesystem paths, not config values.
 
@@ -99,7 +104,7 @@ Run `uv run "{skill-root}/scripts/cleanup-legacy.py" --help` for full usage.
 
 ## Confirm
 
-Use the inspect, merge, help, and cleanup JSON to report install state, config paths, user keys written, help rows added, output directories created or already present, legacy files deleted, and legacy package cleanup counts. Then display `module_greeting` from the inspect JSON.
+Run the install-state inspection again after merge and cleanup. Use the final inspection plus merge/help/cleanup JSON to report module version, config value sources and fallbacks, installed skills and shared resources, config paths, help rows replaced, output directories, legacy cleanup, and memory migration needs. State explicitly that the reported preserved memory/baseline paths were untouched, then display `module_greeting`.
 
 ## Outcome
 

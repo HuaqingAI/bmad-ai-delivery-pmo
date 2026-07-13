@@ -20,6 +20,9 @@ This folder is the shared project memory for AI Delivery PMO. It coordinates del
 
 - Project charter: `project-charter.md`
 - Cadence: `cadence.md`
+- Approved program baseline: `plans/program-baseline.md` (created only by `adp-plan-baseline`)
+- Baseline intake: `intake/program-baseline-candidate.json`
+- Baseline history: `plans/baseline-history/`
 - Workstream records: `workstreams/{workstream-id}/delivery-record.md`
 - L0 reference summary: `l0/reference-index.md`
 - Decision log: `decisions/decision-log.md`
@@ -33,6 +36,8 @@ This folder is the shared project memory for AI Delivery PMO. It coordinates del
 - Risk matrix: `views/risk-matrix.md`
 - Dependency map: `views/dependency-map.md`
 - Weekly report: `views/weekly-report.md`
+- Program status: `views/program-status.md` and `views/program-status.json`
+- Immutable status snapshots: `snapshots/program-status/`
 - Meeting packs: `views/meeting-packs/{scenario}/{date}.md`
 - Roadmap: `views/roadmap.md` and `views/roadmap.json`
 

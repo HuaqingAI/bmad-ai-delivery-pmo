@@ -64,15 +64,17 @@ A Workstream Delivery Record is the minimum project-level status surface for one
 
 Optional source-backed milestones for `adp-roadmap-sync`. Use this only for verifiable milestone events; ordinary next actions and action due dates stay in the action ledger.
 
-| Milestone | Type | Status | Planned | Forecast | Actual | Owner | Confidence | Depends On | Source |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| TBD | checkpoint | planned | TBD | TBD | TBD | TBD | low | TBD | TBD |
+| Milestone ID | Milestone | Type | Status | Planned | Forecast | Actual | Owner | Confidence | Depends On | Source | Baseline Revision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TBD | TBD | checkpoint | planned | TBD | TBD | TBD | TBD | low | TBD | TBD | TBD |
 
 Allowed `Type`: `checkpoint`, `business-decision`, `readiness-gate`, `cutover-gate`, `dependency-release`, `delivery-window`.
 
 Allowed `Status`: `planned`, `at-risk`, `done`, `blocked`.
 
 `Planned`, `Forecast`, and `Actual` must come from WDR owner updates, checkpoint evidence, decision closure, or another explicit source. If the source does not give a date, write `TBD`.
+
+Rows mapped to the program baseline require the exact case-sensitive baseline `Milestone ID` and current `Baseline Revision`. `adp-status-sync` may update status, forecast, actual, and source evidence, but only `adp-plan-baseline` may change planned facts.
 
 ## State Semantics
 

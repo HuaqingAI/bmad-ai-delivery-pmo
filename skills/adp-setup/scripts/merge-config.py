@@ -103,6 +103,25 @@ _CORE_KEYS = frozenset(
 )
 
 
+def variable_value_error(key: str, value, definition: dict) -> str | None:
+    expected_type = definition.get("type")
+    if expected_type == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
+        return f"{key} must be an integer"
+    if expected_type == "string" and not isinstance(value, str):
+        return f"{key} must be a string"
+    choices = definition.get("choices")
+    if isinstance(choices, list) and value not in choices:
+        return f"{key} must be one of: {', '.join(str(item) for item in choices)}"
+    if isinstance(value, int) and not isinstance(value, bool):
+        minimum = definition.get("minimum")
+        maximum = definition.get("maximum")
+        if isinstance(minimum, int) and value < minimum:
+            return f"{key} must be at least {minimum}"
+        if isinstance(maximum, int) and value > maximum:
+            return f"{key} must be at most {maximum}"
+    return None
+
+
 def answer_validation_errors(module_yaml: dict, answers: dict) -> list[str]:
     allowed = {"core": _CORE_KEYS, "module": frozenset(module_variable_names(module_yaml))}
     errors: list[str] = []
@@ -116,6 +135,13 @@ def answer_validation_errors(module_yaml: dict, answers: dict) -> list[str]:
         unknown_keys = sorted(set(values) - allowed[scope])
         if unknown_keys:
             errors.append(f"Unknown {scope} answer keys: {', '.join(unknown_keys)}")
+        if scope == "module":
+            for key, value in values.items():
+                definition = module_yaml.get(key)
+                if isinstance(definition, dict) and "prompt" in definition:
+                    error = variable_value_error(key, value, definition)
+                    if error:
+                        errors.append(error)
     return errors
 
 

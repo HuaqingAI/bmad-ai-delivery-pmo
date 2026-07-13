@@ -29,7 +29,7 @@ PLACEHOLDERS = {
 }
 
 CAPABILITY_FILES = {
-    "global project readout": {
+    "global-project-readout": {
         "core",
         "workstreams",
         "actions",
@@ -39,14 +39,25 @@ CAPABILITY_FILES = {
         "l0",
         "views",
     },
-    "fde action list": {"core", "workstreams", "actions", "daily"},
-    "acceptance readiness view": {"core", "workstreams", "l0", "views"},
-    "risk and dependency synthesis": {"core", "workstreams", "decisions", "l0", "views"},
-    "weekly report generation": {"core", "workstreams", "actions", "daily", "decisions", "l0", "views"},
-    "gap-driven coaching": {"core", "workstreams"},
-    "l0 impact sweep": {"core", "workstreams", "l0"},
-    "decision closure review": {"core", "workstreams", "daily", "decisions", "meetings"},
+    "fde-action-list": {"core", "workstreams", "actions", "daily"},
+    "acceptance-readiness-view": {"core", "workstreams", "l0", "views"},
+    "risk-dependency-synthesis": {"core", "workstreams", "decisions", "l0", "views"},
+    "weekly-report-consumption": {"core", "workstreams", "actions", "daily", "decisions", "l0", "views"},
+    "gap-driven-coaching": {"core", "workstreams"},
+    "l0-impact-sweep": {"core", "workstreams", "l0"},
+    "decision-closure-review": {"core", "workstreams", "daily", "decisions", "meetings"},
 }
+
+CONFIG_PATHS = (
+    "_bmad/adp/config.yaml",
+    "_bmad/config.user.yaml",
+    "_bmad/config.yaml",
+    "_bmad/core/config.yaml",
+    "_bmad/bmm/config.yaml",
+    "_bmad/bmb/config.yaml",
+)
+DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
+DEFAULT_LANGUAGE = "English"
 
 CORE_FILES = ["index.md", "project-charter.md", "cadence.md"]
 L0_FILES = [
@@ -108,12 +119,22 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("project_root", help="Project root containing ADP state.")
-    parser.add_argument("--capability", default="", help="Capability or readout name to scope file discovery.")
+    parser.add_argument(
+        "--activation",
+        action="store_true",
+        help="Resolve configuration and ADP state location without reading project state.",
+    )
+    parser.add_argument(
+        "--capability",
+        choices=sorted(CAPABILITY_FILES),
+        default="global-project-readout",
+        help="Canonical detail capability id. Default: global-project-readout.",
+    )
     parser.add_argument("--workstream", action="append", default=[], help="Workstream id to include. Repeatable.")
     parser.add_argument(
         "--memory-root",
-        default="_bmad-output/adp/memory",
-        help="ADP state root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+        default=None,
+        help="Explicit ADP state root override; otherwise resolve configuration, then use the built-in default.",
     )
     parser.add_argument("--max-age-days", type=int, default=7, help="Staleness threshold for WDR syncs. Default: 7.")
     parser.add_argument("--as-of", help="Date for staleness checks, YYYY-MM-DD. Default: today.")
@@ -128,16 +149,110 @@ def normalize_id(raw: str) -> str:
     return value.strip("-")
 
 
-def normalize_capability(raw: str) -> str:
-    value = re.sub(r"\s+", " ", raw.strip().lower())
-    return value
-
-
 def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
-    memory_root = Path(raw_memory_root)
+    expanded = raw_memory_root.replace("{project-root}", str(project_root))
+    memory_root = Path(expanded).expanduser()
     if not memory_root.is_absolute():
         memory_root = project_root / memory_root
     return memory_root.resolve()
+
+
+def clean_yaml_scalar(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1]
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_config_yaml(path: Path) -> tuple[dict[str, str], list[str]]:
+    values: dict[str, str] = {}
+    errors: list[str] = []
+    sections: list[tuple[int, str]] = []
+    for line_no, raw in enumerate(read_text(path).splitlines(), start=1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if "\t" in raw[: len(raw) - len(raw.lstrip())]:
+            errors.append(f"{path}: tab indentation at line {line_no}")
+            continue
+        content = raw.split("#", 1)[0].rstrip()
+        if ":" not in content:
+            continue
+        indent = len(content) - len(content.lstrip(" "))
+        key, raw_value = content.strip().split(":", 1)
+        while sections and indent <= sections[-1][0]:
+            sections.pop()
+        value = clean_yaml_scalar(raw_value)
+        if value == "":
+            sections.append((indent, key.strip()))
+            continue
+        dotted = ".".join([section for _, section in sections] + [key.strip()])
+        values[dotted] = value
+    return values, errors
+
+
+def config_candidates(key: str) -> tuple[str, ...]:
+    return (key, f"adp.{key}", f"core.{key}", f"bmm.{key}", f"bmb.{key}")
+
+
+def first_config_value(sources: list[dict[str, Any]], keys: tuple[str, ...]) -> tuple[str | None, str | None]:
+    for source in sources:
+        values = source.get("values", {})
+        for key in keys:
+            value = values.get(key)
+            if value:
+                return str(value), str(source["path"])
+    return None, None
+
+
+def resolve_activation(project_root: Path, memory_override: str | None) -> dict[str, Any]:
+    sources: list[dict[str, Any]] = []
+    configuration_errors: list[str] = []
+    for relative_path in CONFIG_PATHS:
+        path = project_root / relative_path
+        record: dict[str, Any] = {
+            "relative_path": relative_path,
+            "path": str(path),
+            "exists": path.is_file(),
+            "values": {},
+        }
+        if path.is_file():
+            try:
+                record["values"], errors = parse_config_yaml(path)
+                configuration_errors.extend(errors)
+            except OSError as exc:
+                configuration_errors.append(f"{path}: {exc}")
+        sources.append(record)
+
+    resolved: dict[str, str] = {}
+    value_sources: dict[str, str] = {}
+    for key in ("communication_language", "document_output_language"):
+        value, source = first_config_value(sources, config_candidates(key))
+        resolved[key] = value or DEFAULT_LANGUAGE
+        value_sources[key] = source or "built-in default"
+
+    if memory_override:
+        raw_memory_root = memory_override
+        memory_source = "cli --memory-root"
+    else:
+        raw_memory_root, memory_source = first_config_value(
+            sources,
+            (*config_candidates("adp_memory_root"), *config_candidates("memory_root")),
+        )
+        raw_memory_root = raw_memory_root or DEFAULT_MEMORY_ROOT
+        memory_source = memory_source or "built-in default"
+    memory_root = resolve_memory_root(project_root, raw_memory_root)
+    resolved["adp_state_root"] = str(memory_root)
+    value_sources["adp_state_root"] = memory_source
+
+    public_sources = [{k: v for k, v in source.items() if k != "values"} for source in sources]
+    return {
+        "resolved": resolved,
+        "value_sources": value_sources,
+        "sources_checked": public_sources,
+        "configuration_errors": configuration_errors,
+        "config_found": any(source["exists"] for source in sources),
+        "state_exists": memory_root.is_dir(),
+    }
 
 
 def is_meaningful(value: Any) -> bool:
@@ -152,6 +267,7 @@ def gap_item(
     gap_type: str,
     blocking: bool,
     field_name: str,
+    policy_rule_id: str,
     recommended_workflow: str = "adp-status-sync",
 ) -> dict[str, Any]:
     return {
@@ -160,6 +276,7 @@ def gap_item(
         "gap_type": gap_type,
         "blocking": blocking,
         "field": field_name,
+        "policy_rule_id": policy_rule_id,
         "recommended_workflow": recommended_workflow,
     }
 
@@ -416,6 +533,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                     gap_type="missing",
                     blocking=True,
                     field_name=field_name,
+                    policy_rule_id=f"wdr-{field_name}-present",
                 )
             )
     if not is_meaningful(ws.blockers):
@@ -426,6 +544,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="missing",
                 blocking=True,
                 field_name="blockers",
+                policy_rule_id="wdr-blocker-state-present",
             )
         )
     if not is_meaningful(ws.risks):
@@ -436,6 +555,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="missing",
                 blocking=True,
                 field_name="risks",
+                policy_rule_id="wdr-risk-state-present",
             )
         )
     if not is_meaningful(ws.dependencies) and not ws.depends_on and not ws.impacts:
@@ -446,6 +566,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="missing",
                 blocking=True,
                 field_name="dependencies",
+                policy_rule_id="wdr-dependency-state-present",
             )
         )
     if "evidence.md" in ws.missing_files:
@@ -456,6 +577,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="missing_file",
                 blocking=True,
                 field_name="evidence",
+                policy_rule_id="workstream-evidence-file-present",
             )
         )
     elif ws.counts["evidence_lines"] == 0:
@@ -466,6 +588,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="empty",
                 blocking=True,
                 field_name="evidence",
+                policy_rule_id="workstream-evidence-has-content",
             )
         )
     if "readiness.md" in ws.missing_files:
@@ -476,6 +599,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="missing_file",
                 blocking=True,
                 field_name="readiness",
+                policy_rule_id="workstream-readiness-file-present",
             )
         )
     elif ws.counts["readiness_lines"] == 0:
@@ -486,6 +610,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="empty",
                 blocking=True,
                 field_name="readiness",
+                policy_rule_id="workstream-readiness-has-content",
             )
         )
     if "decisions.md" in ws.missing_files:
@@ -496,6 +621,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="missing_file",
                 blocking=True,
                 field_name="decisions",
+                policy_rule_id="workstream-decisions-file-present",
             )
         )
     if not ws.l0_references:
@@ -506,6 +632,7 @@ def collect_workstream_gaps(ws: Workstream, as_of: date, max_age_days: int) -> N
                 gap_type="missing",
                 blocking=True,
                 field_name="l0_references",
+                policy_rule_id="wdr-l0-references-present",
             )
         )
     add_staleness_gap(ws, as_of, max_age_days)
@@ -520,6 +647,7 @@ def add_staleness_gap(ws: Workstream, as_of: date, max_age_days: int) -> None:
                 gap_type="missing",
                 blocking=False,
                 field_name="last_status_sync",
+                policy_rule_id="wdr-last-status-sync-present",
             )
         )
         return
@@ -532,6 +660,7 @@ def add_staleness_gap(ws: Workstream, as_of: date, max_age_days: int) -> None:
                 gap_type="unparseable",
                 blocking=False,
                 field_name="last_status_sync",
+                policy_rule_id="wdr-last-status-sync-parseable",
             )
         )
         return
@@ -544,6 +673,7 @@ def add_staleness_gap(ws: Workstream, as_of: date, max_age_days: int) -> None:
                 gap_type="stale",
                 blocking=False,
                 field_name="last_status_sync",
+                policy_rule_id="wdr-last-status-sync-freshness",
             )
         )
 
@@ -634,18 +764,6 @@ def add_optional_file(path: Path, memory_root: Path, sources: list[dict[str, Any
         missing.append(rel_to_memory(memory_root, path))
 
 
-def requested_groups(capability: str) -> set[str]:
-    normalized = normalize_capability(capability)
-    if not normalized:
-        return {"core", "workstreams"}
-    if normalized in CAPABILITY_FILES:
-        return set(CAPABILITY_FILES[normalized])
-    for key, groups in CAPABILITY_FILES.items():
-        if normalized in key or key in normalized:
-            return set(groups)
-    return {"core", "workstreams", "daily", "decisions", "l0", "views"}
-
-
 def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, Any]]:
     known = {ws.workstream_id for ws in workstreams}
     gaps: list[dict[str, Any]] = []
@@ -664,6 +782,7 @@ def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, Any]]:
                             "gap_type": "missing_reference",
                             "blocking": False,
                             "field": relationship,
+                            "policy_rule_id": "wdr-cross-workstream-reference-resolves",
                             "recommended_workflow": "adp-status-sync",
                         }
                     )
@@ -828,8 +947,20 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if not project_root.exists() or not project_root.is_dir():
         return 2, {"ok": False, "error": "project_root is not an existing directory", "project_root": str(project_root)}
 
-    memory_root = resolve_memory_root(project_root, args.memory_root)
-    capability = normalize_capability(args.capability)
+    configuration = resolve_activation(project_root, args.memory_root)
+    memory_root = Path(configuration["resolved"]["adp_state_root"])
+    if args.activation:
+        return (
+            0,
+            {
+                "ok": True,
+                "schema_version": 3,
+                "mode": "activation",
+                "project_root": str(project_root),
+                **configuration,
+            },
+        )
+
     as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
     if not memory_root.exists() or not memory_root.is_dir():
         return (
@@ -839,11 +970,12 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 "error": "ADP state root is missing; run adp-project-kickoff or pass --memory-root",
                 "project_root": str(project_root),
                 "memory_root": str(memory_root),
+                "configuration": configuration,
                 "recommended_workflow": "adp-project-kickoff",
             },
         )
 
-    groups = requested_groups(capability)
+    groups = set(CAPABILITY_FILES[args.capability])
     sources, missing_sources = collect_files(memory_root, groups)
     records, missing_workstreams = discover_workstream_records(memory_root, args.workstream)
     workstreams = [parse_workstream(path, memory_root, as_of, args.max_age_days) for path in records]
@@ -870,6 +1002,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "gap_type": "missing_workstream",
             "blocking": True,
             "field": "workstream",
+            "policy_rule_id": "requested-workstream-exists",
             "recommended_workflow": "adp-project-kickoff",
         }
         for item in missing_workstreams
@@ -883,6 +1016,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "project_root": str(project_root),
         "memory_root": str(memory_root),
         "capability": args.capability,
+        "configuration": configuration,
         "scope": {
             "workstreams_requested": args.workstream,
             "groups_scanned": sorted(groups),

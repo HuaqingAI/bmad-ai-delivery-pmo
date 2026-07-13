@@ -15,7 +15,7 @@ persistent_facts = ["file:{project-root}/**/project-context.md"]
 # Override for post-audit routing or notification; runs after complete, blocked, and error outcomes.
 on_complete = ""
 
-# Override when audit artifacts belong in an organization-owned destination; relative paths resolve under ADP memory.
+# Override when immutable input audits and artifact validations belong in an organization-owned destination; relative paths resolve under ADP memory.
 audit_output_path = "audits"
 
 # Override to isolate repeated or parallel audits in per-run folders; supports date and scenario tokens.

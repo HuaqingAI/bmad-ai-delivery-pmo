@@ -20,6 +20,9 @@ from typing import Any
 
 
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
+BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
+ROADMAP_SCHEMA_VERSION = 2
+GENERATOR_VERSION = "2.0.0"
 PLACEHOLDERS = {"", "-", "tbd", "todo", "none", "n/a", "na", "unknown"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 VALID_TYPES = {
@@ -31,6 +34,8 @@ VALID_TYPES = {
     "delivery-window",
 }
 VALID_STATUSES = {"planned", "at-risk", "done", "blocked"}
+PROGRAM_STATUSES = {"on-plan", "at-risk", "off-plan", "indeterminate"}
+PROGRAM_CONFIDENCE = {"high", "medium", "low", "unknown"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 DECISION_COMPLETED_STATUSES = {"accepted", "closed", "done"}
 DECISION_OPEN_STATUSES = {"open"}
@@ -43,7 +48,7 @@ AUDIT_STATUSES = {"pass", "warning", "blocked"}
 AUDIT_MAX_AGE = timedelta(hours=24)
 AUDIT_FUTURE_TOLERANCE = timedelta(minutes=5)
 PREPASS_SCHEMA_VERSION = 2
-ROADMAP_CAPABILITY = "global project readout"
+ROADMAP_CAPABILITY = "global-project-readout"
 RENDER_SOURCE_PATTERNS = (
     "workstreams/*/delivery-record.md",
     "intake/bmm-checkpoints/candidates/CHK-*.json",
@@ -90,6 +95,14 @@ class RoadmapItem:
     source_type: str
     workstreams: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    variance_days: int | None = None
+    baseline_revision: int | None = None
+    planned_source: str = "TBD"
+    forecast_source: str = "TBD"
+    actual_source: str = "TBD"
+    status_source: str = "TBD"
+    status_rule_id: str = "TBD"
+    source_references: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -162,8 +175,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     as_of = date.fromisoformat(args.as_of_alt or args.as_of) if (args.as_of_alt or args.as_of) else date.today()
+    timeline_gate = load_canonical_timeline_inputs(project_root, memory_root, as_of)
+    if not timeline_gate.get("ok"):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": timeline_gate.get("error", "canonical roadmap inputs are unavailable"),
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "recommended_workflows": timeline_gate.get(
+                "recommended_workflows", ["adp-plan-baseline", "adp-program-status"]
+            ),
+        }
     selected = {normalize_id(item) for item in args.workstream if normalize_id(item)}
-    available_workstreams = discover_workstream_ids(memory_root)
+    available_workstreams = discover_workstream_ids(memory_root) | {
+        normalize_id(str(item.get("workstream_id", "")))
+        for item in timeline_gate["baseline"].get("milestones", [])
+        if normalize_id(str(item.get("workstream_id", "")))
+    }
     unknown_workstreams = sorted(selected - available_workstreams)
     if unknown_workstreams:
         return {
@@ -199,7 +228,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     previous, previous_warning = load_previous_roadmap(output_dir / "roadmap.json")
 
-    build = build_roadmap(project_root, memory_root, selected, as_of, args, audit_gate)
+    build = build_roadmap(
+        project_root,
+        memory_root,
+        selected,
+        as_of,
+        args,
+        audit_gate,
+        timeline_gate,
+    )
     refreshed_inventory = canonical_render_source_inventory(
         memory_root,
         selected,
@@ -218,6 +255,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "memory_root": str(memory_root),
             "audit_path": audit_gate["audit_path"],
             "recommended_workflows": ["adp-state-audit"],
+        }
+    timeline_mismatch = verify_canonical_timeline_sources(timeline_gate)
+    if timeline_mismatch:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": f"canonical roadmap sources changed during rendering: {timeline_mismatch}",
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "audit_path": audit_gate["audit_path"],
+            "recommended_workflows": ["adp-state-audit", "adp-program-status"],
         }
     roadmap = build["roadmap"]
     changes, diff_warning = diff_previous(previous, roadmap)
@@ -752,6 +800,332 @@ def parse_audit_datetime(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
+def load_canonical_timeline_inputs(project_root: Path, memory_root: Path, as_of: date) -> dict[str, Any]:
+    baseline_path = memory_root / "plans" / "program-baseline.md"
+    if not baseline_path.is_file():
+        return {"ok": False, "error": "approved program baseline is missing", "recommended_workflows": ["adp-plan-baseline"]}
+    try:
+        baseline = parse_baseline_document(baseline_path)
+        validate_baseline_for_roadmap(baseline)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"program baseline is invalid: {exc}", "recommended_workflows": ["adp-plan-baseline"]}
+
+    status_path = memory_root / "views" / "program-status.json"
+    if not status_path.is_file():
+        return {"ok": False, "error": "canonical program status is missing", "recommended_workflows": ["adp-program-status"]}
+    try:
+        program_status = json.loads(read_text(status_path))
+        validate_program_status_for_roadmap(program_status, baseline, as_of, project_root, baseline_path)
+        snapshot_path = memory_root / "snapshots" / "program-status" / f"{program_status['snapshot_id']}.json"
+        if not snapshot_path.is_file():
+            raise ValueError(f"immutable program-status snapshot is missing: {snapshot_path}")
+        if json.loads(read_text(snapshot_path)) != program_status:
+            raise ValueError("program-status view does not match its immutable snapshot")
+        baseline_changes = build_baseline_revision_diff(memory_root, baseline_path, baseline)
+    except (OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
+        return {
+            "ok": False,
+            "error": f"canonical program status is incompatible: {exc}",
+            "recommended_workflows": ["adp-program-status", "adp-state-audit"],
+        }
+
+    source_paths = [baseline_path, status_path, snapshot_path]
+    if baseline_changes.get("from_path"):
+        source_paths.append(memory_root / baseline_changes["from_path"])
+    return {
+        "ok": True,
+        "baseline": baseline,
+        "program_status": program_status,
+        "baseline_changes": baseline_changes,
+        "baseline_path": baseline_path,
+        "program_status_path": status_path,
+        "snapshot_path": snapshot_path,
+        "source_fingerprints": {str(path.resolve()): file_sha256(path) for path in source_paths},
+    }
+
+
+def parse_baseline_document(path: Path) -> dict[str, Any]:
+    text = read_text(path)
+    marker_index = text.find(BASELINE_MARKER)
+    if marker_index < 0:
+        raise ValueError(f"missing marker {BASELINE_MARKER}")
+    fenced = re.search(r"```json\s*(\{.*?\})\s*```", text[marker_index:], flags=re.DOTALL)
+    if not fenced:
+        raise ValueError("missing canonical JSON block after baseline marker")
+    payload = json.loads(fenced.group(1))
+    if not isinstance(payload, dict):
+        raise ValueError("canonical baseline JSON must be an object")
+    return payload
+
+
+def validate_baseline_for_roadmap(baseline: dict[str, Any]) -> None:
+    revision = baseline.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise ValueError("baseline revision must be a positive integer")
+    if baseline.get("confirmation_status") not in {"confirmed", "approved"}:
+        raise ValueError("baseline confirmation_status must be confirmed or approved")
+    if not clean(baseline.get("baseline_id")):
+        raise ValueError("baseline_id is required")
+    project = baseline.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("baseline project must be an object")
+    validate_baseline_item(project, "project", revision, require_revision=False)
+    seen: set[str] = set()
+    for collection, require_workstream in [("gates", False), ("milestones", True)]:
+        rows = baseline.get(collection)
+        if not isinstance(rows, list):
+            raise ValueError(f"baseline {collection} must be an array")
+        for index, item in enumerate(rows):
+            if not isinstance(item, dict):
+                raise ValueError(f"baseline {collection}[{index}] must be an object")
+            validate_baseline_item(item, f"{collection}[{index}]", revision, require_revision=True)
+            item_id = clean(item.get("id"))
+            if item_id in seen:
+                raise ValueError(f"duplicate baseline constraint id {item_id!r}")
+            seen.add(item_id)
+            if require_workstream and not clean(item.get("workstream_id")):
+                raise ValueError(f"baseline {collection}[{index}].workstream_id is required")
+
+
+def validate_baseline_item(item: dict[str, Any], label: str, revision: int, *, require_revision: bool) -> None:
+    planned = item.get("target_date") if label == "project" else item.get("planned_date")
+    if not isinstance(planned, str) or parse_date(planned) is None:
+        raise ValueError(f"baseline {label} planned date must be YYYY-MM-DD")
+    if label != "project" and (not clean(item.get("id")) or not clean(item.get("name"))):
+        raise ValueError(f"baseline {label} requires id and name")
+    if not clean(item.get("owner")):
+        raise ValueError(f"baseline {label}.owner is required")
+    if require_revision and item.get("baseline_revision") != revision:
+        raise ValueError(f"baseline {label}.baseline_revision does not match revision {revision}")
+    source = item.get("source")
+    if not isinstance(source, dict) or not clean(source.get("type")) or not clean(source.get("reference")):
+        raise ValueError(f"baseline {label}.source requires type and reference")
+
+
+def validate_program_status_for_roadmap(
+    status: Any,
+    baseline: dict[str, Any],
+    as_of: date,
+    project_root: Path,
+    baseline_path: Path,
+) -> None:
+    if not isinstance(status, dict) or status.get("schema_version") != "1.0":
+        raise ValueError("program status schema_version must be '1.0'")
+    if status.get("baseline_id") != baseline.get("baseline_id"):
+        raise ValueError("program status baseline id does not match the approved baseline")
+    if status.get("baseline_revision") != baseline.get("revision"):
+        raise ValueError("program status baseline revision does not match the approved baseline")
+    if status.get("as_of") != as_of.isoformat():
+        raise ValueError(
+            f"program status as_of {status.get('as_of')!r} does not match roadmap as_of {as_of.isoformat()!r}"
+        )
+    if status.get("overall_status") not in PROGRAM_STATUSES:
+        raise ValueError("program status overall_status is invalid")
+    if status.get("report_confidence") not in PROGRAM_CONFIDENCE:
+        raise ValueError("program status report_confidence is invalid")
+    for key in ["snapshot_id", "input_audit_id", "generator_version", "locale", "overall_rule_id"]:
+        if not clean(status.get(key)):
+            raise ValueError(f"program status {key} is required")
+    generated_at = parse_audit_datetime(status.get("generated_at"))
+    if generated_at is None:
+        raise ValueError("program status generated_at must be a timezone-aware ISO-8601 timestamp")
+    period = status.get("reporting_period")
+    if not isinstance(period, dict) or parse_date(str(period.get("start", ""))) is None or parse_date(str(period.get("end", ""))) is None:
+        raise ValueError("program status reporting_period requires ISO start and end dates")
+    for key in ["source_inventory", "rule_ids", "critical_path", "variances"]:
+        if not isinstance(status.get(key), list):
+            raise ValueError(f"program status {key} must be an array")
+    if not isinstance(status.get("period_delta"), dict):
+        raise ValueError("program status period_delta must be an object")
+    fingerprints = status.get("source_fingerprints")
+    if not isinstance(fingerprints, dict):
+        raise ValueError("program status source_fingerprints must be an object")
+    baseline_hashes = [
+        clean(value).removeprefix("sha256:")
+        for path, value in fingerprints.items()
+        if normalize_source_path(path).endswith("plans/program-baseline.md")
+    ]
+    if baseline_hashes != [file_sha256(baseline_path)]:
+        raise ValueError("program status baseline fingerprint does not match the approved baseline")
+    for raw_path, raw_fingerprint in fingerprints.items():
+        source_path = Path(str(raw_path))
+        if not source_path.is_absolute():
+            source_path = project_root / source_path
+        if not source_path.is_file():
+            raise ValueError(f"program status source is missing: {raw_path}")
+        expected = clean(raw_fingerprint).removeprefix("sha256:")
+        if file_sha256(source_path) != expected:
+            raise ValueError(f"program status source fingerprint is stale: {raw_path}")
+
+    expected = {
+        "milestones": {str(item["id"]): item for item in baseline.get("milestones", [])},
+        "gates": {str(item["id"]): item for item in baseline.get("gates", [])},
+    }
+    for collection in ["milestones", "gates"]:
+        rows = status.get(collection)
+        if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
+            raise ValueError(f"program status {collection} must be an array of objects")
+        indexed = {str(item.get("id")): item for item in rows}
+        if len(indexed) != len(rows) or set(indexed) != set(expected[collection]):
+            raise ValueError(f"program status {collection} do not match baseline constraint ids")
+        for item_id, item in indexed.items():
+            validate_status_constraint(item, expected[collection][item_id], collection)
+    project = status.get("project")
+    target = project.get("target_assessment") if isinstance(project, dict) else None
+    if not isinstance(target, dict) or target.get("id") != "PROJECT-TARGET":
+        raise ValueError("program status project.target_assessment is required")
+    if target.get("planned_date") != baseline["project"]["target_date"]:
+        raise ValueError("program status project target planned date differs from baseline")
+    validate_status_fields(target, "project target")
+
+
+def validate_status_constraint(item: dict[str, Any], baseline_item: dict[str, Any], collection: str) -> None:
+    if item.get("planned_date") != baseline_item.get("planned_date"):
+        raise ValueError(f"program status {collection} {item.get('id')} planned date differs from baseline")
+    if collection == "milestones" and item.get("workstream_id") != baseline_item.get("workstream_id"):
+        raise ValueError(f"program status milestone {item.get('id')} workstream differs from baseline")
+    validate_status_fields(item, f"{collection} {item.get('id')}")
+
+
+def validate_status_fields(item: dict[str, Any], label: str) -> None:
+    if item.get("status") not in PROGRAM_STATUSES:
+        raise ValueError(f"program status {label} status is invalid")
+    if not clean(item.get("rule_id")):
+        raise ValueError(f"program status {label} rule_id is required")
+    for key in ["forecast_date", "actual_date"]:
+        value = item.get(key)
+        if value is not None and (not isinstance(value, str) or parse_date(value) is None):
+            raise ValueError(f"program status {label} {key} must be null or YYYY-MM-DD")
+    variance = item.get("variance_days")
+    if variance is not None and (not isinstance(variance, int) or isinstance(variance, bool)):
+        raise ValueError(f"program status {label} variance_days must be an integer or null")
+    refs = item.get("source_references")
+    if not isinstance(refs, list) or any(not isinstance(ref, str) or not clean(ref) for ref in refs):
+        raise ValueError(f"program status {label} source_references must be an array of references")
+
+
+def build_baseline_revision_diff(memory_root: Path, baseline_path: Path, baseline: dict[str, Any]) -> dict[str, Any]:
+    revision = int(baseline["revision"])
+    current_rel = rel_to_memory(memory_root, baseline_path)
+    current_fingerprint = "sha256:" + file_sha256(baseline_path)
+    if revision == 1:
+        return {
+            "status": "initial-baseline", "from_revision": None, "to_revision": 1,
+            "from_path": None, "to_path": current_rel, "from_fingerprint": None,
+            "to_fingerprint": current_fingerprint, "changes": [],
+        }
+    previous_path = memory_root / "plans" / "baseline-history" / f"program-baseline-r{revision - 1}.md"
+    if not previous_path.is_file():
+        raise ValueError(f"archived baseline revision {revision - 1} is missing")
+    previous = parse_baseline_document(previous_path)
+    validate_baseline_for_roadmap(previous)
+    if previous.get("revision") != revision - 1:
+        raise ValueError(f"archived baseline does not contain revision {revision - 1}")
+    if previous.get("baseline_id") != baseline.get("baseline_id"):
+        raise ValueError("archived baseline baseline_id does not match the current baseline")
+    return {
+        "status": "compared", "from_revision": revision - 1, "to_revision": revision,
+        "from_path": rel_to_memory(memory_root, previous_path), "to_path": current_rel,
+        "from_fingerprint": "sha256:" + file_sha256(previous_path),
+        "to_fingerprint": current_fingerprint,
+        "changes": diff_baseline_constraints(previous, baseline),
+    }
+
+
+def diff_baseline_constraints(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str, Any]]:
+    def indexed(model: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        result = {
+            "baseline:ROOT": {
+                "id": "BASELINE",
+                "kind": "baseline",
+                "default_tolerance_days": model.get("default_tolerance_days"),
+                "critical_path": model.get("critical_path"),
+                "weighting": model.get("weighting"),
+            },
+            "project:PROJECT-TARGET": {"id": "PROJECT-TARGET", "kind": "project", **model["project"]},
+        }
+        for collection, kind in [("gates", "gate"), ("milestones", "milestone")]:
+            for item in model.get(collection, []):
+                result[f"{kind}:{item['id']}"] = {"kind": kind, **item}
+        return result
+
+    before, after = indexed(previous), indexed(current)
+    changes: list[dict[str, Any]] = []
+    for key in sorted(set(before) | set(after)):
+        if key not in before:
+            changes.append({"change": "added", "id": after[key]["id"], "kind": after[key]["kind"], "fields": []})
+        elif key not in after:
+            changes.append({"change": "removed", "id": before[key]["id"], "kind": before[key]["kind"], "fields": []})
+        else:
+            fields = sorted(
+                name for name in set(before[key]) | set(after[key])
+                if name != "baseline_revision" and before[key].get(name) != after[key].get(name)
+            )
+            if fields:
+                changes.append({"change": "updated", "id": after[key]["id"], "kind": after[key]["kind"], "fields": fields})
+    return changes
+
+
+def canonical_timeline_items(baseline: dict[str, Any], program_status: dict[str, Any], selected: set[str]) -> list[RoadmapItem]:
+    constraints: list[tuple[str, dict[str, Any], dict[str, Any], list[str]]] = [
+        ("project-target", baseline["project"], program_status["project"]["target_assessment"], [])
+    ]
+    status_gates = {str(item["id"]): item for item in program_status["gates"]}
+    constraints.extend(("gate", item, status_gates[str(item["id"])], []) for item in baseline["gates"])
+    status_milestones = {str(item["id"]): item for item in program_status["milestones"]}
+    constraints.extend(
+        ("milestone", item, status_milestones[str(item["id"])], [normalize_id(item["workstream_id"])])
+        for item in baseline["milestones"]
+        if not selected or normalize_id(item["workstream_id"]) in selected
+    )
+    snapshot_id = program_status["snapshot_id"]
+    result: list[RoadmapItem] = []
+    for kind, plan, status, workstreams in constraints:
+        item_id = "PROJECT-TARGET" if kind == "project-target" else str(plan["id"])
+        planned = plan.get("target_date") if kind == "project-target" else plan["planned_date"]
+        source = plan["source"]
+        status_ref = f"snapshots/program-status/{snapshot_id}.json#{item_id}"
+        forecast, actual = status.get("forecast_date") or "TBD", status.get("actual_date") or "TBD"
+        result.append(RoadmapItem(
+            id=item_id,
+            milestone=str(plan.get("name") or baseline["project"]["name"]),
+            type=kind,
+            status=status["status"],
+            planned=str(planned),
+            forecast=str(forecast),
+            actual=str(actual),
+            owner=str(plan["owner"]),
+            confidence=program_status["report_confidence"],
+            depends_on=", ".join(str(value) for value in plan.get("dependencies", [])) or "TBD",
+            source=str(source["reference"]),
+            source_type="program-baseline",
+            workstreams=workstreams,
+            variance_days=status.get("variance_days"),
+            baseline_revision=int(baseline["revision"]),
+            planned_source=str(source["reference"]),
+            forecast_source=status_ref if forecast != "TBD" else "TBD",
+            actual_source=status_ref if actual != "TBD" else "TBD",
+            status_source=status_ref,
+            status_rule_id=str(status["rule_id"]),
+            source_references=list(status.get("source_references", [])),
+        ))
+    return result
+
+
+def verify_canonical_timeline_sources(timeline_gate: dict[str, Any]) -> str | None:
+    for raw_path, expected in timeline_gate["source_fingerprints"].items():
+        path = Path(raw_path)
+        if not path.is_file():
+            return f"source disappeared: {path}"
+        if file_sha256(path) != expected:
+            return f"source changed: {path}"
+    return None
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def build_roadmap(
     project_root: Path,
     memory_root: Path,
@@ -759,11 +1133,25 @@ def build_roadmap(
     as_of: date,
     args: argparse.Namespace,
     audit_gate: dict[str, Any],
+    timeline_gate: dict[str, Any],
 ) -> dict[str, Any]:
     items: list[RoadmapItem] = []
     excluded: list[ExcludedItem] = []
     warnings: list[str] = []
     sources: list[dict[str, Any]] = []
+
+    baseline = timeline_gate["baseline"]
+    program_status = timeline_gate["program_status"]
+    canonical_items = canonical_timeline_items(baseline, program_status, selected_workstreams)
+    baseline_ids = {item.id for item in canonical_items}
+    for path in [
+        timeline_gate["baseline_path"],
+        timeline_gate["program_status_path"],
+        timeline_gate["snapshot_path"],
+    ]:
+        sources.append(file_item(path, memory_root))
+    if timeline_gate["baseline_changes"].get("from_path"):
+        sources.append(file_item(memory_root / timeline_gate["baseline_changes"]["from_path"], memory_root))
 
     for record in discover_wdrs(memory_root, selected_workstreams):
         sources.append(file_item(record, memory_root))
@@ -828,18 +1216,22 @@ def build_roadmap(
         if item.source_type != "action-ledger" or item.risk
     )
     source_failures = [item for item in excluded if item.risk]
-    dated = [item for item in unique_items if has_any_date(item)]
-    unscheduled = [item for item in unique_items if not has_any_date(item)]
-    at_risk = [item for item in dated if item.status in {"at-risk", "blocked"}]
+    supplemental = [item for item in unique_items if item.id not in baseline_ids]
+    unscheduled = [item for item in supplemental if not has_any_date(item)]
+    unmapped = [item for item in supplemental if has_any_date(item)]
+    dated = canonical_items
+    at_risk = [item for item in dated if item.status in {"at-risk", "off-plan"}]
 
     risk_bearing = audit_gate["risk_bearing"] or bool(source_failures)
     if source_failures:
         warnings.append(
             f"roadmap is risk-bearing because {len(source_failures)} source artifact(s) could not be trusted"
         )
+    persisted_sources = fingerprint_sources(dedupe_sources(sources), memory_root)
     roadmap = {
         "ok": True,
-        "schema_version": 1,
+        "schema_version": ROADMAP_SCHEMA_VERSION,
+        "generator_version": GENERATOR_VERSION,
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "as_of": as_of.isoformat(),
         "project_root": str(project_root),
@@ -849,12 +1241,24 @@ def build_roadmap(
         "report_confidence": audit_gate["report_confidence"],
         "risk_bearing": risk_bearing,
         "report_status": "risk-bearing" if risk_bearing else "normal",
+        "baseline_revision": baseline["revision"],
+        "baseline_id": baseline["baseline_id"],
+        "baseline_changes": timeline_gate["baseline_changes"],
+        "program_status": {
+            "snapshot_id": program_status["snapshot_id"],
+            "as_of": program_status["as_of"],
+            "overall_status": program_status["overall_status"],
+            "report_confidence": program_status["report_confidence"],
+            "input_audit_id": program_status["input_audit_id"],
+            "generator_version": program_status["generator_version"],
+            "source": rel_to_memory(memory_root, timeline_gate["program_status_path"]),
+        },
         "scope": {
             "kind": "workstreams" if selected_workstreams else "global",
             "selected_workstreams": sorted(selected_workstreams),
         },
         "source_inventory": {
-            "sources_read": dedupe_sources(sources),
+            "sources_read": persisted_sources,
             "missing_sources": sorted(
                 path
                 for path, fingerprint in audit_gate["render_source_inventory"].items()
@@ -866,16 +1270,21 @@ def build_roadmap(
                 "TBD dates mean the source did not provide a parseable date.",
             ],
         },
+        "source_fingerprints": {
+            item["path"]: item["fingerprint"] for item in persisted_sources if item.get("fingerprint")
+        },
         "milestone_timeline": [asdict(item) for item in sorted(dated, key=timeline_sort_key)],
         "unscheduled_milestones": [asdict(item) for item in sorted(unscheduled, key=item_sort_key)],
+        "unmapped_items": [asdict(item) for item in sorted(unmapped, key=timeline_sort_key)],
         "at_risk_dates": [asdict(item) for item in sorted(at_risk, key=timeline_sort_key)],
         "blocked_by_decisions": decision_blocks,
         "changed_since_last_roadmap": [],
         "excluded_items": [asdict(item) for item in excluded],
         "counts": {
-            "sources_read": len(dedupe_sources(sources)),
+            "sources_read": len(persisted_sources),
             "milestone_timeline": len(dated),
             "unscheduled_milestones": len(unscheduled),
+            "unmapped_items": len(unmapped),
             "at_risk_dates": len(at_risk),
             "blocked_by_decisions": len(decision_blocks),
             "excluded_items": len(excluded),
@@ -947,6 +1356,7 @@ def roadmap_items_from_wdr(memory_root: Path, record: Path) -> tuple[list[Roadma
         for diagnostic in table_diagnostics
     ]
     for row in rows:
+        milestone_id = first_value(row, "milestone id", "milestone_id", "id")
         milestone = first_value(row, "milestone", "event", "name")
         source = first_value(row, "source", "source link", "source anchor")
         if not is_meaningful(milestone):
@@ -1008,7 +1418,7 @@ def roadmap_items_from_wdr(memory_root: Path, record: Path) -> tuple[list[Roadma
         actual, actual_note = normalize_date_field(first_value(row, "actual", "actual date", "completed"))
         notes = compact([planned_note, forecast_note, actual_note])
         item = RoadmapItem(
-            id=stable_id("wdr-roadmap", workstream, milestone, source),
+            id=clean(milestone_id) if is_meaningful(milestone_id) else stable_id("wdr-roadmap", workstream, milestone, source),
             milestone=clean(milestone),
             type=item_type,
             status=status,
@@ -1715,6 +2125,19 @@ def dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [by_path[key] for key in sorted(by_path)]
 
 
+def fingerprint_sources(sources: list[dict[str, Any]], memory_root: Path) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for source in sources:
+        raw_path = str(source.get("path", ""))
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = memory_root / path
+        enriched = dict(source)
+        enriched["fingerprint"] = "sha256:" + file_sha256(path) if path.is_file() else ""
+        result.append(enriched)
+    return result
+
+
 def load_previous_roadmap(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return None, None
@@ -1767,7 +2190,19 @@ def diff_previous(
         before = previous_items[item_id]
         changed_fields = [
             field
-            for field in ["status", "planned", "forecast", "actual", "confidence", "source"]
+            for field in [
+                "status",
+                "planned",
+                "forecast",
+                "actual",
+                "variance_days",
+                "confidence",
+                "planned_source",
+                "forecast_source",
+                "actual_source",
+                "status_source",
+                "baseline_revision",
+            ]
             if before.get(field) != item.get(field)
         ]
         if changed_fields:
@@ -1813,7 +2248,7 @@ def item_map(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], str | 
         "source",
         "source_type",
     }
-    for section in ["milestone_timeline", "unscheduled_milestones"]:
+    for section in ["milestone_timeline", "unscheduled_milestones", "unmapped_items"]:
         items = payload.get(section)
         if not isinstance(items, list):
             return {}, f"field {section!r} is not an array"
@@ -1845,21 +2280,26 @@ def render_markdown(roadmap: dict[str, Any]) -> str:
         f"Audit status: `{roadmap['audit_status']}`",
         f"Report confidence: `{roadmap['report_confidence']}`",
         f"Report status: `{roadmap['report_status']}`",
+        f"Baseline revision: `{roadmap['baseline_revision']}`",
+        f"Program status snapshot: `{roadmap['program_status']['snapshot_id']}`",
+        f"Canonical overall status: `{roadmap['program_status']['overall_status']}`",
         "",
-        "> Derived view. The source of truth remains WDRs, checkpoint candidates, decisions, L0 summaries, readiness files, and action ledger records.",
+    ]
+    if roadmap["risk_bearing"]:
+        lines.extend([
+            "> RISK-BEARING ROADMAP: the audit or source parsing did not fully pass. Timeline facts are shown for triage and must not be read as a green delivery status.",
+            "",
+        ])
+    lines.extend([
+        "> Derived view. Planned dates come from the approved baseline; forecast, actual, variance, and status come from the canonical program-status snapshot.",
         "",
         "## Source Inventory",
         "",
         f"- Sources read: {roadmap['counts']['sources_read']}",
         f"- Missing sources: {len(roadmap['source_inventory']['missing_sources'])}",
-        "- Action due dates are excluded from milestone generation unless tied to an explicit milestone source.",
+        "- Action due dates are excluded from milestone generation unless tied to an explicit baseline milestone.",
         "",
-    ]
-    if roadmap["risk_bearing"]:
-        lines[11:11] = [
-            "> RISK-BEARING ROADMAP: the audit or source parsing did not fully pass. Timeline facts are shown for triage and must not be read as a green delivery status.",
-            "",
-        ]
+    ])
     add_source_table(lines, roadmap["source_inventory"]["sources_read"])
     if roadmap["source_inventory"]["missing_sources"]:
         lines.extend(["Missing sources:", ""])
@@ -1867,7 +2307,19 @@ def render_markdown(roadmap: dict[str, Any]) -> str:
         lines.append("")
     add_item_table(lines, "Milestone Timeline", roadmap["milestone_timeline"])
     add_item_table(lines, "Unscheduled Milestones", roadmap["unscheduled_milestones"])
+    add_item_table(lines, "Unmapped Items", roadmap["unmapped_items"])
     add_item_table(lines, "At-Risk Dates", roadmap["at_risk_dates"])
+    changes = roadmap["baseline_changes"]
+    lines.extend([
+        "## Baseline Changes",
+        "",
+        f"- Status: `{changes['status']}`",
+        f"- Revisions: `{changes['from_revision']}` -> `{changes['to_revision']}`",
+        f"- Sources: `{changes['from_path'] or 'N/A'}` -> `{changes['to_path']}`",
+        f"- Fingerprints: `{changes['from_fingerprint'] or 'N/A'}` -> `{changes['to_fingerprint']}`",
+        "",
+    ])
+    add_dict_table(lines, "Baseline Revision Diff", changes["changes"], ["change", "kind", "id", "fields"])
     add_dict_table(lines, "Blocked By Decisions", roadmap["blocked_by_decisions"], ["source", "decision", "owner", "status", "workstreams"])
     add_dict_table(lines, "Changed Since Last Roadmap", roadmap["changed_since_last_roadmap"], ["change", "id", "milestone", "fields"])
     add_dict_table(lines, "Excluded Items", roadmap["excluded_items"], ["source", "source_type", "item", "code", "risk", "reason", "workstreams"])
@@ -1878,14 +2330,17 @@ def add_source_table(lines: list[str], sources: list[dict[str, Any]]) -> None:
     if not sources:
         lines.extend(["No sources read.", ""])
         return
-    lines.extend(["| Source | Bytes | Modified |", "| --- | ---: | --- |"])
+    lines.extend(["| Source | SHA-256 | Bytes | Modified |", "| --- | --- | ---: | --- |"])
     for source in sources:
-        lines.append(f"| {cell(source.get('path', ''))} | {cell(source.get('bytes', ''))} | {cell(source.get('modified', ''))} |")
+        lines.append(
+            f"| {cell(source.get('path', ''))} | {cell(source.get('fingerprint', ''))} | "
+            f"{cell(source.get('bytes', ''))} | {cell(source.get('modified', ''))} |"
+        )
     lines.append("")
 
 
 def add_item_table(lines: list[str], title: str, items: list[dict[str, Any]]) -> None:
-    headers = ["Milestone", "Type", "Status", "Planned", "Forecast", "Actual", "Owner", "Confidence", "Depends On", "Source", "Source Type"]
+    headers = ["Milestone", "Type", "Status", "Planned", "Forecast", "Actual", "Variance Days", "Owner", "Confidence", "Planned Source", "Forecast Source", "Actual Source", "Status Source", "Source", "Source Type"]
     lines.extend([f"## {title}", ""])
     if not items:
         lines.extend(["No items.", ""])
@@ -1900,9 +2355,13 @@ def add_item_table(lines: list[str], title: str, items: list[dict[str, Any]]) ->
             item.get("planned", ""),
             item.get("forecast", ""),
             item.get("actual", ""),
+            item.get("variance_days", ""),
             item.get("owner", ""),
             item.get("confidence", ""),
-            item.get("depends_on", ""),
+            item.get("planned_source", item.get("source", "")),
+            item.get("forecast_source", ""),
+            item.get("actual_source", ""),
+            item.get("status_source", item.get("source", "")),
             item.get("source", ""),
             item.get("source_type", ""),
         ]

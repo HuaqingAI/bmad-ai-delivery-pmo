@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -57,6 +58,25 @@ def write_module_yaml(path: Path, include_required: bool = False) -> None:
     if include_required:
         lines.extend(["required_value:", "  prompt: Required value?"])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    help_path = path.with_name("module-help.csv")
+    with help_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "module", "skill", "display-name", "menu-code", "description",
+                "action", "args", "phase", "preceded-by", "followed-by", "required",
+                "output-location", "outputs",
+            ]
+        )
+        writer.writerow(
+            [
+                "AI Delivery PMO", "adp-setup", "Setup", "SU", "Install ADP.",
+                "configure", "", "anytime", "", "", "false", "{project-root}/_bmad", "config",
+            ]
+        )
+    installed_skill = path.parent / "skills" / "adp-setup"
+    installed_skill.mkdir(parents=True, exist_ok=True)
+    (installed_skill / "SKILL.md").write_text("# Setup\n", encoding="utf-8")
 
 
 class AdpSetupScriptTests(unittest.TestCase):
@@ -71,17 +91,57 @@ class AdpSetupScriptTests(unittest.TestCase):
             if (path / "SKILL.md").is_file()
         )
 
+        expected_order = [
+            "adp-setup",
+            "adp-project-kickoff",
+            "adp-plan-baseline",
+            "adp-workstream-register",
+            "adp-bmm-checkpoint-sync",
+            "adp-meeting-sync",
+            "adp-status-sync",
+            "adp-risk-dependency-change-review",
+            "adp-l0-reference-sync",
+            "adp-acceptance-readiness-review",
+            "adp-state-audit",
+            "adp-program-status",
+            "adp-roadmap-sync",
+            "adp-meeting-pack",
+            "adp-agent-program-lead",
+        ]
+
         self.assertEqual(sorted(marketplace["skills"]), expected)
         self.assertEqual(sorted(marketplace["plugins"][0]["skills"]), expected)
+        self.assertEqual([Path(path).name for path in marketplace["skills"]], expected_order)
+        self.assertEqual(marketplace["version"], "1.2.0")
+        self.assertEqual(marketplace["plugins"][0]["version"], "1.2.0")
 
-    def test_module_help_registers_derived_readout_workflows(self) -> None:
+    def test_module_help_registers_all_skills_in_lifecycle_order(self) -> None:
         header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
         skill_index = header.index("skill")
+        args_index = header.index("args")
         output_index = header.index("output-location")
+        outputs_index = header.index("outputs")
         row_by_skill = {row[skill_index]: row for row in rows}
 
-        for skill in ("adp-state-audit", "adp-meeting-pack", "adp-roadmap-sync"):
-            self.assertIn(skill, row_by_skill)
+        expected_order = [
+            "adp-setup",
+            "adp-project-kickoff",
+            "adp-plan-baseline",
+            "adp-workstream-register",
+            "adp-bmm-checkpoint-sync",
+            "adp-meeting-sync",
+            "adp-status-sync",
+            "adp-risk-dependency-change-review",
+            "adp-l0-reference-sync",
+            "adp-acceptance-readiness-review",
+            "adp-state-audit",
+            "adp-program-status",
+            "adp-roadmap-sync",
+            "adp-meeting-pack",
+            "adp-agent-program-lead",
+        ]
+        self.assertEqual([row[skill_index] for row in rows], expected_order)
+        self.assertEqual(set(row_by_skill), set(expected_order))
 
         self.assertEqual(
             row_by_skill["adp-state-audit"][output_index],
@@ -95,6 +155,122 @@ class AdpSetupScriptTests(unittest.TestCase):
             row_by_skill["adp-roadmap-sync"][output_index],
             "{project-root}/_bmad-output/adp/memory/views",
         )
+        self.assertEqual(
+            row_by_skill["adp-plan-baseline"][output_index],
+            "{project-root}/_bmad-output/adp/memory/plans",
+        )
+        self.assertIn("immutable program-status snapshot", row_by_skill["adp-program-status"][-1])
+        self.assertIn("--candidate-id <id>", row_by_skill["adp-bmm-checkpoint-sync"][args_index])
+        self.assertNotIn("--execute", row_by_skill["adp-status-sync"][args_index])
+        self.assertEqual(row_by_skill["adp-agent-program-lead"][output_index], "")
+        self.assertNotIn("project lead and weekly views", row_by_skill["adp-agent-program-lead"][outputs_index])
+
+    def test_vnext_module_defaults_and_installed_resources_are_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    temp_dir,
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--module-help",
+                    str(SKILL_ROOT / "assets" / "module-help.csv"),
+                    "--installed-skills-dir",
+                    str(SKILL_ROOT.parent),
+                ).stdout
+            )
+
+            self.assertEqual(result["module"]["version"], "1.2.0")
+            self.assertEqual(
+                result["effective_defaults"]["module"],
+                {
+                    "default_reporting_cadence": "weekly",
+                    "status_stale_after_days": 7,
+                    "schedule_variance_tolerance_days": 0,
+                    "meeting_pack_item_limit": 10,
+                },
+            )
+            self.assertTrue(result["headless_ready"])
+            self.assertTrue(result["installation_ready"])
+            self.assertEqual(result["upgrade_report"]["version_status"], "fresh_install")
+            self.assertEqual(result["upgrade_report"]["memory"]["status"], "not_initialized")
+            self.assertEqual(result["installed_skill_inspection"]["missing_skills"], [])
+            self.assertEqual(result["installed_skill_inspection"]["missing_shared_resources"], [])
+
+    def test_inspect_reports_update_and_preserves_existing_team_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bmad_dir = root / "_bmad"
+            bmad_dir.mkdir()
+            (bmad_dir / "config.yaml").write_text(
+                "\n".join(
+                    [
+                        "output_folder: '{project-root}/_bmad-output'",
+                        "adp:",
+                        "  version: 1.1.0",
+                        "  default_reporting_cadence: biweekly",
+                        "  status_stale_after_days: 14",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    str(root),
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--installed-skills-dir",
+                    str(SKILL_ROOT.parent),
+                ).stdout
+            )
+
+            self.assertEqual(result["install_state"], "update")
+            self.assertEqual(result["upgrade_report"]["version_status"], "upgrade")
+            self.assertEqual(result["effective_defaults"]["module"]["default_reporting_cadence"], "biweekly")
+            self.assertEqual(result["default_sources"]["module"]["status_stale_after_days"], "existing")
+            self.assertEqual(
+                result["upgrade_report"]["defaulted_module_variables"],
+                ["meeting_pack_item_limit", "schedule_variance_tolerance_days"],
+            )
+
+    def test_inspect_blocks_incomplete_installed_skill_or_shared_resource_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skills_dir = root / "installed-skills"
+            skills_dir.mkdir()
+            header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
+            skill_index = header.index("skill")
+            for row in rows:
+                skill_dir = skills_dir / row[skill_index]
+                skill_dir.mkdir()
+                (skill_dir / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+            (skills_dir / "adp-program-status" / "SKILL.md").unlink()
+
+            result = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    str(root),
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--installed-skills-dir",
+                    str(skills_dir),
+                ).stdout
+            )
+
+            self.assertFalse(result["headless_ready"])
+            self.assertFalse(result["installation_ready"])
+            self.assertEqual(result["installed_skill_inspection"]["missing_skills"], ["adp-program-status"])
+            self.assertEqual(
+                result["installed_skill_inspection"]["missing_shared_resources"],
+                [
+                    "adp-plan-baseline/scripts/adp_effective_config.py",
+                    "adp-plan-baseline/assets/locale-catalog.json",
+                ],
+            )
+            self.assertTrue(any("Missing installed skills" in gap for gap in result["unresolved_gaps"]))
 
     def test_inspect_install_state_computes_defaults_and_missing_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -102,7 +278,7 @@ class AdpSetupScriptTests(unittest.TestCase):
             module_yaml = root / "module.yaml"
             bmad_dir = root / "_bmad"
             write_module_yaml(module_yaml)
-            (root / "skills").mkdir()
+            (root / "skills").mkdir(exist_ok=True)
             (bmad_dir / "adp").mkdir(parents=True)
             (bmad_dir / "core").mkdir(parents=True)
             (bmad_dir / "config.yaml").write_text(
@@ -224,6 +400,43 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertFalse(config_path.exists())
             self.assertFalse(user_config_path.exists())
 
+    def test_vnext_module_values_reject_invalid_ranges_and_choices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            answers = root / "answers.json"
+            answers.write_text(
+                json.dumps(
+                    {
+                        "module": {
+                            "default_reporting_cadence": "daily",
+                            "status_stale_after_days": 0,
+                            "schedule_variance_tolerance_days": 91,
+                            "meeting_pack_item_limit": 2,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            inspected = run_script(
+                INSPECT_STATE,
+                str(root),
+                "--module-yaml",
+                str(SKILL_ROOT / "assets" / "module.yaml"),
+                "--installed-skills-dir",
+                str(SKILL_ROOT.parent),
+                "--answers",
+                str(answers),
+                check=False,
+            )
+            result = json.loads(inspected.stdout)
+
+            self.assertEqual(inspected.returncode, 1)
+            self.assertIn("default_reporting_cadence must be one of", result["error"])
+            self.assertIn("status_stale_after_days must be at least 1", result["error"])
+            self.assertIn("schedule_variance_tolerance_days must be at most 90", result["error"])
+            self.assertIn("meeting_pack_item_limit must be at least 3", result["error"])
+
     def test_module_yaml_user_facing_fields_are_readable_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result = json.loads(
@@ -239,6 +452,12 @@ class AdpSetupScriptTests(unittest.TestCase):
 
             self.assertIn("帮助多条 FDE 工作线", result["module"]["description"])
             self.assertEqual(result["module"]["agents"][0]["icon"], "📊")
+            customize = tomllib.loads(
+                (SKILL_ROOT.parent / "adp-agent-program-lead" / "customize.toml").read_text(encoding="utf-8")
+            )["agent"]
+            roster = result["module"]["agents"][0]
+            for key in ("code", "name", "title", "icon", "description", "agent_type"):
+                self.assertEqual(roster[key], customize[key])
             for signature in mojibake_signatures:
                 self.assertNotIn(signature, module_text)
 
@@ -359,6 +578,64 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertIn("user_name: Legacy User", user_text)
             self.assertIn("personal_note: fresh note", user_text)
             self.assertNotIn("removed_key", config_text)
+
+    def test_vnext_legacy_team_config_migrates_with_sources_and_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bmad_dir = root / "_bmad"
+            legacy_adp = bmad_dir / "adp" / "config.yaml"
+            legacy_adp.parent.mkdir(parents=True)
+            legacy_adp.write_text(
+                "\n".join(
+                    [
+                        "default_reporting_cadence: custom",
+                        "status_stale_after_days: 21",
+                        "schedule_variance_tolerance_days: 4",
+                        "meeting_pack_item_limit: 12",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            inspected = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    str(root),
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--installed-skills-dir",
+                    str(SKILL_ROOT.parent),
+                ).stdout
+            )
+            answers = root / "answers.json"
+            answers.write_text(json.dumps(inspected["validated_answers"]), encoding="utf-8")
+
+            merged = json.loads(
+                run_script(
+                    MERGE_CONFIG,
+                    "--config-path",
+                    str(bmad_dir / "config.yaml"),
+                    "--user-config-path",
+                    str(bmad_dir / "config.user.yaml"),
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--answers",
+                    str(answers),
+                    "--legacy-dir",
+                    str(bmad_dir),
+                ).stdout
+            )
+            config_text = (bmad_dir / "config.yaml").read_text(encoding="utf-8")
+
+            self.assertEqual(inspected["install_state"], "fresh_install_with_legacy")
+            self.assertTrue(all(source == "legacy" for source in inspected["default_sources"]["module"].values()))
+            self.assertEqual(merged["status"], "success")
+            self.assertIn("version: 1.2.0", config_text)
+            self.assertIn("default_reporting_cadence: custom", config_text)
+            self.assertIn("status_stale_after_days: 21", config_text)
+            self.assertIn("meeting_pack_item_limit: 12", config_text)
+            self.assertFalse(legacy_adp.exists())
 
     def test_merge_config_creates_output_dirs_before_writing_configs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
