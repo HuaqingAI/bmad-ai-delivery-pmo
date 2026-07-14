@@ -45,7 +45,7 @@ The audit is read-only: create audit artifacts and recommend owning workflows, b
 
 Use optional flags only when the user gives the scope:
 
-- `--scenario global|fde-morning|business-biweekly|weekly-report|project-lead|roadmap` to tune the prepass capability and output name.
+- `--scenario global|fde-morning|business-biweekly|weekly-report|project-lead|roadmap|management-panel` to tune the prepass capability and output name; management-panel routes to the dedicated panel gates below.
 - `--workstream <id>` to limit the WDR scan; repeat as needed.
 - `--memory-root <path>` when ADP memory is not at the default path.
 - `--prepass-json <path>` to audit an already captured prepass result.
@@ -63,6 +63,14 @@ uv run "{skill-root}/scripts/audit_state.py" "{project-root}" --phase artifact -
 ```
 
 Repeat `--artifact` for every file in the same generation transaction. Treat the immutable validation result as authoritative and never modify snapshots or views.
+
+For `views/flow-graph.json`, artifact validation uses the graph contract rather than view locale metadata. It recomputes topology/state/overlay/flow identities, verifies node/edge/state/count references and baseline revision, and requires the current graph, `snapshots/flow-graph/latest.json`, and immutable snapshot to be identical.
+
+## Management Panel Gates
+
+For `adp-management-panel`, run `--scenario management-panel --panel-input-bundle <canonical-inputs.json>` before render. This read-only gate seals exact input and source-file hashes and validates freshness, locale fallback, source/audit lineage, progress and flow identities, meeting readiness/lifecycle/scope, and the pinned ELK version/license/hash. A blocking disposition forbids compose and publication; degraded evidence must remain visible in the panel recovery state.
+
+After render, run the artifact phase with `--panel-model <panel-id.json> --input-audit-json <panel-input-audit.json> --artifact <panel.html>` and, when available, the same `--panel-input-bundle`. It validates the model and manifest schemas, deterministic source projection, safe embedded JSON, exact ELK/runtime bytes, SVG/HTML allowlists, semantic fallback, distribution redaction, and immutable filename/collision rules. The validator writes only its own immutable audit record and never repairs or rewrites a panel bundle, current HTML, or archive.
 
 ## Findings
 

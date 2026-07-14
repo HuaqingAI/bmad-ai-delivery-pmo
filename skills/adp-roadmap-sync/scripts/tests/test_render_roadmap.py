@@ -11,12 +11,22 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "render_roadmap.py"
 KICKOFF_TEMPLATE_ROOT = SCRIPT.parents[2] / "adp-project-kickoff" / "assets" / "adp-memory-templates"
+PROGRESS_GOLDEN = SCRIPT.parents[2] / "adp-program-status" / "assets" / "fixtures" / "progress-v2" / "golden-measurable-boundary.json"
 SCRIPT_GLOBALS = runpy.run_path(str(SCRIPT))
 NORMALIZE_DATE_FIELD = SCRIPT_GLOBALS["normalize_date_field"]
 ROADMAP_ITEM = SCRIPT_GLOBALS["RoadmapItem"]
 DEDUPE_ITEMS = SCRIPT_GLOBALS["dedupe_items"]
 CANONICAL_RENDER_SOURCE_INVENTORY = SCRIPT_GLOBALS["canonical_render_source_inventory"]
 PARSE_FIRST_TABLE = SCRIPT_GLOBALS["parse_first_table"]
+
+
+def progress_fixture(as_of: str, revision: int, period: dict[str, str]) -> dict:
+    payload = json.loads(PROGRESS_GOLDEN.read_text(encoding="utf-8"))
+    payload["as_of"] = as_of
+    payload["reporting_period"] = {"start": period["start"], "end": period["end"]}
+    payload["scope_identity"]["baseline_revision"] = revision
+    payload["scope_identity"]["scope_revision"] = f"PROGRAM-BASELINE:r{revision}"
+    return payload
 
 
 RECORD = """# Workstream Delivery Record
@@ -253,12 +263,13 @@ class RenderRoadmapTests(unittest.TestCase):
         }
         planned = baseline["milestones"][0]["planned_date"]
         forecast = (date.fromisoformat(planned) + timedelta(days=2)).isoformat()
+        reporting_period = {"start": as_of, "end": as_of}
         model = {
             "schema_version": "1.0",
             "snapshot_id": snapshot_id,
             "generated_at": f"{as_of}T12:00:00Z",
             "as_of": as_of,
-            "reporting_period": {"start": as_of, "end": as_of},
+            "reporting_period": reporting_period,
             "baseline_revision": baseline["revision"],
             "baseline_id": baseline["baseline_id"],
             "source_inventory": [],
@@ -294,7 +305,7 @@ class RenderRoadmapTests(unittest.TestCase):
                     "source_references": [baseline["project"]["source"]["reference"]],
                 },
             },
-            "progress": {"weighted_completion_percent": None},
+            "progress": progress_fixture(as_of, baseline["revision"], reporting_period),
             "milestones": [
                 {
                     "constraint_type": "milestone",
@@ -373,6 +384,10 @@ class RenderRoadmapTests(unittest.TestCase):
             "safe_to_generate_green_report": status == "pass",
             "generated_at": generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "scenario": scenario,
+            "input_audit_id": "input-audit-roadmap-fixture",
+            "baseline_revision": 1,
+            "locale": "en",
+            "locale_fallback": False,
             "memory_root": str(audit_memory_root or memory_root),
             "report_confidence": {"pass": "high", "warning": "medium", "blocked": "low"}.get(status, "low"),
             "prepass": {
@@ -405,6 +420,11 @@ class RenderRoadmapTests(unittest.TestCase):
                 }
                 for item in inventory.values()
             ],
+            "source_fingerprints": {
+                item["path"]: hashlib.sha256((memory_root / item["path"]).read_bytes()).hexdigest()
+                for item in inventory.values()
+                if item["status"] == "read"
+            },
             "recommended_workflows": [],
         }
         audit_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -490,10 +510,20 @@ class RenderRoadmapTests(unittest.TestCase):
             roadmap = result.get("preview", {}).get("roadmap") or json.loads(
                 (memory_root / "views" / "roadmap.json").read_text(encoding="utf-8")
             )
+            program_status = json.loads((memory_root / "views" / "program-status.json").read_text(encoding="utf-8"))
             milestone = next(item for item in roadmap["milestone_timeline"] if item["id"] == "MS-CHECKOUT")
 
             self.assertEqual(roadmap["program_status"]["overall_status"], "indeterminate")
             self.assertEqual(roadmap["baseline_revision"], 1)
+            self.assertEqual(roadmap["progress"], program_status["progress"])
+            self.assertEqual(roadmap["program_status"]["progress_schema_version"], "2.0.0")
+            self.assertEqual(roadmap["program_status_snapshot_id"], program_status["snapshot_id"])
+            self.assertEqual(roadmap["reporting_period"], program_status["reporting_period"])
+            self.assertEqual(roadmap["scenario"], "roadmap")
+            self.assertEqual(roadmap["input_audit_id"], "input-audit-roadmap-fixture")
+            self.assertEqual(roadmap["locale"], "en")
+            self.assertFalse(roadmap["locale_fallback"])
+            self.assertEqual(roadmap["render_contract"]["message_keys"], ["status.title"])
             self.assertEqual(milestone["planned"], "2026-07-15")
             self.assertEqual(milestone["forecast"], "2026-07-17")
             self.assertEqual(milestone["variance_days"], 2)
@@ -512,6 +542,37 @@ class RenderRoadmapTests(unittest.TestCase):
             ]:
                 self.assertTrue(sources[source_path]["fingerprint"].startswith("sha256:"))
                 self.assertEqual(roadmap["source_fingerprints"][source_path], sources[source_path]["fingerprint"])
+            markdown = (memory_root / "views" / "roadmap.md").read_text(encoding="utf-8")
+            self.assertIn("Actual completion: 40.00%", markdown)
+            self.assertIn("Planned completion: 80.00%", markdown)
+            self.assertIn("Completion gap: -40.00 pp", markdown)
+            self.assertIn("<!-- adp:artifact-metadata:v1 -->", markdown)
+
+    def test_legacy_progress_returns_deterministic_migration_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            status_path = memory_root / "views" / "program-status.json"
+            snapshot_path = memory_root / "snapshots" / "program-status" / "ps-roadmap-fixture.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["progress"] = {"weighted_completion_percent": 25.0}
+            text = json.dumps(status, indent=2) + "\n"
+            status_path.write_text(text, encoding="utf-8")
+            snapshot_path.write_text(text, encoding="utf-8")
+
+            audit_path = self.write_audit(memory_root, as_of=status["as_of"], sync_program_status=False)
+            completed = self.run_script(
+                project_root,
+                "--audit",
+                str(audit_path),
+                "--as-of",
+                status["as_of"],
+                check=False,
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("ADP-PROGRESS-MIGRATION-REQUIRED", result["error"])
 
     def test_baseline_revision_diff_is_bound_to_archived_and_current_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -978,7 +1039,7 @@ class RenderRoadmapTests(unittest.TestCase):
             scoped_path = memory_root / "views" / "roadmaps" / "l1-checkout" / "roadmap.json"
             roadmap = json.loads(scoped_path.read_text(encoding="utf-8"))
 
-            self.assertEqual(Path(result["outputs"]["json"]), scoped_path)
+            self.assertEqual(Path(result["outputs"]["json"]).resolve(), scoped_path.resolve())
             self.assertEqual(canonical_path.read_text(encoding="utf-8"), canonical_before)
             self.assertEqual(roadmap["scope"]["selected_workstreams"], ["l1-checkout"])
             self.assertTrue(
@@ -1278,6 +1339,25 @@ class RenderRoadmapTests(unittest.TestCase):
             self.assertEqual(roadmap["audit_status"], result["audit_status"])
             self.assertEqual(roadmap["audit_path"], result["audit_path"])
 
+    def test_program_status_accepts_memory_relative_audit_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            status_path = memory_root / "views/program-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            ledger = memory_root / "actions/action-ledger.md"
+            status["source_fingerprints"]["actions/action-ledger.md"] = hashlib.sha256(
+                ledger.read_bytes()
+            ).hexdigest()
+            rendered = json.dumps(status, indent=2) + "\n"
+            status_path.write_text(rendered, encoding="utf-8")
+            snapshot = memory_root / "snapshots/program-status/ps-roadmap-fixture.json"
+            snapshot.write_text(rendered, encoding="utf-8")
+
+            completed = self.run_script(project_root, "--date", "2026-07-10")
+
+            self.assertTrue(json.loads(completed.stdout)["ok"])
+
     def test_generated_audit_matches_scoped_dry_run_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -1298,7 +1378,7 @@ class RenderRoadmapTests(unittest.TestCase):
                 result["preview"]["roadmap"]["scope"]["selected_workstreams"],
                 ["l1-checkout"],
             )
-            self.assertIn("views\\roadmaps\\l1-checkout", result["would_write"]["json"])
+            self.assertIn("views/roadmaps/l1-checkout", result["would_write"]["json"].replace("\\", "/"))
             self.assertFalse((memory_root / "views" / "roadmap.json").exists())
 
     def test_audit_requires_complete_schema_and_current_source_fingerprints(self) -> None:

@@ -13,3 +13,13 @@ IDs are case-sensitive stable tokens matching `[A-Za-z0-9][A-Za-z0-9._-]*`. Depe
 Weighting is disabled by default. When enabled, `completion_measure` and `source` are required, every milestone needs a numeric `weight` and non-empty `completion_criteria`, and weights total exactly 100.
 
 Update input uses JSON Merge Patch semantics for objects; `null` deletes a field and arrays replace the entire prior array. It also requires root siblings `change_reason` and `decision_source`, where the latter follows the source contract and represents approved change authority.
+
+## Flow dependency vNext contract
+
+`assets/program-baseline-flow-vnext.schema.json` freezes the flow-bearing extension for the next baseline schema. Only `milestone` and `gate` items become flow nodes. A milestone belongs to its `workstream` lane. A gate declares either a `workstream` lane or the single `program` lane; no other baseline record becomes a node.
+
+Canonical dependencies are objects on the target node. They require `edge_id`, `predecessor`, `relationship_type`, `source`, and `baseline_revision`. `relationship_type` is one of `dependency`, `aggregation`, `conditional`, `rework`, or `informational`. Conditional relationships also require a source-backed `condition`; non-conditional relationships cannot carry one. The target node may declare `predecessor_rule: all` only when it has at least two incoming aggregation relationships; no other predecessor rule is valid.
+
+Legacy string dependencies remain accepted only as compatibility input. Normalize each string to a `dependency` object before validation or identity calculation. Its stable edge ID is `legacy-` plus the first 20 lowercase hex characters of SHA-256 over the UTF-8 string `baseline_id + "\n" + revision + "\n" + predecessor + "\n" + target`. The containing node supplies the target. A consumer never guesses an edge ID by another rule.
+
+Every node and dependency object carries the same positive `baseline_revision` as the root. Unknown nodes, duplicate node or edge IDs, cross-revision references, missing conditional facts, and cycles containing any non-`rework` relationship block canonical topology publication. A cycle made entirely of explicit `rework` relationships is valid and remains visible as a rework loop. Recovery codes and deterministic dispositions are owned by `adp-flow-graph/references/flow-graph-contract-v1.md`.

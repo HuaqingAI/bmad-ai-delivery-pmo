@@ -1,0 +1,11 @@
+{
+  "labels": [
+    "</script><script>alert('panel')</script>",
+    "<foreignObject onload=alert(1)>",
+    "<a href=https://example.invalid>external</a>",
+    "line separator   paragraph separator  ",
+    "body{background:url(https://example.invalid/leak)}",
+    "中文 <img src=x onerror=alert(1)>"
+  ],
+  "forbidden_output_tokens": ["</script", "<script", "<foreignObject", " onload=", " onerror=", "href=https://", "background:url("]
+}

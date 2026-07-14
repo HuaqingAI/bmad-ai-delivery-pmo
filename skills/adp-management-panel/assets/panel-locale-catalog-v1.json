@@ -1,0 +1,34 @@
+{
+  "catalog_schema_version": "1.0.0",
+  "default_locale": "zh-CN",
+  "supported_locales": ["zh-CN", "en"],
+  "identifiers": {
+    "views": ["project-lead", "fde-morning", "business-biweekly"],
+    "visualization_modes": ["quantitative-progress", "flow-progress"],
+    "sections": {
+      "project-lead": ["pl-status-strip", "pl-progress-summary", "pl-progress-trend", "pl-workstream-comparison", "pl-flow", "pl-roadmap-variance", "pl-source-lineage"],
+      "fde-morning": ["fde-meeting-readiness", "fde-window-delta", "fde-blockers-commitments", "fde-flow-window", "fde-source-lineage"],
+      "business-biweekly": ["biz-meeting-readiness", "biz-status-drivers", "biz-next-period-progress", "biz-decisions", "biz-flow-spine", "biz-roadmap-readiness", "biz-source-lineage"]
+    }
+  },
+  "messages": {
+    "zh-CN": {
+      "view.project-lead": "项目负责人",
+      "view.fde-morning": "FDE 晨会",
+      "view.business-biweekly": "业务双周会",
+      "mode.quantitative-progress": "进度摘要",
+      "mode.flow-progress": "流程图",
+      "redaction.hidden-topology": "部分拓扑已隐藏",
+      "recovery.data-unavailable": "数据不可用，请先执行恢复工作流"
+    },
+    "en": {
+      "view.project-lead": "Project lead",
+      "view.fde-morning": "FDE morning",
+      "view.business-biweekly": "Business biweekly",
+      "mode.quantitative-progress": "Progress summary",
+      "mode.flow-progress": "Flow progress",
+      "redaction.hidden-topology": "Part of the topology is hidden",
+      "recovery.data-unavailable": "Data is unavailable; run the recovery workflow first"
+    }
+  }
+}

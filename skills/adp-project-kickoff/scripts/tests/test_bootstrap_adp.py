@@ -36,6 +36,12 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertTrue((memory_root / "views" / "meeting-packs" / "fde-morning").is_dir())
             self.assertTrue((memory_root / "views" / "meeting-packs" / "business-biweekly").is_dir())
             self.assertTrue((memory_root / "views" / "meeting-packs" / "README.md").exists())
+            self.assertTrue((memory_root / "views" / "management-panel").is_dir())
+            self.assertTrue((memory_root / "snapshots" / "management-panel").is_dir())
+            self.assertTrue((memory_root / "snapshots" / "flow-graph").is_dir())
+            self.assertFalse((memory_root / "views" / "management-panel" / "index.html").exists())
+            self.assertEqual(list((memory_root / "snapshots" / "management-panel").iterdir()), [])
+            self.assertEqual(list((memory_root / "snapshots" / "flow-graph").iterdir()), [])
             self.assertTrue((memory_root / "views" / "weekly-report.md").exists())
             self.assertTrue((memory_root / "views" / "roadmap.md").exists())
             self.assertTrue((memory_root / "views" / "roadmap.json").exists())
@@ -81,10 +87,21 @@ class BootstrapAdpTests(unittest.TestCase):
             memory_root = project_root / "_bmad-output" / "adp" / "memory"
             baseline = memory_root / "plans" / "program-baseline.md"
             status_view = memory_root / "views" / "program-status.json"
+            panel_view = memory_root / "views" / "management-panel" / "index.html"
+            flow_view = memory_root / "views" / "flow-graph.json"
+            panel_snapshot = memory_root / "snapshots" / "management-panel" / "panel-existing.json"
+            flow_snapshot = memory_root / "snapshots" / "flow-graph" / "flow-existing.json"
             baseline.parent.mkdir(parents=True)
             status_view.parent.mkdir(parents=True)
+            panel_view.parent.mkdir(parents=True)
+            panel_snapshot.parent.mkdir(parents=True)
+            flow_snapshot.parent.mkdir(parents=True)
             baseline.write_text("approved baseline\n", encoding="utf-8")
             status_view.write_text('{"custom": true}\n', encoding="utf-8")
+            panel_view.write_text("<html>existing panel</html>\n", encoding="utf-8")
+            flow_view.write_text('{"flow": "existing"}\n', encoding="utf-8")
+            panel_snapshot.write_text('{"panel": "existing"}\n', encoding="utf-8")
+            flow_snapshot.write_text('{"flow": "existing"}\n', encoding="utf-8")
 
             result = self.run_script(project_root)
 
@@ -93,7 +110,11 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertTrue(result["baseline_onboarding"]["baseline_exists"])
             self.assertEqual(baseline.read_text(encoding="utf-8"), "approved baseline\n")
             self.assertEqual(status_view.read_text(encoding="utf-8"), '{"custom": true}\n')
-            self.assertIn(str(status_view), result["files_existing"])
+            self.assertIn(str(status_view.resolve()), result["files_existing"])
+            self.assertEqual(panel_view.read_text(encoding="utf-8"), "<html>existing panel</html>\n")
+            self.assertEqual(flow_view.read_text(encoding="utf-8"), '{"flow": "existing"}\n')
+            self.assertEqual(panel_snapshot.read_text(encoding="utf-8"), '{"panel": "existing"}\n')
+            self.assertEqual(flow_snapshot.read_text(encoding="utf-8"), '{"flow": "existing"}\n')
             self.assertTrue((memory_root / "schemas" / "program-status.md").exists())
             self.assertTrue((memory_root / "snapshots" / "program-status").is_dir())
 
@@ -160,7 +181,7 @@ class BootstrapAdpTests(unittest.TestCase):
                 result["meeting_cadence"]["fde_meeting_days"],
                 ["Monday", "Wednesday", "Friday"],
             )
-            self.assertEqual(result["config_sources"], [str(adp_config)])
+            self.assertEqual(result["config_sources"], [str(adp_config.resolve())])
             self.assertEqual(result["discovered_bmad_artifacts"]["counts"]["planning"], 1)
             self.assertEqual(result["discovered_bmad_artifacts"]["counts"]["implementation"], 1)
             self.assertEqual(len(result["discovered_bmad_artifacts"]["candidate_workstreams"]), 1)
@@ -173,8 +194,8 @@ class BootstrapAdpTests(unittest.TestCase):
                 for group in ("planning", "implementation")
                 for item in result["discovered_bmad_artifacts"][group]
             }
-            self.assertIn(str(prd), artifact_paths)
-            self.assertIn(str(story), artifact_paths)
+            self.assertIn(str(prd.resolve()), artifact_paths)
+            self.assertIn(str(story.resolve()), artifact_paths)
 
     def test_requires_confirmation_before_writing_when_existing_artifacts_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -308,7 +329,7 @@ class BootstrapAdpTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(plan_md.read_text(encoding="utf-8"), "custom plan\n")
-            self.assertIn(str(plan_md), result["files_existing"])
+            self.assertIn(str(plan_md.resolve()), result["files_existing"])
             self.assertTrue((intake / "workstream-registration-plan.json").exists())
             self.assertFalse((memory / "workstreams" / "existing-line" / "delivery-record.md").exists())
 
@@ -374,6 +395,9 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertIn(str(memory_root / "views" / "roadmap.json"), result["files_created"])
             self.assertIn(str(memory_root / "plans" / "baseline-history"), result["directories_created"])
             self.assertIn(str(memory_root / "snapshots" / "program-status"), result["directories_created"])
+            self.assertIn(str(memory_root / "snapshots" / "management-panel"), result["directories_created"])
+            self.assertIn(str(memory_root / "snapshots" / "flow-graph"), result["directories_created"])
+            self.assertIn(str(memory_root / "views" / "management-panel"), result["directories_created"])
             self.assertIn(str(memory_root / "schemas" / "program-baseline.md"), result["files_created"])
             self.assertIn(str(memory_root / "schemas" / "program-status.md"), result["files_created"])
             self.assertIn(str(memory_root / "intake" / "program-baseline-candidate.json"), result["files_created"])
@@ -383,6 +407,9 @@ class BootstrapAdpTests(unittest.TestCase):
             self.assertFalse((memory_root / "views" / "roadmap.md").exists())
             self.assertFalse((memory_root / "plans" / "baseline-history").exists())
             self.assertFalse((memory_root / "snapshots" / "program-status").exists())
+            self.assertFalse((memory_root / "snapshots" / "management-panel").exists())
+            self.assertFalse((memory_root / "snapshots" / "flow-graph").exists())
+            self.assertFalse((memory_root / "views" / "management-panel").exists())
 
 
 if __name__ == "__main__":

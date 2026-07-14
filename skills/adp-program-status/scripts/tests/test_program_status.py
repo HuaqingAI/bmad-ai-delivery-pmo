@@ -6,14 +6,24 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "program_status.py"
 AUDIT_SCRIPT = Path(__file__).resolve().parents[3] / "adp-state-audit/scripts/audit_state.py"
+sys.path.insert(0, str(SCRIPT.parent))
+import program_status  # noqa: E402
+try:
+    from .progress_contract_testkit import SCHEMA_PATH, load_json as load_contract_json, validate_schema
+except ImportError:
+    from progress_contract_testkit import SCHEMA_PATH, load_json as load_contract_json, validate_schema
+
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 AUDIT_GLOBALS = runpy.run_path(str(AUDIT_SCRIPT))
 STABLE_INPUT_AUDIT_ID = AUDIT_GLOBALS["stable_input_audit_id"]
 AUDIT_CONTENT_HASH = AUDIT_GLOBALS["audit_content_hash"]
+ARTIFACT_METADATA = AUDIT_GLOBALS["artifact_metadata"]
+FLOW_STATE_SCHEMA_PATH = SCRIPT.parents[1] / "assets/program-status-flow-state-v1.schema.json"
 
 
 def sha256(path: Path) -> str:
@@ -21,6 +31,54 @@ def sha256(path: Path) -> str:
 
 
 class ProgramStatusTests(unittest.TestCase):
+    def test_flow_state_keeps_execution_health_orthogonal_and_aggregation_all(self) -> None:
+        source = {"type": "approved-plan", "reference": "docs/plan.md", "confirmed_by": "Program Owner"}
+        baseline = self.baseline(
+            milestones=[
+                {"id": "M-A", "name": "A", "workstream_id": "l1", "planned_date": "2026-07-20", "owner": "A", "confirmation_status": "approved", "source": source, "dependencies": [], "baseline_revision": 1},
+                {"id": "M-B", "name": "B", "workstream_id": "l2", "planned_date": "2026-07-20", "owner": "B", "confirmation_status": "approved", "source": source, "dependencies": [], "baseline_revision": 1},
+                {"id": "M-C", "name": "C", "workstream_id": "l1", "planned_date": "2026-07-20", "owner": "C", "confirmation_status": "approved", "source": source, "dependencies": [{"edge_id": "E-COND", "predecessor": "G-MERGE", "relationship_type": "conditional", "condition": {"fact_id": "D-1", "operator": "equals", "expected_value": "yes", "source": source}, "source": source, "baseline_revision": 1}], "baseline_revision": 1},
+            ],
+            gates=[
+                {"id": "G-MERGE", "name": "Merge", "planned_date": "2026-07-20", "owner": "P", "confirmation_status": "approved", "source": source, "dependencies": [{"edge_id": "E-A", "predecessor": "M-A", "relationship_type": "aggregation", "source": source, "baseline_revision": 1}, {"edge_id": "E-B", "predecessor": "M-B", "relationship_type": "aggregation", "source": source, "baseline_revision": 1}], "predecessor_rule": "all", "baseline_revision": 1}
+            ],
+            critical_path=[],
+        )
+        assessed_milestones = [
+            {"id": "M-A", "actual_date": None, "source_status": "in-progress", "status": "on-plan", "status_label": "On plan"},
+            {"id": "M-B", "actual_date": "2026-07-12", "source_status": "done", "status": "on-plan", "status_label": "On plan"},
+            {"id": "M-C", "actual_date": None, "source_status": "planned", "status": "indeterminate", "status_label": "Indeterminate"},
+        ]
+        assessed_gates = [{"id": "G-MERGE", "actual_date": None, "source_status": None, "status": "off-plan", "status_label": "Off plan"}]
+
+        state = program_status.build_flow_state(
+            baseline=baseline,
+            assessed_milestones=assessed_milestones,
+            assessed_gates=assessed_gates,
+            snapshot_id="ps-ignored",
+            as_of=program_status.date.fromisoformat("2026-07-13"),
+        )
+        by_id = {item["node_id"]: item for item in state["node_states"]}
+
+        self.assertEqual(by_id["M-A"]["execution"]["value"], "in-progress")
+        self.assertEqual(by_id["M-A"]["health"]["value"], "on-plan")
+        self.assertEqual(by_id["M-B"]["execution"]["value"], "complete")
+        self.assertEqual(by_id["G-MERGE"]["execution"]["value"], "planned")
+        self.assertEqual(by_id["G-MERGE"]["health"]["value"], "at-risk")
+        self.assertEqual(by_id["M-C"]["execution"]["value"], "planned")
+        self.assertEqual(validate_schema(state, load_contract_json(FLOW_STATE_SCHEMA_PATH)), [])
+
+        assessed_milestones[0]["actual_date"] = "2026-07-13"
+        assessed_milestones[0]["source_status"] = "done"
+        complete_state = program_status.build_flow_state(
+            baseline=baseline,
+            assessed_milestones=assessed_milestones,
+            assessed_gates=assessed_gates,
+            snapshot_id="ps-other",
+            as_of=program_status.date.fromisoformat("2026-07-13"),
+        )
+        self.assertEqual({item["node_id"]: item for item in complete_state["node_states"]}["G-MERGE"]["execution"]["value"], "ready")
+
     def run_script(self, project_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(SCRIPT), str(project_root), *args],
@@ -381,6 +439,34 @@ class ProgramStatusTests(unittest.TestCase):
             history = list((memory / "snapshots/program-status").glob("ps-*.json"))
             self.assertEqual(len(history), 1)
 
+    def test_snapshot_identity_binds_the_previous_snapshot_that_drives_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            memory = self.scaffold(root, self.baseline(), {"ws-one": [{"id": "MS-ONE", "forecast": "2026-07-20"}]})
+            audit = self.write_audit(root, memory)
+            previous_one = root / "previous-one.json"
+            previous_two = root / "previous-two.json"
+            previous_one.write_text(json.dumps({"snapshot_id": "ps-previous-one", "overall_status": "on-plan"}) + "\n", encoding="utf-8")
+            previous_two.write_text(json.dumps({"snapshot_id": "ps-previous-two", "overall_status": "off-plan"}) + "\n", encoding="utf-8")
+
+            _, first = self.generate(root, audit, extra=["--dry-run", "--previous-snapshot", str(previous_one)])
+            _, second = self.generate(root, audit, extra=["--dry-run", "--previous-snapshot", str(previous_two)])
+
+            self.assertNotEqual(first["snapshot_id"], second["snapshot_id"])
+            self.assertNotEqual(first["period_delta"], second["period_delta"])
+
+    def test_interrupted_immutable_snapshot_publish_leaves_no_final_or_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "ps-interrupted.json"
+            model = {"snapshot_id": "ps-interrupted"}
+
+            with patch.object(program_status.os, "link", side_effect=OSError("simulated publish interruption")):
+                with self.assertRaises(OSError):
+                    program_status.create_immutable(path, json.dumps(model), model)
+
+            self.assertFalse(path.exists())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
+
     def test_period_delta_reports_worsening(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -427,6 +513,10 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertNotIn("Input audit ID", visible)
             self.assertNotIn("Generator version", visible)
             self.assertNotIn("Baseline revision", visible)
+            for key in ("program_status_markdown", "weekly_report", "project_lead"):
+                metadata = ARTIFACT_METADATA(Path(result["outputs"][key]))
+                self.assertEqual(metadata["snapshot_id"], model["snapshot_id"])
+                self.assertEqual(metadata["source_fingerprints"], model["source_fingerprints"])
 
             artifact_args: list[str] = []
             for key in ["snapshot", "program_status_json", "program_status_markdown", "weekly_report", "project_lead"]:
@@ -492,6 +582,50 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertIn(evidence.relative_to(root).as_posix(), model["source_fingerprints"])
             self.assertIn("PS-SOURCE-BACKED-SIGNAL", model["rule_ids"])
 
+    def test_stale_and_future_signals_do_not_drive_current_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            memory = self.scaffold(root, self.baseline(), {"ws-one": [{"id": "MS-ONE", "forecast": "2026-07-20"}]})
+            signals = root / "signals.json"
+            signals.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "signals": [
+                            {
+                                "id": "SIG-STALE",
+                                "constraint_type": "readiness",
+                                "status": "off-plan",
+                                "critical": True,
+                                "observed_at": "2026-07-01T12:00:00Z",
+                                "source": {"type": "readiness", "reference": "evidence/stale.md"},
+                            },
+                            {
+                                "id": "SIG-FUTURE",
+                                "constraint_type": "readiness",
+                                "status": "off-plan",
+                                "critical": True,
+                                "observed_at": "2026-07-14T00:00:00Z",
+                                "source": {"type": "readiness", "reference": "evidence/future.md"},
+                            },
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            audit = self.write_audit(root, memory)
+
+            _, result = self.generate(root, audit, signals=signals)
+            model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(model["overall_status"], "on-plan")
+            self.assertEqual(model["signals"], [])
+            self.assertEqual(
+                {item["code"] for item in model["findings"]},
+                {"status.signal_future", "status.signal_stale"},
+            )
+
     def test_explicit_gate_signal_resolves_unknown_and_unknown_targets_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -549,13 +683,165 @@ class ProgramStatusTests(unittest.TestCase):
                 "source": {"type": "approved-plan", "reference": "docs/weights.md", "confirmed_by": "Program Owner"},
             }
             baseline = self.baseline(milestones=[item], weighting=weighting)
-            memory = self.scaffold(root, baseline, {"ws-one": [{"id": "MS-ONE", "status": "done", "actual": "2026-07-19"}]})
+            memory = self.scaffold(root, baseline, {"ws-one": [{"id": "MS-ONE", "status": "done", "actual": "2026-07-12"}]})
             audit = self.write_audit(root, memory)
 
             _, result = self.generate(root, audit)
             model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
 
             self.assertEqual(model["progress"]["weighted_completion_percent"], 100.0)
+            self.assertEqual([], validate_schema(model["progress"], load_contract_json(SCHEMA_PATH)))
+            self.assertEqual("2.0.0", model["progress"]["progress_schema_version"])
+            self.assertEqual(100.0, model["progress"]["overall"]["current"]["actual_completion_percent"])
+            self.assertEqual(0.0, model["progress"]["overall"]["current"]["planned_completion_percent"])
+            self.assertEqual(100.0, model["progress"]["overall"]["current"]["completion_gap_pp"])
+            for key in ("program_status_markdown", "weekly_report", "project_lead"):
+                rendered = Path(result["outputs"][key]).read_text(encoding="utf-8")
+                self.assertIn("Actual Completion: 100.00%", rendered)
+                self.assertIn("Planned Completion: 0.00%", rendered)
+                self.assertIn("Completion Gap: 100.00 pp", rendered)
+
+    def test_real_audit_memory_relative_wdr_key_keeps_actual_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            item = self.baseline()["milestones"][0]
+            item["weight"] = 100
+            item["completion_criteria"] = "Accepted evidence is linked"
+            weighting = {
+                "enabled": True,
+                "completion_measure": "accepted milestone weight",
+                "source": {"type": "approved-plan", "reference": "docs/weights.md", "confirmed_by": "Program Owner"},
+            }
+            baseline = self.baseline(milestones=[item], weighting=weighting)
+            memory = self.scaffold(
+                root,
+                baseline,
+                {"ws-one": [{"id": "MS-ONE", "status": "done", "actual": "2026-07-12"}]},
+            )
+            audit = self.write_real_audit(root, memory)
+            audit_keys = json.loads(audit.read_text(encoding="utf-8"))["source_fingerprints"]
+            self.assertIn("workstreams/ws-one/delivery-record.md", audit_keys)
+
+            _, result = self.generate(root, audit)
+            model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(100.0, model["progress"]["weighted_completion_percent"])
+            self.assertEqual(1, model["progress"]["overall"]["milestone_counts"]["eligible_actual"])
+            self.assertEqual([], model["progress"]["eligibility"]["excluded_actuals"])
+            baseline_keys = [
+                key for key in model["source_fingerprints"] if key.endswith("plans/program-baseline.md")
+            ]
+            self.assertEqual(1, len(baseline_keys))
+
+    def test_future_actual_is_excluded_from_current_status_and_weighted_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            item = self.baseline()["milestones"][0]
+            item["weight"] = 100
+            item["completion_criteria"] = "Accepted evidence is linked"
+            weighting = {
+                "enabled": True,
+                "completion_measure": "accepted milestone weight",
+                "source": {"type": "approved-plan", "reference": "docs/weights.md", "confirmed_by": "Program Owner"},
+            }
+            baseline = self.baseline(milestones=[item], weighting=weighting)
+            memory = self.scaffold(
+                root,
+                baseline,
+                {"ws-one": [{"id": "MS-ONE", "status": "done", "actual": "2026-07-14"}]},
+            )
+            audit = self.write_audit(root, memory)
+
+            _, result = self.generate(root, audit)
+            model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(model["overall_status"], "indeterminate")
+            self.assertIsNone(model["milestones"][0]["actual_date"])
+            self.assertEqual(model["milestones"][0]["excluded_future_actual_date"], "2026-07-14")
+            self.assertEqual(model["progress"]["weighted_completion_percent"], 0.0)
+            self.assertTrue(any(item["code"] == "status.future_actual" for item in model["findings"]))
+
+    def test_actual_decrease_requires_audited_correction_lineage(self) -> None:
+        for corrected in (False, True):
+            with self.subTest(corrected=corrected), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                item = self.baseline()["milestones"][0]
+                item["weight"] = 100
+                item["completion_criteria"] = "Accepted evidence is linked"
+                weighting = {
+                    "enabled": True,
+                    "completion_measure": "accepted milestone weight",
+                    "source": {"type": "approved-plan", "reference": "docs/weights.md", "confirmed_by": "Program Owner"},
+                }
+                baseline = self.baseline(milestones=[item], weighting=weighting)
+                memory = self.scaffold(
+                    root,
+                    baseline,
+                    {"ws-one": [{"id": "MS-ONE", "status": "done", "actual": "2026-07-12"}]},
+                )
+                first_audit = self.write_audit(root, memory, name="first-audit.json")
+                _, first = self.generate(root, first_audit)
+                previous_snapshot = Path(first["outputs"]["snapshot"])
+
+                record = memory / "workstreams/ws-one/delivery-record.md"
+                lines = record.read_text(encoding="utf-8").splitlines()
+                header = next(index for index, line in enumerate(lines) if line.startswith("| Milestone ID"))
+                row = header + 2
+                lines[row] = lines[row].replace("| done |", "| planned |").replace("| 2026-07-12 |", "| TBD |")
+                if corrected:
+                    def extend(line: str, values: list[str]) -> str:
+                        return line.rstrip().rstrip("|").rstrip() + " | " + " | ".join(values) + " |"
+
+                    lines[header] = extend(
+                        lines[header],
+                        ["Correction ID", "Correction Kind", "Correction Audit ID", "Correction Source", "Previous Actual"],
+                    )
+                    lines[header + 1] = extend(lines[header + 1], ["---"] * 5)
+                    lines[row] = extend(
+                        lines[row],
+                        ["CORR-MS-ONE", "actual-retraction", "", "workstreams/ws-one/evidence.md#correction", "2026-07-12"],
+                    )
+                record.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                current_audit = self.write_audit(root, memory, name="current-audit.json")
+
+                _, current = self.generate(
+                    root,
+                    current_audit,
+                    extra=["--previous-snapshot", str(previous_snapshot)],
+                )
+                model = json.loads(Path(current["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+                progress = model["progress"]
+
+                self.assertEqual([], validate_schema(progress, load_contract_json(SCHEMA_PATH)))
+                if corrected:
+                    self.assertEqual("measurable", progress["measurement_status"])
+                    self.assertEqual(0.0, progress["overall"]["current"]["actual_completion_percent"])
+                    self.assertEqual(-100.0, progress["overall"]["comparability"]["actual_delta_pp"])
+                    self.assertEqual("CORR-MS-ONE", progress["corrections"][0]["correction_id"])
+                    workstream = next(item for item in progress["by_workstream"] if item["workstream_id"] == "ws-one")
+                    self.assertTrue(
+                        any(item["correction_id"] == "CORR-MS-ONE" for item in workstream["value_lineage"]["actual_completion_percent"])
+                    )
+                else:
+                    self.assertEqual("blocked", progress["measurement_status"])
+                    self.assertIsNone(progress["overall"]["current"]["actual_completion_percent"])
+                    self.assertEqual("required", progress["recovery"]["status"])
+                    self.assertIn("adp-state-audit", progress["recovery"]["workflows"])
+
+    def test_escaped_pipe_in_roadmap_cell_is_preserved_as_source_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            memory = self.scaffold(
+                root,
+                self.baseline(),
+                {"ws-one": [{"id": "MS-ONE", "forecast": "2026-07-20", "source": r"docs/evidence.md#owner\|review"}]},
+            )
+            audit = self.write_audit(root, memory)
+
+            _, result = self.generate(root, audit)
+            model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+
+            self.assertIn("docs/evidence.md#owner|review", model["milestones"][0]["source_references"])
 
     def test_dry_run_and_inspect_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -596,7 +882,7 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertTrue(result["artifact_validation_id"])
             self.assertIn("json", result["artifact_validation_reports"])
             self.assertEqual(result["input_audit_id"], json.loads(audit.read_text(encoding="utf-8"))["input_audit_id"])
-            self.assertEqual(Path(result["memlog"]), generate_memlog)
+            self.assertEqual(Path(result["memlog"]).resolve(), generate_memlog.resolve())
             memlog_text = generate_memlog.read_text(encoding="utf-8")
             self.assertIn("status: complete", memlog_text)
             self.assertIn("(assumption)", memlog_text)
@@ -636,7 +922,7 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertEqual(result["status"], "blocked")
             self.assertFalse(result["safe_to_publish"])
             self.assertEqual(result["dependency_name"], "adp-state-audit artifact validator")
-            self.assertEqual(result["missing_path"], str(missing))
+            self.assertEqual(result["missing_path"], str(missing.resolve()))
             self.assertEqual(result["recommended_workflows"], ["adp-setup", "adp-state-audit"])
             self.assertTrue(Path(result["memlog"]).is_file())
 
@@ -684,7 +970,7 @@ class ProgramStatusTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 2)
             self.assertEqual(result["dependency_name"], "adp-plan-baseline effective config")
-            self.assertEqual(result["missing_path"], str(missing))
+            self.assertEqual(result["missing_path"], str(missing.resolve()))
             self.assertEqual(result["recommended_workflows"], ["adp-setup"])
 
     def test_consumes_real_state_audit_output(self) -> None:

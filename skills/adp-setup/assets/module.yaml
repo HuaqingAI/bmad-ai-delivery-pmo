@@ -1,11 +1,12 @@
 code: adp
 name: "AI Delivery PMO"
 description: "帮助多条 FDE 工作线用统一状态模型、交付节奏和 AI 协作方式推进复杂交付项目。"
-module_version: 1.2.0
+module_version: 1.3.0
 default_selected: false
 module_greeting: >
   AI Delivery PMO 已安装。新项目先运行 adp-project-kickoff 初始化共享项目记忆，
-  再用 adp-plan-baseline 确认计划基线；升级项目请先查看 setup 的升级报告。
+  再用 adp-plan-baseline 确认计划基线；升级项目请先查看 setup 的升级报告，
+  在 status、roadmap、flow-graph 和 meeting 输入通过审计后再刷新 management panel。
 agents:
   - {code: adp-agent-program-lead, name: "ADP Program Lead", title: "AI Delivery PMO Program Lead", icon: "📊", description: "Consumes canonical ADP program status, audit, roadmap, and meeting views for source-backed readouts, recovery routing, and delivery decisions.", agent_type: stateless}
 
@@ -32,6 +33,22 @@ meeting_pack_item_limit:
   type: integer
   minimum: 3
   maximum: 30
+management_panel_history_periods:
+  prompt: "面板默认嵌入多少个历史状态周期？"
+  default: 12
+  type: integer
+  minimum: 1
+  maximum: 52
+management_panel_default_view:
+  prompt: "直接打开面板时默认进入哪个视图？"
+  default: project-lead
+  type: string
+  choices: [project-lead, fde-morning, business-biweekly]
+management_panel_archive_mode:
+  prompt: "何时保存不可变 HTML 归档？"
+  default: meeting-only
+  type: string
+  choices: [explicit, meeting-only, always]
 
 shared_resources:
   - owner_skill: adp-plan-baseline
@@ -40,3 +57,55 @@ shared_resources:
   - owner_skill: adp-plan-baseline
     path: assets/locale-catalog.json
     purpose: Chinese and English system-text catalog
+  - owner_skill: adp-flow-graph
+    path: assets/adp-flow-graph-v1.schema.json
+    purpose: canonical flow graph projection schema
+  - owner_skill: adp-status-sync
+    path: assets/action-flow-relation-v1.schema.json
+    purpose: stable action identity, lifecycle, and explicit flow relations
+  - owner_skill: adp-risk-dependency-change-review
+    path: assets/risk-flow-relation-v1.schema.json
+    purpose: stable risk identity, lifecycle, and explicit flow relations
+  - owner_skill: adp-program-status
+    path: assets/program-status-flow-state-v1.schema.json
+    purpose: canonical node execution and health state extension
+  - owner_skill: adp-program-status
+    path: assets/program-status-progress-v2.schema.json
+    purpose: canonical progress projection extension
+  - owner_skill: adp-management-panel
+    path: assets/adp-management-panel-v1.schema.json
+    purpose: management panel model schema
+  - owner_skill: adp-management-panel
+    path: assets/adp-management-panel-manifest-v1.schema.json
+    purpose: management panel manifest schema
+  - owner_skill: adp-management-panel
+    path: assets/panel-template.html
+    purpose: self-contained HTML panel template
+  - owner_skill: adp-management-panel
+    path: assets/panel-locale-catalog-v1.json
+    purpose: panel Chinese and English locale catalog
+  - owner_skill: adp-management-panel
+    path: assets/panel.css
+    purpose: offline panel styles
+  - owner_skill: adp-management-panel
+    path: assets/panel.js
+    purpose: offline panel interaction runtime
+  - owner_skill: adp-management-panel
+    path: assets/elk-resource-v1.json
+    purpose: fixed offline ELK layout resource contract
+    contract:
+      resource_schema_version: 1.0.0
+      engine: elk-layered
+      engine_version: 0.9.3
+      engine_license: EPL-2.0
+      engine_sha256: sha256:b0745abd7f23cd91690a1587e377edbe19fd7233c783300290936720546216d4
+      bundle: assets/vendor/elk.bundled-0.9.3.js
+      license: assets/vendor/ELK-LICENSE-EPL-2.0.md
+  - owner_skill: adp-management-panel
+    path: assets/vendor/elk.bundled-0.9.3.js
+    purpose: fixed ELK.js 0.9.3 browser bundle
+    sha256: b0745abd7f23cd91690a1587e377edbe19fd7233c783300290936720546216d4
+  - owner_skill: adp-management-panel
+    path: assets/vendor/ELK-LICENSE-EPL-2.0.md
+    purpose: ELK.js EPL-2.0 license
+    sha256: 89591d4578fb1ebd91501312a3d25f021bd865a2e436641c1cf7b1bc7e3c1617

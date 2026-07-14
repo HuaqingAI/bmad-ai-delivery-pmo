@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import locale
 import os
@@ -28,6 +29,7 @@ DEFAULT_PREPASS_SCRIPT = SKILLS_ROOT / "adp-agent-program-lead" / "scripts" / "a
 DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 DEFAULT_LOCALE_CATALOG_PATH = SKILLS_ROOT / "adp-plan-baseline" / "assets" / "locale-catalog.json"
 DEFAULT_BASELINE_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "baseline.py"
+DEFAULT_FLOW_GRAPH_SCRIPT = SKILLS_ROOT / "adp-flow-graph" / "scripts" / "flow_graph.py"
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_AUDIT_OUTPUT_PATH = "audits"
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
@@ -56,6 +58,7 @@ SCENARIO_CAPABILITIES = {
     "weekly-report": "weekly-report-consumption",
     "project-lead": "global-project-readout",
     "roadmap": "global-project-readout",
+    "management-panel": "global-project-readout",
 }
 VIEW_OWNER_WORKFLOWS = {
     "views/project-lead.md": "adp-agent-program-lead",
@@ -66,6 +69,9 @@ VIEW_OWNER_WORKFLOWS = {
     "views/risk-matrix.md": "adp-risk-dependency-change-review",
     "views/dependency-map.md": "adp-risk-dependency-change-review",
     "views/roadmap.md": "adp-roadmap-sync",
+    "views/flow-graph.json": "adp-flow-graph",
+    "views/action-flow.json": "adp-status-sync",
+    "views/risk-flow.json": "adp-risk-dependency-change-review",
 }
 VIEW_SOURCE_PATTERNS = {
     "views/project-lead.md": (
@@ -213,6 +219,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-script", default=str(DEFAULT_BASELINE_SCRIPT), help="Path to adp-plan-baseline baseline.py.")
     parser.add_argument("--artifact", action="append", default=[], help="Generated artifact to validate. Repeatable for artifact phase.")
     parser.add_argument("--input-audit-json", help="Input audit JSON that the artifact declares through input_audit_id.")
+    parser.add_argument("--panel-input-bundle", help="Canonical panel input bundle for the management-panel pre-render gate.")
+    parser.add_argument("--panel-model", help="Rendered panel model/bundle JSON for management-panel artifact validation.")
     parser.add_argument("--max-age-days", type=int, default=7, help="Freshness threshold in days. Default: 7.")
     parser.add_argument("--as-of", help="Audit date, YYYY-MM-DD. Default: today.")
     parser.add_argument("--output-dir", help="Audit output directory. Default: <memory-root>/audits.")
@@ -344,6 +352,8 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             project_root=str(project_root),
         )
     memory_root = resolve_memory_root(project_root, args.memory_root)
+    if args.scenario == "management-panel":
+        return run_panel_validation(args, project_root, memory_root, as_of, memlog)
     if args.phase == "artifact":
         return run_artifact_validation(args, project_root, memory_root, as_of, memlog)
     if args.prepass_json:
@@ -460,6 +470,121 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
         "counts": audit["counts"],
         "recommended_workflows": audit["recommended_workflows"],
     }
+    if memlog is not None:
+        result["memlog"] = str(memlog)
+    return result
+
+
+def load_panel_audit_module() -> Any:
+    path = SCRIPT_ROOT / "scripts/panel_audit.py"
+    spec = importlib.util.spec_from_file_location("adp_state_audit_panel", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load panel audit contract: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_panel_validation(
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+    as_of: date,
+    memlog: Path | None,
+) -> dict[str, Any]:
+    module = load_panel_audit_module()
+    output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, args.scenario)
+    if args.phase == "input":
+        if not args.panel_input_bundle:
+            return failure_envelope(
+                status="error",
+                scenario=args.scenario,
+                error="management-panel input phase requires --panel-input-bundle",
+                recommended_workflows=["adp-management-panel"],
+                memlog=memlog,
+            )
+        source_path = resolve_project_path(project_root, args.panel_input_bundle)
+        try:
+            inputs = load_json(source_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            return failure_envelope(
+                status="error",
+                scenario=args.scenario,
+                error=f"cannot read panel input bundle: {exc}",
+                recommended_workflows=["adp-management-panel"],
+                memlog=memlog,
+            )
+        audit = module.audit_panel_inputs(inputs, as_of=as_of, max_age_days=args.max_age_days)
+        path = module.write_audit_record(audit, output_dir)
+        result = {
+            "ok": True,
+            "status": "complete",
+            "audit_type": "panel-input",
+            "panel_input_audit_id": audit["panel_input_audit_id"],
+            "execution_disposition": audit["execution_disposition"],
+            "safe_to_render": audit["safe_to_render"],
+            "scenario": args.scenario,
+            "counts": audit["counts"],
+            "recommended_workflows": audit["recommended_workflows"],
+            "outputs": {"json": str(path)},
+        }
+    else:
+        if not args.panel_model or not args.artifact or not args.input_audit_json:
+            return artifact_failure_envelope(
+                args.scenario,
+                status="error",
+                error="management-panel artifact phase requires --panel-model, --input-audit-json, and --artifact HTML",
+                recommended_workflows=["adp-management-panel"],
+                memlog=memlog,
+            )
+        model_path = resolve_project_path(project_root, args.panel_model)
+        html_path = resolve_project_path(project_root, args.artifact[0])
+        input_audit_path = resolve_project_path(project_root, args.input_audit_json)
+        try:
+            model = load_json(model_path)
+            input_audit = load_json(input_audit_path)
+            source_inputs = load_json(resolve_project_path(project_root, args.panel_input_bundle)) if args.panel_input_bundle else None
+            if source_inputs is not None:
+                request = source_inputs.setdefault("request", {})
+                request["panel_input_audit_id"] = input_audit.get("panel_input_audit_id")
+                request["panel_input_audit_disposition"] = input_audit.get("execution_disposition")
+                request["panel_input_audit_findings"] = [
+                    item.get("code")
+                    for item in [*input_audit.get("blocking_gaps", []), *input_audit.get("warnings", [])]
+                ]
+                request["panel_input_audit_workflows"] = list(input_audit.get("recommended_workflows", []))
+            html_bytes = html_path.read_bytes()
+            bundle_bytes = model_path.read_bytes()
+        except (OSError, json.JSONDecodeError) as exc:
+            return artifact_failure_envelope(
+                args.scenario,
+                status="error",
+                error=f"cannot read panel artifact inputs: {exc}",
+                recommended_workflows=["adp-management-panel"],
+                memlog=memlog,
+            )
+        audit = module.audit_panel_artifacts(
+            model,
+            bundle_bytes,
+            html_bytes,
+            input_audit=input_audit,
+            source_inputs=source_inputs,
+            publication_targets={"bundle": model_path, "html": html_path},
+        )
+        path = module.write_audit_record(audit, output_dir)
+        result = {
+            "ok": True,
+            "status": "complete",
+            "audit_type": "panel-artifact",
+            "panel_artifact_audit_id": audit["panel_artifact_audit_id"],
+            "panel_input_audit_id": audit["panel_input_audit_id"],
+            "execution_disposition": audit["execution_disposition"],
+            "safe_to_publish": audit["safe_to_publish"],
+            "scenario": args.scenario,
+            "counts": audit["counts"],
+            "recommended_workflows": audit["recommended_workflows"],
+            "outputs": {"json": str(path)},
+        }
     if memlog is not None:
         result["memlog"] = str(memlog)
     return result
@@ -681,7 +806,7 @@ def build_artifact_validation(
         if is_derived_lineage_path(str(source)):
             continue
         current_path = resolve_fingerprint_source(project_root, memory_root, str(source))
-        if current_path is None or not current_path.is_file() or file_sha256(current_path) != expected:
+        if current_path is None or not current_path.is_file() or not fingerprints_equal(file_sha256(current_path), expected):
             changed_sources.append(str(source))
     if changed_sources:
         raw_findings.append(
@@ -723,6 +848,27 @@ def build_artifact_validation(
             )
             continue
         artifacts.append({"path": str(path), "fingerprint": before_hash, "metadata": metadata})
+        if metadata.get("flow_graph_schema_version") is not None:
+            graph_errors = [
+                *validate_flow_graph_contract(metadata),
+                *validate_flow_graph_publication(memory_root, path, metadata),
+            ]
+            if metadata.get("topology", {}).get("baseline_revision") != expected_revision:
+                graph_errors.append("topology baseline revision does not match input audit")
+            for error in sorted(set(graph_errors)):
+                raw_findings.append(
+                    artifact_finding(
+                        "artifact.flow_graph_invalid",
+                        "blocking",
+                        "blocked",
+                        error,
+                        str(path),
+                        "adp-flow-graph",
+                    )
+                )
+            if file_sha256(path) != before_hash:
+                raise RuntimeError(f"artifact validation modified immutable input: {path}")
+            continue
         required = [
             "generated_at",
             "as_of",
@@ -907,7 +1053,7 @@ def build_artifact_validation(
         stale_sources = [
             source
             for source, expected in expected_fingerprints.items()
-            if declared_fingerprints.get(source) != expected
+            if not fingerprints_equal(declared_fingerprints.get(source), expected)
         ]
         if stale_sources:
             raw_findings.append(
@@ -995,6 +1141,87 @@ def artifact_finding(
         "category": "artifact_validation",
         "gap_type": code,
     }
+
+
+def load_flow_graph_module() -> Any:
+    spec = importlib.util.spec_from_file_location("adp_state_audit_flow_graph", DEFAULT_FLOW_GRAPH_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load flow graph contract: {DEFAULT_FLOW_GRAPH_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_flow_graph_contract(graph: Any) -> list[str]:
+    if not isinstance(graph, dict):
+        return ["flow graph must be an object"]
+    errors: list[str] = []
+    if graph.get("flow_graph_schema_version") != "1.0.0":
+        errors.append("flow_graph_schema_version must be 1.0.0")
+    if graph.get("layout_identity_owner") != "adp-management-panel" or "layout_id" in graph:
+        errors.append("layout identity must remain panel-owned")
+    try:
+        module = load_flow_graph_module()
+        errors.extend(module.graph_semantic_errors(graph))
+    except (ImportError, KeyError, TypeError, ValueError) as exc:
+        errors.append(f"flow graph semantic validation failed: {exc}")
+        return sorted(set(errors))
+    topology = graph.get("topology", {})
+    revision = topology.get("baseline_revision")
+    nodes = topology.get("nodes", [])
+    edges = topology.get("edges", [])
+    if any(item.get("baseline_revision") != revision for item in [*nodes, *edges] if isinstance(item, dict)):
+        errors.append("topology contains a cross-revision node or edge")
+    node_ids = [item.get("node_id") for item in nodes if isinstance(item, dict)]
+    edge_ids = [item.get("edge_id") for item in edges if isinstance(item, dict)]
+    if len(node_ids) != len(set(node_ids)):
+        errors.append("topology contains duplicate node IDs")
+    if len(edge_ids) != len(set(edge_ids)):
+        errors.append("topology contains duplicate edge IDs")
+    for item in graph.get("state", {}).get("nodes", []):
+        if item.get("execution", {}).get("value") not in {"complete", "in-progress", "ready", "planned", "not-applicable"}:
+            errors.append("node execution state is invalid")
+        if item.get("health", {}).get("value") not in {"on-plan", "at-risk", "blocked", "indeterminate"}:
+            errors.append("node health state is invalid")
+    findings = graph.get("findings", [])
+    required_recovery = bool(findings)
+    recovery = graph.get("recovery", {})
+    if (recovery.get("status") == "required") != required_recovery:
+        errors.append("recovery status does not match findings")
+    return sorted(set(errors))
+
+
+def validate_flow_graph_publication(memory_root: Path, artifact_path: Path, graph: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    current = memory_root / "views/flow-graph.json"
+    if artifact_path.resolve() != current.resolve():
+        return errors
+    latest_path = memory_root / "snapshots/flow-graph/latest.json"
+    if not latest_path.is_file():
+        return ["flow graph latest pointer is missing"]
+    try:
+        latest = load_json(latest_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"flow graph latest pointer is unreadable: {exc}"]
+    for field_name in ("flow_graph_id", "topology_id", "state_snapshot_id", "overlay_snapshot_id"):
+        expected = graph.get("flow_graph_id") if field_name == "flow_graph_id" else (
+            graph.get("topology", {}).get("topology_id") if field_name == "topology_id" else (
+                graph.get("state", {}).get("state_snapshot_id") if field_name == "state_snapshot_id" else graph.get("overlays", {}).get("overlay_snapshot_id")
+            )
+        )
+        if latest.get(field_name) != expected:
+            errors.append(f"latest pointer {field_name} does not match current graph")
+    raw_snapshot = str(latest.get("snapshot_path") or "")
+    snapshot = resolve_contained_path(memory_root, raw_snapshot)
+    if snapshot is None or not snapshot.is_file():
+        errors.append("immutable flow graph snapshot is missing or outside memory root")
+    else:
+        try:
+            if json.dumps(load_json(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":")) != json.dumps(graph, ensure_ascii=False, sort_keys=True, separators=(",", ":")):
+                errors.append("immutable flow graph snapshot differs from current graph")
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"immutable flow graph snapshot is unreadable: {exc}")
+    return sorted(set(errors))
 
 
 def validate_render_contract(
@@ -1904,6 +2131,15 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def fingerprints_equal(left: Any, right: Any) -> bool:
+    def normalized(value: Any) -> str:
+        return str(value or "").strip().lower().removeprefix("sha256:")
+
+    left_value = normalized(left)
+    right_value = normalized(right)
+    return bool(re.fullmatch(r"[0-9a-f]{64}", left_value)) and left_value == right_value
+
+
 def canonical_finding_identity(finding: dict[str, Any]) -> str:
     value = {
         key: finding.get(key)
@@ -2220,15 +2456,34 @@ def audit_closure(prepass: dict[str, Any], memory_root: Path, as_of: date) -> di
 def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
     root = memory_root / "intake" / "status-sync"
     payloads: dict[Path, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
     for path in sorted(root.glob("*.json")):
         try:
             payload = load_json(path)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            results.append(
+                {
+                    "path": rel_to_memory(memory_root, path),
+                    "reason": f"malformed status-sync intake JSON: {exc}",
+                    "recommended_workflow": "adp-status-sync",
+                    "category": "closure",
+                    "status": "malformed",
+                }
+            )
             continue
         if isinstance(payload, dict):
             payloads[path] = payload
+        else:
+            results.append(
+                {
+                    "path": rel_to_memory(memory_root, path),
+                    "reason": "malformed status-sync intake JSON: root must be an object",
+                    "recommended_workflow": "adp-status-sync",
+                    "category": "closure",
+                    "status": "malformed",
+                }
+            )
 
-    results = []
     for path, payload in payloads.items():
         if not is_canonical_status_sync_intake(path, payload):
             continue
@@ -2325,13 +2580,14 @@ def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intak
     if not succeeded:
         return False
     expected_hash = str(receipt.get("input_hash", "")).strip().lower()
-    if expected_hash:
-        canonical_hash = hashlib.sha256(
-            json.dumps(intake_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        raw_hash = hashlib.sha256(intake_path.read_bytes()).hexdigest()
-        if expected_hash.removeprefix("sha256:") not in {canonical_hash, raw_hash}:
-            return False
+    if not expected_hash:
+        return False
+    canonical_hash = hashlib.sha256(
+        json.dumps(intake_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    raw_hash = hashlib.sha256(intake_path.read_bytes()).hexdigest()
+    if expected_hash.removeprefix("sha256:") not in {canonical_hash, raw_hash}:
+        return False
     input_path = receipt.get("input_path") or receipt.get("updates_file")
     if isinstance(input_path, str) and input_path.strip():
         candidate = Path(input_path)
@@ -2841,20 +3097,28 @@ def write_audit_outputs(
 
 
 def atomic_write_pair(json_path: Path, json_text: str, markdown_path: Path, markdown_text: str) -> None:
-    json_temp = write_temp_text(json_path, json_text)
-    markdown_temp = write_temp_text(markdown_path, markdown_text)
+    json_temp: str | None = None
+    markdown_temp: str | None = None
     json_published = False
+    markdown_published = False
     try:
+        json_temp = write_temp_text(json_path, json_text)
+        markdown_temp = write_temp_text(markdown_path, markdown_text)
+        os.replace(markdown_temp, markdown_path)
+        markdown_published = True
         os.replace(json_temp, json_path)
         json_published = True
-        os.replace(markdown_temp, markdown_path)
     except OSError:
-        if json_published and not markdown_path.exists():
+        if json_published:
             json_path.unlink(missing_ok=True)
+        if markdown_published:
+            markdown_path.unlink(missing_ok=True)
         raise
     finally:
-        Path(json_temp).unlink(missing_ok=True)
-        Path(markdown_temp).unlink(missing_ok=True)
+        if json_temp:
+            Path(json_temp).unlink(missing_ok=True)
+        if markdown_temp:
+            Path(markdown_temp).unlink(missing_ok=True)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -2910,8 +3174,12 @@ def render_markdown(
     if audit.get("audit_type") == "artifact":
         return render_artifact_validation_markdown(audit, catalog)
     locale_value = str(audit.get("locale") or "en")
-    text = lambda key: render_message(catalog, locale_value, key)
-    yes_no = lambda value: text("value.yes") if value else text("value.no")
+
+    def text(key: str) -> str:
+        return render_message(catalog, locale_value, key)
+
+    def yes_no(value: Any) -> str:
+        return text("value.yes") if value else text("value.no")
     finding_headers = ["Source", "Workstream", "Gap", "Recommended workflow"]
     finding_header_labels = [
         text("common.source"),
@@ -2978,8 +3246,12 @@ def render_artifact_validation_markdown(
     catalog: dict[str, dict[str, str]],
 ) -> str:
     locale_value = str(validation.get("locale") or "en")
-    text = lambda key: render_message(catalog, locale_value, key)
-    yes_no = lambda value: text("value.yes") if value else text("value.no")
+
+    def text(key: str) -> str:
+        return render_message(catalog, locale_value, key)
+
+    def yes_no(value: Any) -> str:
+        return text("value.yes") if value else text("value.no")
     finding_headers = ["Source", "Workstream", "Gap", "Recommended workflow"]
     finding_header_labels = [
         text("common.source"),

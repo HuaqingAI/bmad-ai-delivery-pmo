@@ -36,7 +36,7 @@ class EffectiveConfigTests(unittest.TestCase):
             self.assertFalse(memory_only["baseline_exists"])
             self.assertEqual(ready["routing_state"], "baseline_ready")
             self.assertTrue(ready["baseline_exists"])
-            self.assertEqual(ready["baseline_path"], str(baseline))
+            self.assertEqual(ready["baseline_path"], str(baseline.resolve()))
 
     def test_shared_config_and_adp_section_resolve_with_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -59,7 +59,7 @@ class EffectiveConfigTests(unittest.TestCase):
             self.assertEqual(result["communication_locale"], "en")
             self.assertEqual(result["values"]["status_stale_after_days"], 12)
             self.assertEqual(result["values"]["schedule_variance_tolerance_days"], 3)
-            self.assertEqual(result["value_sources"]["status_stale_after_days"], str(config))
+            self.assertEqual(result["value_sources"]["status_stale_after_days"], str(config.resolve()))
 
     def test_legacy_adp_config_precedes_shared_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -72,7 +72,7 @@ class EffectiveConfigTests(unittest.TestCase):
             _, result = resolve_effective_config(root)
 
             self.assertEqual(result["document_locale"], "zh")
-            self.assertEqual(result["value_sources"]["document_output_language"], str(legacy))
+            self.assertEqual(result["value_sources"]["document_output_language"], str(legacy.resolve()))
 
     def test_unknown_language_and_invalid_module_value_fall_back_visibly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -92,6 +92,21 @@ class EffectiveConfigTests(unittest.TestCase):
             self.assertIn("document_output_language", result["fallbacks"])
             self.assertIn("meeting_pack_item_limit", result["fallbacks"])
             self.assertTrue(any("unsupported document_output_language" in warning for warning in result["warnings"]))
+
+    def test_hash_inside_quoted_yaml_scalars_is_not_treated_as_a_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "_bmad").mkdir()
+            (root / "_bmad" / "config.yaml").write_text(
+                'output_folder: "dist/#release" # deployment folder\n'
+                "communication_language: 'English#internal' # audience marker\n",
+                encoding="utf-8",
+            )
+
+            _, result = resolve_effective_config(root)
+
+            self.assertEqual(result["values"]["output_folder"], "dist/#release")
+            self.assertEqual(result["values"]["communication_language"], "English#internal")
 
     def test_source_fact_translation_is_explicit_and_derived_only(self) -> None:
         source = {"type": "charter", "reference": "charter.md#目标"}

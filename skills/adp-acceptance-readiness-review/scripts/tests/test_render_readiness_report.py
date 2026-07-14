@@ -92,8 +92,14 @@ class RenderReadinessReportTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             paths = [Path(item["path"]) for item in result["reports"]]
-            self.assertIn(root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md", paths)
-            self.assertIn(root / "_bmad-output" / "adp" / "memory" / "views" / "cutover-readiness.html", paths)
+            self.assertIn(
+                (root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md").resolve(),
+                paths,
+            )
+            self.assertIn(
+                (root / "_bmad-output" / "adp" / "memory" / "views" / "cutover-readiness.html").resolve(),
+                paths,
+            )
             acceptance = root / "_bmad-output" / "adp" / "memory" / "views" / "acceptance-readiness.md"
             content = acceptance.read_text(encoding="utf-8")
             self.assertIn("Payment proof missing", content)

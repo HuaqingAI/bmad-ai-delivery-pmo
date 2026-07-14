@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:adp:flow-graph:v1",
+  "title": "ADP canonical flow graph v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["flow_graph_schema_version", "flow_graph_id", "topology", "state", "overlays", "findings", "recovery", "compatibility", "layout_identity_owner"],
+  "properties": {
+    "flow_graph_schema_version": {"const": "1.0.0"},
+    "flow_graph_id": {"$ref": "#/$defs/hashId"},
+    "topology": {"$ref": "#/$defs/topology"},
+    "state": {"$ref": "#/$defs/state"},
+    "overlays": {"$ref": "#/$defs/overlays"},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "recovery": {"$ref": "#/$defs/recovery"},
+    "compatibility": {"$ref": "#/$defs/compatibility"},
+    "layout_identity_owner": {"const": "adp-management-panel"}
+  },
+  "$defs": {
+    "stableId": {"type": "string", "pattern": "[A-Za-z0-9][A-Za-z0-9._-]*"},
+    "hashId": {"type": "string", "pattern": "sha256:[0-9a-f]{64}"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_path", "field", "source_fingerprint"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/stableId"},
+        "artifact_path": {"type": "string", "minLength": 1},
+        "field": {"type": "string", "minLength": 1},
+        "source_fingerprint": {"$ref": "#/$defs/hashId"}
+      }
+    },
+    "lineage": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/source"}
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lane_type", "lane_id"],
+      "properties": {
+        "lane_type": {"enum": ["program", "workstream"]},
+        "lane_id": {"$ref": "#/$defs/stableId"}
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact_id", "operator", "expected_value", "source"],
+      "properties": {
+        "fact_id": {"$ref": "#/$defs/stableId"},
+        "operator": {"enum": ["equals", "not-equals", "in", "not-in"]},
+        "expected_value": {},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "name", "node_type", "lane", "baseline_revision", "source"],
+      "properties": {
+        "node_id": {"$ref": "#/$defs/stableId"},
+        "name": {"type": "string", "minLength": 1},
+        "node_type": {"enum": ["milestone", "gate"]},
+        "lane": {"$ref": "#/$defs/lane"},
+        "predecessor_rule": {"const": "all"},
+        "baseline_revision": {"type": "integer", "minimum": 1},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id", "predecessor", "target", "relationship_type", "baseline_revision", "source"],
+      "properties": {
+        "edge_id": {"$ref": "#/$defs/stableId"},
+        "predecessor": {"$ref": "#/$defs/stableId"},
+        "target": {"$ref": "#/$defs/stableId"},
+        "relationship_type": {"enum": ["dependency", "aggregation", "conditional", "rework", "informational"]},
+        "condition": {"$ref": "#/$defs/condition"},
+        "label": {"type": "string", "minLength": 1},
+        "baseline_revision": {"type": "integer", "minimum": 1},
+        "source": {"$ref": "#/$defs/source"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"relationship_type": {"const": "conditional"}}, "required": ["relationship_type"]},
+          "then": {"required": ["condition"]},
+          "else": {"not": {"required": ["condition"]}}
+        }
+      ]
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topology_schema_version", "topology_id", "baseline_id", "baseline_revision", "nodes", "edges", "lineage"],
+      "properties": {
+        "topology_schema_version": {"const": "1.0.0"},
+        "topology_id": {"$ref": "#/$defs/hashId"},
+        "baseline_id": {"$ref": "#/$defs/stableId"},
+        "baseline_revision": {"type": "integer", "minimum": 1},
+        "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+        "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}},
+        "lineage": {"$ref": "#/$defs/lineage"}
+      }
+    },
+    "axis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "rule_id", "sources"],
+      "properties": {
+        "value": {"type": "string"},
+        "rule_id": {"$ref": "#/$defs/stableId"},
+        "sources": {"$ref": "#/$defs/lineage"}
+      }
+    },
+    "nodeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "execution", "health"],
+      "properties": {
+        "node_id": {"$ref": "#/$defs/stableId"},
+        "execution": {
+          "allOf": [
+            {"$ref": "#/$defs/axis"},
+            {"properties": {"value": {"enum": ["complete", "in-progress", "ready", "planned", "not-applicable"]}}}
+          ]
+        },
+        "health": {
+          "allOf": [
+            {"$ref": "#/$defs/axis"},
+            {"properties": {"value": {"enum": ["on-plan", "at-risk", "blocked", "indeterminate"]}}}
+          ]
+        }
+      }
+    },
+    "relationshipState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id", "state", "health"],
+      "properties": {
+        "edge_id": {"$ref": "#/$defs/stableId"},
+        "state": {
+          "allOf": [
+            {"$ref": "#/$defs/axis"},
+            {"properties": {"value": {"enum": ["pending", "active", "satisfied", "inactive", "pending-confirmation", "not-applicable"]}}}
+          ]
+        },
+        "health": {
+          "allOf": [
+            {"$ref": "#/$defs/axis"},
+            {"properties": {"value": {"enum": ["on-plan", "at-risk", "blocked", "indeterminate"]}}}
+          ]
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_schema_version", "state_snapshot_id", "topology_id", "as_of", "nodes", "relationships", "lineage"],
+      "properties": {
+        "state_schema_version": {"const": "1.0.0"},
+        "state_snapshot_id": {"$ref": "#/$defs/hashId"},
+        "topology_id": {"$ref": "#/$defs/hashId"},
+        "as_of": {"type": "string", "format": "date-time"},
+        "nodes": {"type": "array", "items": {"$ref": "#/$defs/nodeState"}},
+        "relationships": {"type": "array", "items": {"$ref": "#/$defs/relationshipState"}},
+        "lineage": {"$ref": "#/$defs/lineage"}
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_inclusive", "end_exclusive"],
+      "properties": {
+        "start_inclusive": {"type": "string", "format": "date-time"},
+        "end_exclusive": {"type": "string", "format": "date-time"}
+      }
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "source_id", "source_fingerprint"],
+      "properties": {
+        "source_kind": {"enum": ["action", "risk"]},
+        "source_id": {"$ref": "#/$defs/stableId"},
+        "source_fingerprint": {"$ref": "#/$defs/hashId"}
+      }
+    },
+    "categoryCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "source_refs"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 0},
+        "source_refs": {"type": "array", "items": {"$ref": "#/$defs/sourceRef"}}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pending", "processed", "risk", "blocked"],
+      "properties": {
+        "pending": {"$ref": "#/$defs/categoryCount"},
+        "processed": {"$ref": "#/$defs/categoryCount"},
+        "risk": {"$ref": "#/$defs/categoryCount"},
+        "blocked": {"$ref": "#/$defs/categoryCount"}
+      }
+    },
+    "allocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_type", "target_id", "counts"],
+      "properties": {
+        "target_type": {"enum": ["node", "edge"]},
+        "target_id": {"$ref": "#/$defs/stableId"},
+        "counts": {"$ref": "#/$defs/counts"}
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "scope_kind", "as_of", "processed_window", "selection_window", "allocations"],
+      "properties": {
+        "scope_id": {"$ref": "#/$defs/stableId"},
+        "scope_kind": {"enum": ["active-as-of", "reporting-period", "meeting-window"]},
+        "as_of": {"type": "string", "format": "date-time"},
+        "processed_window": {"$ref": "#/$defs/window"},
+        "selection_window": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/window"}]},
+        "allocations": {"type": "array", "items": {"$ref": "#/$defs/allocation"}}
+      }
+    },
+    "unmapped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "source_id", "baseline_revision", "related_plan_item_ids", "related_flow_edge_ids", "reason", "finding_code", "recovery"],
+      "properties": {
+        "source_kind": {"enum": ["action", "risk"]},
+        "source_id": {"$ref": "#/$defs/stableId"},
+        "baseline_revision": {"type": ["integer", "null"], "minimum": 1},
+        "related_plan_item_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}},
+        "related_flow_edge_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}},
+        "reason": {"enum": ["missing-related-ids", "unknown-node", "unknown-edge", "cross-revision", "ambiguous", "invalid-source", "migration-required"]},
+        "finding_code": {"enum": ["flow.overlay.unmapped", "flow.reference.unknown", "flow.reference.cross-revision", "flow.source.migration-required"]},
+        "recovery": {"type": "string", "minLength": 1}
+      }
+    },
+    "overlays": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["overlay_schema_version", "overlay_snapshot_id", "topology_id", "scopes", "unmapped", "lineage"],
+      "properties": {
+        "overlay_schema_version": {"const": "1.0.0"},
+        "overlay_snapshot_id": {"$ref": "#/$defs/hashId"},
+        "topology_id": {"$ref": "#/$defs/hashId"},
+        "scopes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/scope"}},
+        "unmapped": {"type": "array", "items": {"$ref": "#/$defs/unmapped"}},
+        "lineage": {"$ref": "#/$defs/lineage"}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "disposition", "path", "message", "recovery"],
+      "properties": {
+        "code": {"type": "string", "pattern": "flow[.][a-z.-]+"},
+        "disposition": {"enum": ["blocked", "degraded", "warning"]},
+        "path": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "recovery": {"type": "string", "minLength": 1}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "workflows"],
+      "properties": {
+        "status": {"enum": ["none", "required"]},
+        "workflows": {"type": "array", "items": {"$ref": "#/$defs/stableId"}}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "program_status", "actions", "risks"],
+      "properties": {
+        "baseline": {"const": "legacy-string-normalize"},
+        "program_status": {"const": "ADP-FLOW-STATE-MIGRATION-REQUIRED"},
+        "actions": {"const": "ADP-ACTION-FLOW-MIGRATION-REQUIRED"},
+        "risks": {"const": "ADP-RISK-FLOW-MIGRATION-REQUIRED"}
+      }
+    }
+  }
+}

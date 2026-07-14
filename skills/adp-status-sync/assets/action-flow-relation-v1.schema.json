@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:adp:status-sync:action-flow-relation-v1",
+  "title": "ADP action flow relation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action_flow_schema_version", "actions", "compatibility"],
+  "properties": {
+    "action_flow_schema_version": {"const": "1.0.0"},
+    "actions": {"type": "array", "items": {"$ref": "#/$defs/action"}},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "migration_error_code"],
+      "properties": {
+        "strategy": {"const": "preserve-unmapped"},
+        "migration_error_code": {"const": "ADP-ACTION-FLOW-MIGRATION-REQUIRED"}
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {"type": "string", "pattern": "[A-Za-z0-9][A-Za-z0-9._-]*"},
+    "timestamp": {"type": ["string", "null"], "format": "date-time"},
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "status", "created_at", "updated_at", "started_at", "done_at", "cancelled_at", "baseline_revision", "related_plan_item_ids", "related_flow_edge_ids", "source"],
+      "properties": {
+        "action_id": {"$ref": "#/$defs/stableId"},
+        "status": {"enum": ["open", "in-progress", "blocked", "done", "cancelled"]},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "started_at": {"$ref": "#/$defs/timestamp"},
+        "done_at": {"$ref": "#/$defs/timestamp"},
+        "cancelled_at": {"$ref": "#/$defs/timestamp"},
+        "baseline_revision": {"type": "integer", "minimum": 1},
+        "related_plan_item_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/stableId"}},
+        "related_flow_edge_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/stableId"}},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_id", "artifact_path", "source_fingerprint"],
+          "properties": {
+            "artifact_id": {"$ref": "#/$defs/stableId"},
+            "artifact_path": {"type": "string", "minLength": 1},
+            "source_fingerprint": {"type": "string", "pattern": "sha256:[0-9a-f]{64}"}
+          }
+        }
+      }
+    }
+  }
+}

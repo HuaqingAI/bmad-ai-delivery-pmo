@@ -1,0 +1,56 @@
+{
+  "contract_version": "2.0.0",
+  "scenario": "audited-actual-retraction-allows-decrease",
+  "scope_identity": {
+    "baseline_revision": 4,
+    "scope_revision": "scope-4",
+    "scope_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "weighting_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "previous": {
+    "snapshot_id": "ps-before-correction",
+    "actual_points": [
+      {"horizon_date": "2026-07-06", "completion_percent": 20},
+      {"horizon_date": "2026-07-13", "completion_percent": 60}
+    ]
+  },
+  "current": {
+    "snapshot_id": "ps-after-correction",
+    "actual_points": [
+      {"horizon_date": "2026-07-06", "completion_percent": 20},
+      {"horizon_date": "2026-07-13", "completion_percent": 40}
+    ],
+    "comparability": {
+      "disposition": "comparable",
+      "previous_snapshot_id": "ps-before-correction",
+      "rebase_id": null,
+      "continuous_trend": true,
+      "actual_delta_pp": -20,
+      "reason_codes": ["audited-correction"]
+    },
+    "correction": {
+      "correction_id": "CORR-2026-07-13-01",
+      "milestone_id": "MS-RETRACTED",
+      "kind": "actual-retraction",
+      "previous_actual_date": "2026-07-10",
+      "corrected_actual_date": null,
+      "audit_id": "audit-correction-01",
+      "rule_id": "PS-PROGRESS-ACTUAL-RETRACTION",
+      "source_references": ["workstreams/L2/delivery-record.md#MS-RETRACTED"]
+    },
+    "lineage": {
+      "source_type": "correction",
+      "source_reference": "workstreams/L2/delivery-record.md#MS-RETRACTED",
+      "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "rule_id": "PS-PROGRESS-ACTUAL-RETRACTION",
+      "audit_id": "audit-correction-01",
+      "correction_id": "CORR-2026-07-13-01",
+      "rebase_id": null
+    }
+  },
+  "expected": {
+    "decrease_allowed": true,
+    "required_correction_id": "CORR-2026-07-13-01",
+    "required_audit_id": "audit-correction-01"
+  }
+}

@@ -7,11 +7,15 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,6 +55,8 @@ MEETING_LINEAGE_FIELDS = (
 )
 
 GENERATOR_VERSION = "2.0.0"
+PANEL_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+PANEL_PROFILES = {"internal-full", "shareable-summary"}
 
 
 class MeetingSyncConflict(RuntimeError):
@@ -312,6 +318,7 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "started_at": string_value(meeting.get("started_at") or meeting.get("actual_started_at")),
             "ended_at": string_value(meeting.get("ended_at") or meeting.get("actual_ended_at")),
             "lineage": lineage,
+            "panel_archive": normalize_panel_archive(meeting.get("panel_archive")),
         },
         "items": normalized_items,
     }
@@ -341,6 +348,8 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
     meeting = plan["meeting"]
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", meeting["date"]):
         errors.append("meeting.date must use YYYY-MM-DD")
+    elif parse_iso_date(meeting["date"]) is None:
+        errors.append("meeting.date must be a real calendar date")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", meeting["meeting_instance_id"]):
         errors.append("meeting.meeting_instance_id must be a path-safe identifier")
     lineage = meeting.get("lineage", {})
@@ -359,6 +368,14 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
             errors.append("meeting.started_at and meeting.ended_at must be ISO-8601 timestamps")
         elif ended_at < started_at:
             errors.append("meeting.ended_at must not be before meeting.started_at")
+    panel_archive = meeting.get("panel_archive")
+    if panel_archive:
+        if not PANEL_ID_RE.fullmatch(panel_archive.get("panel_id", "")):
+            errors.append("meeting.panel_archive.panel_id must be a sha256 panel ID")
+        if not panel_archive.get("archive"):
+            errors.append("meeting.panel_archive.archive is required")
+        if panel_archive.get("distribution_profile") not in PANEL_PROFILES:
+            errors.append("meeting.panel_archive.distribution_profile is invalid")
 
     item_ids: set[str] = set()
     for item in plan["items"]:
@@ -380,6 +397,18 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
     return errors
 
 
+@contextmanager
+def meeting_sync_lock(memory_root: Path):
+    lock_path = memory_root / ".meeting-sync.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def apply_plan(
     project_root: Path,
     memory_root: Path,
@@ -387,7 +416,30 @@ def apply_plan(
     templates: dict[str, Path],
     dry_run: bool,
 ) -> dict[str, Any]:
+    if dry_run:
+        return _apply_plan_locked(project_root, memory_root, plan, templates, True)
+    with meeting_sync_lock(memory_root):
+        return _apply_plan_locked(project_root, memory_root, plan, templates, False)
+
+
+def _apply_plan_locked(
+    project_root: Path,
+    memory_root: Path,
+    plan: dict[str, Any],
+    templates: dict[str, Path],
+    dry_run: bool,
+) -> dict[str, Any]:
     meeting = plan["meeting"]
+    try:
+        verified_panel_archive = verify_panel_archive(memory_root, meeting)
+    except MeetingSyncConflict as exc:
+        return {
+            "ok": False,
+            "dry_run": dry_run,
+            "status": "blocked",
+            "error": str(exc),
+            "meeting": meeting,
+        }
     receipt_path = meeting_receipt_path(memory_root, meeting)
     try:
         existing_receipt = load_json_object(receipt_path)
@@ -416,6 +468,12 @@ def apply_plan(
                     "receipt": str(receipt_path),
                 }
             result = dict(existing_receipt.get("result", {}))
+            if verified_panel_archive and not existing_receipt.get("official_panel_archive") and not dry_run:
+                association = official_panel_association(verified_panel_archive, existing_receipt.get("applied_at"))
+                existing_receipt["official_panel_archive"] = association
+                result["official_panel_archive"] = association
+                existing_receipt["result"] = result
+                write_json_atomic(receipt_path, existing_receipt)
             result.update(
                 {
                     "ok": True,
@@ -438,8 +496,10 @@ def apply_plan(
                 "schema_version": 1,
                 "meeting_instance_id": meeting["meeting_instance_id"],
                 "plan_fingerprint": meeting["plan_fingerprint"],
+                "input_hash": meeting["plan_fingerprint"],
                 "status": "applying",
                 "started_at": run_timestamp,
+                "lineage": meeting.get("lineage", {}),
                 "generator_version": GENERATOR_VERSION,
             },
         )
@@ -462,9 +522,11 @@ def apply_plan(
                     "schema_version": 1,
                     "meeting_instance_id": meeting["meeting_instance_id"],
                     "plan_fingerprint": meeting["plan_fingerprint"],
+                    "input_hash": meeting["plan_fingerprint"],
                     "status": "conflict",
                     "started_at": run_timestamp,
                     "conflict": str(exc),
+                    "lineage": meeting.get("lineage", {}),
                     "generator_version": GENERATOR_VERSION,
                 },
             )
@@ -485,6 +547,7 @@ def apply_plan(
         "schema_version": 1,
         "meeting_instance_id": meeting["meeting_instance_id"],
         "plan_fingerprint": meeting["plan_fingerprint"],
+        "input_hash": meeting["plan_fingerprint"],
         "status": "applied",
         "started_at": run_timestamp,
         "applied_at": applied_at,
@@ -497,6 +560,9 @@ def apply_plan(
     try:
         cursor = advance_meeting_cursor(memory_root, meeting, receipt, False)
     except MeetingSyncConflict as exc:
+        receipt["sync_status"] = "failed"
+        receipt["cursor"] = {"status": "conflict", "error": str(exc)}
+        write_json_atomic(receipt_path, receipt)
         return {
             "ok": False,
             "dry_run": False,
@@ -513,6 +579,11 @@ def apply_plan(
             "cursor": cursor,
         }
     )
+    receipt["sync_status"] = "complete"
+    if verified_panel_archive:
+        association = official_panel_association(verified_panel_archive, applied_at)
+        result["official_panel_archive"] = association
+        receipt["official_panel_archive"] = association
     result.setdefault("touched", {}).setdefault("write_receipts", []).append(str(receipt_path))
     if cursor.get("path") and cursor.get("status") in {"advanced", "unchanged", "repaired"}:
         result["touched"].setdefault("meeting_cursors", []).append(cursor["path"])
@@ -521,6 +592,60 @@ def apply_plan(
     receipt["cursor"] = cursor
     write_json_atomic(receipt_path, receipt)
     return result
+
+
+def normalize_panel_archive(raw: Any) -> dict[str, str]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("meeting.panel_archive must be an object")
+    return {
+        "panel_id": string_value(raw.get("panel_id")),
+        "archive": string_value(raw.get("archive") or raw.get("archive_html")),
+        "distribution_profile": string_value(raw.get("distribution_profile")),
+    }
+
+
+def verify_panel_archive(memory_root: Path, meeting: dict[str, Any]) -> dict[str, str] | None:
+    archive = meeting.get("panel_archive")
+    if not archive:
+        return None
+    raw_path = Path(archive["archive"])
+    if raw_path.is_absolute() or ".." in raw_path.parts:
+        raise MeetingSyncConflict("meeting panel archive must be a path below ADP memory")
+    path = (memory_root / raw_path).resolve()
+    snapshot_root = (memory_root / "snapshots/management-panel").resolve()
+    if not path.is_relative_to(snapshot_root) or not path.is_file():
+        raise MeetingSyncConflict("meeting panel archive is missing from snapshots/management-panel")
+    text = path.read_text(encoding="utf-8")
+    opener = '<script type="application/json" id="adp-panel-manifest">'
+    start = text.find(opener)
+    end = text.find("</script>", start + len(opener)) if start >= 0 else -1
+    if start < 0 or end < 0:
+        raise MeetingSyncConflict("meeting panel archive has no embedded manifest")
+    try:
+        manifest = json.loads(text[start + len(opener) : end])
+    except json.JSONDecodeError as exc:
+        raise MeetingSyncConflict(f"meeting panel archive manifest is invalid: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise MeetingSyncConflict("meeting panel archive manifest must be an object")
+    if manifest.get("panel_id") != archive["panel_id"]:
+        raise MeetingSyncConflict("meeting panel archive ID does not match its embedded manifest")
+    if manifest.get("distribution_profile") != archive["distribution_profile"]:
+        raise MeetingSyncConflict("meeting panel archive profile does not match its embedded manifest")
+    return {
+        "panel_id": archive["panel_id"],
+        "archive": rel_to_memory(memory_root, path),
+        "distribution_profile": archive["distribution_profile"],
+    }
+
+
+def official_panel_association(archive: dict[str, str], applied_at: Any) -> dict[str, str]:
+    return {
+        **archive,
+        "receipt_status": "applied",
+        "associated_at": string_value(applied_at),
+    }
 
 
 def _apply_plan_once(
@@ -1444,9 +1569,16 @@ def write_bytes_once(path: Path, content: bytes) -> None:
         if path.read_bytes() == content:
             return
         raise MeetingSyncConflict(f"destination already exists with different content: {path}")
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_bytes(content)
-    temporary.replace(path)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(raw_temp)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -1457,9 +1589,16 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 def write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(content, encoding="utf-8", newline="\n")
-    temporary.replace(path)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(raw_temp)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_json_object(path: Path) -> dict[str, Any]:

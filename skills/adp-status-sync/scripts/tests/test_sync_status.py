@@ -7,6 +7,10 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "sync_status.py"
+FLOW_TEST_ROOT = Path(__file__).resolve().parents[3] / "adp-flow-graph/scripts/tests"
+sys.path.insert(0, str(FLOW_TEST_ROOT))
+from flow_contract_testkit import load_json as load_contract_json, validate_schema  # noqa: E402
+ACTION_SCHEMA = Path(__file__).resolve().parents[2] / "assets/action-flow-relation-v1.schema.json"
 
 
 RECORD = """# Workstream Delivery Record
@@ -36,6 +40,73 @@ Keep details in BMM artifacts.
 
 
 class SyncStatusTests(unittest.TestCase):
+    def test_action_flow_contract_tracks_lifecycle_and_explicit_relations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            updates_file = project_root / "action-flow.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "baseline_revision": 3,
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "action_id": "A-FLOW-1",
+                                        "status": "in-progress",
+                                        "owner": "FDE-A",
+                                        "action": "Close checkout gate",
+                                        "source": "meeting#1",
+                                        "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
+                                        "related_flow_edge_ids": ["E-CHECKOUT-MERGE"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            started = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            started_result = json.loads(started.stdout)
+            action_flow_path = Path(started_result["action_flow"])
+            contract = json.loads(action_flow_path.read_text(encoding="utf-8"))
+            action = contract["actions"][0]
+
+            self.assertEqual(contract["action_flow_schema_version"], "1.0.0")
+            self.assertEqual(action["status"], "in-progress")
+            self.assertIsNotNone(action["started_at"])
+            self.assertIsNone(action["done_at"])
+            self.assertEqual(action["baseline_revision"], 3)
+            self.assertEqual(action["related_plan_item_ids"], ["MS-CHECKOUT-COMPLETE"])
+            self.assertEqual(action["related_flow_edge_ids"], ["E-CHECKOUT-MERGE"])
+            self.assertEqual(validate_schema(contract, load_contract_json(ACTION_SCHEMA)), [])
+
+            updates_file.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "actions": [{"action_id": "A-FLOW-1", "status": "done"}]}]}),
+                encoding="utf-8",
+            )
+            finished = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            finished_action = json.loads(Path(json.loads(finished.stdout)["action_flow"]).read_text(encoding="utf-8"))["actions"][0]
+            self.assertEqual(finished_action["status"], "done")
+            self.assertIsNotNone(finished_action["done_at"])
+            self.assertEqual(finished_action["related_plan_item_ids"], ["MS-CHECKOUT-COMPLETE"])
+
     def run_script(self, project_root: Path, *args: str, check: bool = True) -> dict:
         completed = subprocess.run(
             [sys.executable, str(SCRIPT), *args, str(project_root)]
@@ -203,6 +274,93 @@ class SyncStatusTests(unittest.TestCase):
                     encoding="utf-8"
                 ),
             )
+
+    def test_unsupported_action_status_is_rejected_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            before = record.read_bytes()
+            updates_file = project_root / "invalid-action-status.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "owner": "FDE-A",
+                                        "action": "Confirm payment evidence",
+                                        "status": "almost-done",
+                                        "source": "meeting#1",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+            memory = project_root / "_bmad-output/adp/memory"
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("action status must be one of", result["error"])
+            self.assertEqual(record.read_bytes(), before)
+            self.assertFalse((memory / "actions/action-ledger.md").exists())
+            self.assertFalse((memory / "daily").exists())
+
+    def test_batch_preflight_failure_keeps_all_canonical_files_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            before = record.read_bytes()
+            updates_file = project_root / "partially-invalid-batch.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "status": "at-risk",
+                                "actions": [
+                                    {
+                                        "owner": "FDE-A",
+                                        "action": "Confirm payment evidence",
+                                        "source": "meeting#1",
+                                    }
+                                ],
+                            },
+                            {"id": "l2-missing", "status": "blocked"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+            memory = project_root / "_bmad-output/adp/memory"
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("delivery-record.md not found for workstream l2-missing", result["error"])
+            self.assertEqual(record.read_bytes(), before)
+            self.assertFalse((memory / "actions/action-ledger.md").exists())
+            self.assertFalse((memory / "daily").exists())
 
     def test_noop_update_does_not_refresh_last_status_sync(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

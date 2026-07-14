@@ -1,0 +1,593 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:adp:schema:program-status-progress:2.0.0",
+  "title": "ADP Program Status Progress v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "progress_schema_version",
+    "basis",
+    "as_of",
+    "reporting_period",
+    "scope_identity",
+    "measurement_status",
+    "measurement_reasons",
+    "overall",
+    "by_workstream",
+    "eligibility",
+    "corrections",
+    "weighted_completion_percent",
+    "completion_measure",
+    "reason_key",
+    "compatibility",
+    "recovery"
+  ],
+  "properties": {
+    "progress_schema_version": {"const": "2.0.0"},
+    "basis": {"const": "weighted-milestone"},
+    "as_of": {"$ref": "#/$defs/date"},
+    "reporting_period": {"$ref": "#/$defs/reportingPeriod"},
+    "scope_identity": {"$ref": "#/$defs/scopeIdentity"},
+    "measurement_status": {"$ref": "#/$defs/measurementStatus"},
+    "measurement_reasons": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/measurementReason"},
+      "uniqueItems": true
+    },
+    "overall": {"$ref": "#/$defs/projection"},
+    "by_workstream": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/workstreamProjection"}
+    },
+    "eligibility": {"$ref": "#/$defs/eligibility"},
+    "corrections": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/correction"}
+    },
+    "weighted_completion_percent": {"$ref": "#/$defs/nullablePercent"},
+    "completion_measure": {"type": ["string", "null"]},
+    "reason_key": {"type": "string", "minLength": 1},
+    "compatibility": {"$ref": "#/$defs/compatibility"},
+    "recovery": {"$ref": "#/$defs/recovery"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"measurement_status": {"const": "blocked"}}},
+      "then": {
+        "properties": {
+          "recovery": {
+            "properties": {
+              "status": {"const": "required"},
+              "reason_codes": {"minItems": 1},
+              "workflows": {"minItems": 1}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "nullableDate": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "percent": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "nullablePercent": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 100
+    },
+    "nullableGap": {
+      "type": ["number", "null"],
+      "minimum": -100,
+      "maximum": 100
+    },
+    "measurementStatus": {
+      "enum": ["measurable", "partial", "not-measurable", "blocked"]
+    },
+    "measurementReasonCode": {
+      "enum": [
+        "eligible",
+        "weighting-disabled",
+        "weighting-invalid",
+        "incomplete-weighting",
+        "no-applicable-milestones",
+        "audit-blocked",
+        "stale-snapshot",
+        "scope-identity-missing",
+        "l0-gate-only",
+        "partial-workstream-coverage"
+      ]
+    },
+    "measurementReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason_code", "rule_id", "detail", "source_references", "recovery_workflows"],
+      "properties": {
+        "reason_code": {"$ref": "#/$defs/measurementReasonCode"},
+        "rule_id": {"type": "string", "minLength": 1},
+        "detail": {"type": "string", "minLength": 1},
+        "source_references": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "recovery_workflows": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    },
+    "reportingPeriod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"$ref": "#/$defs/date"},
+        "end": {"$ref": "#/$defs/date"}
+      }
+    },
+    "scopeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline_revision", "scope_revision", "scope_fingerprint", "weighting_fingerprint"],
+      "properties": {
+        "baseline_revision": {"type": "integer", "minimum": 1},
+        "scope_revision": {"type": "string", "minLength": 1},
+        "scope_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "weighting_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_type", "source_reference", "fingerprint", "rule_id", "audit_id", "correction_id", "rebase_id"],
+      "properties": {
+        "source_type": {"enum": ["baseline", "wdr", "input-audit", "correction", "rebase"]},
+        "source_reference": {"type": "string", "minLength": 1},
+        "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "rule_id": {"type": "string", "minLength": 1},
+        "audit_id": {"type": ["string", "null"]},
+        "correction_id": {"type": ["string", "null"]},
+        "rebase_id": {"type": ["string", "null"]}
+      }
+    },
+    "lineageList": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/lineage"},
+      "minItems": 1
+    },
+    "valueLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actual_completion_percent",
+        "planned_completion_percent",
+        "completion_gap_pp",
+        "project_weight_percent",
+        "completed_contribution_pp",
+        "forecast_completion_percent",
+        "forecast_coverage_percent"
+      ],
+      "properties": {
+        "actual_completion_percent": {"$ref": "#/$defs/lineageList"},
+        "planned_completion_percent": {"$ref": "#/$defs/lineageList"},
+        "completion_gap_pp": {"$ref": "#/$defs/lineageList"},
+        "project_weight_percent": {"$ref": "#/$defs/lineageList"},
+        "completed_contribution_pp": {"$ref": "#/$defs/lineageList"},
+        "forecast_completion_percent": {"$ref": "#/$defs/lineageList"},
+        "forecast_coverage_percent": {"$ref": "#/$defs/lineageList"}
+      }
+    },
+    "current": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actual_completion_percent",
+        "planned_completion_percent",
+        "completion_gap_pp",
+        "project_weight_percent",
+        "completed_contribution_pp"
+      ],
+      "properties": {
+        "actual_completion_percent": {"$ref": "#/$defs/nullablePercent"},
+        "planned_completion_percent": {"$ref": "#/$defs/nullablePercent"},
+        "completion_gap_pp": {"$ref": "#/$defs/nullableGap"},
+        "project_weight_percent": {"$ref": "#/$defs/nullablePercent"},
+        "completed_contribution_pp": {"$ref": "#/$defs/nullablePercent"}
+      }
+    },
+    "forecastCoverageStatus": {
+      "enum": ["full", "partial", "none", "complete", "not-applicable"]
+    },
+    "forecastSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "horizon_date",
+        "forecast_completion_percent",
+        "forecast_coverage_percent",
+        "forecast_coverage_status",
+        "remaining_weight_percent",
+        "covered_remaining_weight_percent",
+        "next_milestone_ids"
+      ],
+      "properties": {
+        "horizon_date": {"$ref": "#/$defs/nullableDate"},
+        "forecast_completion_percent": {"$ref": "#/$defs/nullablePercent"},
+        "forecast_coverage_percent": {"$ref": "#/$defs/nullablePercent"},
+        "forecast_coverage_status": {"$ref": "#/$defs/forecastCoverageStatus"},
+        "remaining_weight_percent": {"$ref": "#/$defs/nullablePercent"},
+        "covered_remaining_weight_percent": {"$ref": "#/$defs/nullablePercent"},
+        "next_milestone_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"forecast_coverage_status": {"enum": ["complete", "not-applicable"]}}},
+          "then": {"properties": {"forecast_coverage_percent": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"forecast_coverage_status": {"const": "full"}}},
+          "then": {"properties": {"forecast_coverage_percent": {"const": 100}}}
+        },
+        {
+          "if": {"properties": {"forecast_coverage_status": {"const": "none"}}},
+          "then": {"properties": {"forecast_coverage_percent": {"const": 0}}}
+        },
+        {
+          "if": {"properties": {"forecast_coverage_status": {"const": "partial"}}},
+          "then": {"properties": {"forecast_coverage_percent": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 100}}}
+        }
+      ]
+    },
+    "seriesPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["horizon_date", "completion_percent", "milestone_ids", "value_lineage"],
+      "properties": {
+        "horizon_date": {"$ref": "#/$defs/date"},
+        "completion_percent": {"$ref": "#/$defs/percent"},
+        "milestone_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "value_lineage": {"$ref": "#/$defs/lineageList"}
+      }
+    },
+    "forecastPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "horizon_date",
+        "forecast_completion_percent",
+        "forecast_coverage_percent",
+        "forecast_coverage_status",
+        "remaining_weight_percent",
+        "covered_remaining_weight_percent",
+        "milestone_ids",
+        "value_lineage"
+      ],
+      "properties": {
+        "horizon_date": {"$ref": "#/$defs/date"},
+        "forecast_completion_percent": {"$ref": "#/$defs/percent"},
+        "forecast_coverage_percent": {"$ref": "#/$defs/nullablePercent"},
+        "forecast_coverage_status": {"$ref": "#/$defs/forecastCoverageStatus"},
+        "remaining_weight_percent": {"$ref": "#/$defs/percent"},
+        "covered_remaining_weight_percent": {"$ref": "#/$defs/percent"},
+        "milestone_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "value_lineage": {"$ref": "#/$defs/lineageList"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"forecast_coverage_status": {"const": "complete"}}},
+          "then": {"properties": {"forecast_coverage_percent": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"forecast_coverage_status": {"const": "full"}}},
+          "then": {"properties": {"forecast_coverage_percent": {"const": 100}}}
+        },
+        {
+          "if": {"properties": {"forecast_coverage_status": {"const": "none"}}},
+          "then": {"properties": {"forecast_coverage_percent": {"const": 0}}}
+        },
+        {
+          "if": {"properties": {"forecast_coverage_status": {"const": "partial"}}},
+          "then": {"properties": {"forecast_coverage_percent": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 100}}}
+        }
+      ]
+    },
+    "series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actual_points", "planned_points", "forecast_points"],
+      "properties": {
+        "actual_points": {"type": "array", "items": {"$ref": "#/$defs/seriesPoint"}},
+        "planned_points": {"type": "array", "items": {"$ref": "#/$defs/seriesPoint"}},
+        "forecast_points": {"type": "array", "items": {"$ref": "#/$defs/forecastPoint"}}
+      }
+    },
+    "milestoneCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applicable", "eligible_actual", "completed", "with_valid_forecast"],
+      "properties": {
+        "applicable": {"type": "integer", "minimum": 0},
+        "eligible_actual": {"type": "integer", "minimum": 0},
+        "completed": {"type": "integer", "minimum": 0},
+        "with_valid_forecast": {"type": "integer", "minimum": 0}
+      }
+    },
+    "comparability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "previous_snapshot_id", "rebase_id", "continuous_trend", "actual_delta_pp", "reason_codes"],
+      "properties": {
+        "disposition": {"enum": ["comparable", "baseline-revision-changed", "scope-changed", "no-predecessor", "rebased"]},
+        "previous_snapshot_id": {"type": ["string", "null"]},
+        "rebase_id": {"type": ["string", "null"]},
+        "continuous_trend": {"type": "boolean"},
+        "actual_delta_pp": {"$ref": "#/$defs/nullableGap"},
+        "reason_codes": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"disposition": {"enum": ["comparable", "rebased"]}}},
+          "then": {"properties": {"continuous_trend": {"const": true}}},
+          "else": {"properties": {"continuous_trend": {"const": false}, "actual_delta_pp": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"disposition": {"const": "rebased"}}},
+          "then": {"properties": {"rebase_id": {"type": "string", "minLength": 1}}},
+          "else": {"properties": {"rebase_id": {"const": null}}}
+        }
+      ]
+    },
+    "gateReadiness": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["applicable_gate_count", "satisfied_gate_count", "blocked_gate_count", "readiness_status"],
+      "properties": {
+        "applicable_gate_count": {"type": "integer", "minimum": 0},
+        "satisfied_gate_count": {"type": "integer", "minimum": 0},
+        "blocked_gate_count": {"type": "integer", "minimum": 0},
+        "readiness_status": {"enum": ["ready", "degraded", "blocked", "indeterminate"]}
+      }
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope_id",
+        "progress_kind",
+        "measurement_status",
+        "measurement_reasons",
+        "current",
+        "forecast_summary",
+        "series",
+        "milestone_counts",
+        "comparability",
+        "gate_readiness",
+        "value_lineage"
+      ],
+      "properties": {
+        "scope_id": {"const": "program"},
+        "progress_kind": {"const": "weighted-milestone"},
+        "measurement_status": {"$ref": "#/$defs/measurementStatus"},
+        "measurement_reasons": {"type": "array", "items": {"$ref": "#/$defs/measurementReason"}},
+        "current": {"$ref": "#/$defs/current"},
+        "forecast_summary": {"$ref": "#/$defs/forecastSummary"},
+        "series": {"$ref": "#/$defs/series"},
+        "milestone_counts": {"$ref": "#/$defs/milestoneCounts"},
+        "comparability": {"$ref": "#/$defs/comparability"},
+        "gate_readiness": {"type": "null"},
+        "value_lineage": {"$ref": "#/$defs/valueLineage"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"measurement_status": {"const": "measurable"}}},
+          "then": {
+            "properties": {
+              "current": {
+                "properties": {
+                  "actual_completion_percent": {"type": "number"},
+                  "planned_completion_percent": {"type": "number"},
+                  "completion_gap_pp": {"type": "number"},
+                  "project_weight_percent": {"type": "number"},
+                  "completed_contribution_pp": {"type": "number"}
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "current": {
+                "properties": {
+                  "actual_completion_percent": {"const": null},
+                  "planned_completion_percent": {"const": null},
+                  "completion_gap_pp": {"const": null},
+                  "project_weight_percent": {"const": null},
+                  "completed_contribution_pp": {"const": null}
+                }
+              },
+              "forecast_summary": {"properties": {"forecast_coverage_status": {"const": "not-applicable"}}},
+              "series": {"properties": {"actual_points": {"maxItems": 0}, "planned_points": {"maxItems": 0}, "forecast_points": {"maxItems": 0}}}
+            }
+          }
+        }
+      ]
+    },
+    "workstreamProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workstream_id",
+        "workstream_kind",
+        "progress_kind",
+        "measurement_status",
+        "measurement_reasons",
+        "current",
+        "forecast_summary",
+        "series",
+        "milestone_counts",
+        "comparability",
+        "gate_readiness",
+        "value_lineage"
+      ],
+      "properties": {
+        "workstream_id": {"type": "string", "minLength": 1},
+        "workstream_kind": {"enum": ["L0", "delivery"]},
+        "progress_kind": {"enum": ["weighted-milestone", "gate-readiness"]},
+        "measurement_status": {"$ref": "#/$defs/measurementStatus"},
+        "measurement_reasons": {"type": "array", "items": {"$ref": "#/$defs/measurementReason"}},
+        "current": {"$ref": "#/$defs/current"},
+        "forecast_summary": {"$ref": "#/$defs/forecastSummary"},
+        "series": {"$ref": "#/$defs/series"},
+        "milestone_counts": {"$ref": "#/$defs/milestoneCounts"},
+        "comparability": {"$ref": "#/$defs/comparability"},
+        "gate_readiness": {"$ref": "#/$defs/gateReadiness"},
+        "value_lineage": {"$ref": "#/$defs/valueLineage"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"measurement_status": {"const": "measurable"}}},
+          "then": {
+            "properties": {
+              "current": {
+                "properties": {
+                  "actual_completion_percent": {"type": "number"},
+                  "planned_completion_percent": {"type": "number"},
+                  "completion_gap_pp": {"type": "number"},
+                  "project_weight_percent": {"type": "number"},
+                  "completed_contribution_pp": {"type": "number"}
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "current": {
+                "properties": {
+                  "actual_completion_percent": {"const": null},
+                  "planned_completion_percent": {"const": null},
+                  "completion_gap_pp": {"const": null},
+                  "project_weight_percent": {"const": null},
+                  "completed_contribution_pp": {"const": null}
+                }
+              },
+              "forecast_summary": {"properties": {"forecast_coverage_status": {"const": "not-applicable"}}},
+              "series": {"properties": {"actual_points": {"maxItems": 0}, "planned_points": {"maxItems": 0}, "forecast_points": {"maxItems": 0}}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"progress_kind": {"const": "gate-readiness"}}},
+          "then": {
+            "properties": {
+              "workstream_kind": {"const": "L0"},
+              "measurement_status": {"const": "not-measurable"},
+              "gate_readiness": {"type": "object"}
+            }
+          },
+          "else": {"properties": {"gate_readiness": {"const": null}}}
+        }
+      ]
+    },
+    "eligibleActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["milestone_id", "workstream_id", "actual_date", "weight_percent", "completion_criteria_reference", "evidence_references", "audit_id", "rule_id"],
+      "properties": {
+        "milestone_id": {"type": "string", "minLength": 1},
+        "workstream_id": {"type": "string", "minLength": 1},
+        "actual_date": {"$ref": "#/$defs/date"},
+        "weight_percent": {"$ref": "#/$defs/percent"},
+        "completion_criteria_reference": {"type": "string", "minLength": 1},
+        "evidence_references": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+        "audit_id": {"type": "string", "minLength": 1},
+        "rule_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "excludedActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["milestone_id", "workstream_id", "actual_date", "reason_code", "rule_id", "source_references", "recovery_workflows"],
+      "properties": {
+        "milestone_id": {"type": "string", "minLength": 1},
+        "workstream_id": {"type": "string", "minLength": 1},
+        "actual_date": {"$ref": "#/$defs/nullableDate"},
+        "reason_code": {"enum": ["future-actual", "unaudited-actual", "missing-evidence", "missing-completion-criteria", "scope-mismatch", "invalid-weight", "retracted-actual"]},
+        "rule_id": {"type": "string", "minLength": 1},
+        "source_references": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "recovery_workflows": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    },
+    "eligibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of", "input_audit_id", "eligible_actuals", "excluded_actuals"],
+      "properties": {
+        "as_of": {"$ref": "#/$defs/date"},
+        "input_audit_id": {"type": "string", "minLength": 1},
+        "eligible_actuals": {"type": "array", "items": {"$ref": "#/$defs/eligibleActual"}},
+        "excluded_actuals": {"type": "array", "items": {"$ref": "#/$defs/excludedActual"}}
+      }
+    },
+    "correction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["correction_id", "milestone_id", "kind", "previous_actual_date", "corrected_actual_date", "audit_id", "rule_id", "source_references"],
+      "properties": {
+        "correction_id": {"type": "string", "minLength": 1},
+        "milestone_id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["actual-date-correction", "actual-retraction", "evidence-correction"]},
+        "previous_actual_date": {"$ref": "#/$defs/nullableDate"},
+        "corrected_actual_date": {"$ref": "#/$defs/nullableDate"},
+        "audit_id": {"type": "string", "minLength": 1},
+        "rule_id": {"type": "string", "minLength": 1},
+        "source_references": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["legacy_progress_version", "strategy", "migration_error_code"],
+      "properties": {
+        "legacy_progress_version": {"const": "1.0"},
+        "strategy": {"const": "legacy-alias"},
+        "migration_error_code": {"const": "ADP-PROGRESS-MIGRATION-REQUIRED"}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason_codes", "workflows"],
+      "properties": {
+        "status": {"enum": ["not-required", "available", "required"]},
+        "reason_codes": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "workflows": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    }
+  }
+}

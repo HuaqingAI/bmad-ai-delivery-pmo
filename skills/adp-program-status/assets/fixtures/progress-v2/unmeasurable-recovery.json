@@ -1,0 +1,41 @@
+{
+  "contract_version": "2.0.0",
+  "cases": [
+    {
+      "name": "weighting-disabled",
+      "measurement_status": "not-measurable",
+      "reason_code": "weighting-disabled",
+      "current_values": null,
+      "recovery": {"status": "available", "workflows": ["adp-plan-baseline"]}
+    },
+    {
+      "name": "invalid-weighting",
+      "measurement_status": "not-measurable",
+      "reason_code": "weighting-invalid",
+      "current_values": null,
+      "recovery": {"status": "required", "workflows": ["adp-plan-baseline"]}
+    },
+    {
+      "name": "no-applicable-milestones",
+      "measurement_status": "not-measurable",
+      "reason_code": "no-applicable-milestones",
+      "current_values": null,
+      "recovery": {"status": "available", "workflows": ["adp-plan-baseline"]}
+    },
+    {
+      "name": "l0-gate-only",
+      "measurement_status": "not-measurable",
+      "reason_code": "l0-gate-only",
+      "current_values": null,
+      "progress_kind": "gate-readiness",
+      "recovery": {"status": "not-required", "workflows": []}
+    },
+    {
+      "name": "audit-blocked",
+      "measurement_status": "blocked",
+      "reason_code": "audit-blocked",
+      "current_values": null,
+      "recovery": {"status": "required", "workflows": ["adp-state-audit"]}
+    }
+  ]
+}

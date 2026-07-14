@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -34,7 +38,7 @@ BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 ACTION_STATUSES = {"open", "in-progress", "blocked", "done", "cancelled"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 PROJECT_ACTION_IDS = {"program", "project", "adp-program"}
-MILESTONE_STATUSES = {"planned", "at-risk", "done", "blocked"}
+MILESTONE_STATUSES = {"planned", "in-progress", "at-risk", "done", "blocked"}
 ROADMAP_FIELDS = [
     "Milestone ID",
     "Milestone",
@@ -60,6 +64,13 @@ ACTION_FIELDS = [
     "Reason",
     "Due / Trigger",
     "Closure Criteria",
+    "Created At",
+    "Started At",
+    "Done At",
+    "Cancelled At",
+    "Baseline Revision",
+    "Related Plan Items",
+    "Related Flow Edges",
     "Last Updated",
     "Owning Workflow",
 ]
@@ -78,6 +89,13 @@ class ActionUpdate:
     due_or_trigger: str = "TBD"
     closure_criteria: str = "TBD"
     owning_workflow: str = "adp-status-sync"
+    created_at: str | None = None
+    started_at: str | None = None
+    done_at: str | None = None
+    cancelled_at: str | None = None
+    baseline_revision: int | None = None
+    related_plan_item_ids: list[str] | None = None
+    related_flow_edge_ids: list[str] | None = None
 
 
 @dataclass
@@ -260,7 +278,12 @@ def update_from_mapping(item: dict[str, Any], default_source: str, default_revis
         dependencies=clean_list(item.get("dependencies", [])),
         change_notes=clean_list(item.get("change_notes", item.get("changeNotes", []))),
         next_actions=clean_list(item.get("next_actions", item.get("nextActions", []))),
-        actions=actions_from_mapping(item, default_workstream=normalize_id(str(raw_id)), default_source=default_source),
+        actions=actions_from_mapping(
+            item,
+            default_workstream=normalize_id(str(raw_id)),
+            default_source=default_source,
+            default_revision=parse_optional_revision(item.get("baseline_revision"), "baseline_revision") or default_revision,
+        ),
         milestones=milestones_from_mapping(
             item,
             default_revision=parse_optional_revision(item.get("baseline_revision"), "baseline_revision") or default_revision,
@@ -364,6 +387,7 @@ def actions_from_mapping(
     item: dict[str, Any],
     default_workstream: str,
     default_source: str,
+    default_revision: int | None = None,
 ) -> list[ActionUpdate]:
     raw_actions = item.get("actions", [])
     if raw_actions is None:
@@ -413,9 +437,48 @@ def actions_from_mapping(
                 ),
                 closure_criteria=clean_optional(raw_action.get("closure_criteria")) or "TBD",
                 owning_workflow=clean_optional(raw_action.get("owning_workflow")) or "adp-status-sync",
+                created_at=clean_iso_timestamp(raw_action.get("created_at"), "action created_at"),
+                started_at=clean_iso_timestamp(raw_action.get("started_at"), "action started_at"),
+                done_at=clean_iso_timestamp(raw_action.get("done_at"), "action done_at"),
+                cancelled_at=clean_iso_timestamp(raw_action.get("cancelled_at"), "action cancelled_at"),
+                baseline_revision=parse_optional_revision(raw_action.get("baseline_revision"), "action baseline_revision") or default_revision,
+                related_plan_item_ids=(
+                    normalize_stable_id_list(raw_action.get("related_plan_item_ids"), "related_plan_item_ids")
+                    if "related_plan_item_ids" in raw_action
+                    else None
+                ),
+                related_flow_edge_ids=(
+                    normalize_stable_id_list(raw_action.get("related_flow_edge_ids"), "related_flow_edge_ids")
+                    if "related_flow_edge_ids" in raw_action
+                    else None
+                ),
             )
         )
     return actions
+
+
+def clean_iso_timestamp(value: Any, label: str) -> str | None:
+    text = clean_optional(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def normalize_stable_id_list(value: Any, label: str) -> list[str]:
+    values = clean_list(value)
+    result: list[str] = []
+    for item in values:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", item):
+            raise ValueError(f"{label} contains invalid stable ID {item!r}")
+        if item not in result:
+            result.append(item)
+    return sorted(result)
 
 
 def normalize_action_status(raw: Any) -> str:
@@ -425,7 +488,9 @@ def normalize_action_status(raw: Any) -> str:
     normalized = status.lower().strip().replace("_", "-")
     if normalized in {"in progress", "inprogress"}:
         normalized = "in-progress"
-    return normalized if normalized in ACTION_STATUSES else "open"
+    if normalized not in ACTION_STATUSES:
+        raise ValueError(f"action status must be one of: {', '.join(sorted(ACTION_STATUSES))}")
+    return normalized
 
 
 def clean_optional(value: Any) -> str | None:
@@ -592,6 +657,7 @@ def upsert_actions(
             continue
 
         before_status = match.get("Status", "")
+        validate_action_transition(before_status, action_update.status, action_update.action_id or match.get("Action ID", ""))
         merge_action_row(match, action_update, timestamp)
         action_id = match.get("Action ID", "")
         if match["Status"] in {"done", "cancelled"} and before_status != match["Status"]:
@@ -656,6 +722,9 @@ def normalize_text_key(value: str) -> str:
 
 def new_action_row(rows: list[dict[str, str]], action_update: ActionUpdate, timestamp: str) -> dict[str, str]:
     action_id = action_update.action_id or next_action_id(rows, timestamp)
+    started_at = action_update.started_at or (timestamp if action_update.status == "in-progress" else "")
+    done_at = action_update.done_at or (timestamp if action_update.status == "done" else "")
+    cancelled_at = action_update.cancelled_at or (timestamp if action_update.status == "cancelled" else "")
     return {
         "Action ID": action_id,
         "Status": action_update.status,
@@ -667,6 +736,13 @@ def new_action_row(rows: list[dict[str, str]], action_update: ActionUpdate, time
         "Reason": action_update.reason or "TBD",
         "Due / Trigger": action_update.due_or_trigger or "TBD",
         "Closure Criteria": action_update.closure_criteria or "TBD",
+        "Created At": action_update.created_at or timestamp,
+        "Started At": started_at,
+        "Done At": done_at,
+        "Cancelled At": cancelled_at,
+        "Baseline Revision": str(action_update.baseline_revision or ""),
+        "Related Plan Items": "; ".join(action_update.related_plan_item_ids or []),
+        "Related Flow Edges": "; ".join(action_update.related_flow_edge_ids or []),
         "Last Updated": timestamp,
         "Owning Workflow": action_update.owning_workflow or "adp-status-sync",
     }
@@ -686,8 +762,72 @@ def merge_action_row(row: dict[str, str], action_update: ActionUpdate, timestamp
     assign_if_meaningful(row, "Reason", action_update.reason)
     assign_if_meaningful(row, "Due / Trigger", action_update.due_or_trigger)
     assign_if_meaningful(row, "Closure Criteria", action_update.closure_criteria)
+    if not row.get("Created At"):
+        row["Created At"] = action_update.created_at or row.get("Last Updated") or timestamp
+    if action_update.created_at:
+        row["Created At"] = action_update.created_at
+    if action_update.status == "in-progress" and not row.get("Started At"):
+        row["Started At"] = action_update.started_at or timestamp
+    elif action_update.started_at:
+        row["Started At"] = action_update.started_at
+    if action_update.status == "done":
+        row["Done At"] = action_update.done_at or timestamp
+    elif action_update.done_at:
+        row["Done At"] = action_update.done_at
+    if action_update.status == "cancelled":
+        row["Cancelled At"] = action_update.cancelled_at or timestamp
+    elif action_update.cancelled_at:
+        row["Cancelled At"] = action_update.cancelled_at
+    if action_update.baseline_revision is not None:
+        row["Baseline Revision"] = str(action_update.baseline_revision)
+    if action_update.related_plan_item_ids is not None:
+        row["Related Plan Items"] = "; ".join(action_update.related_plan_item_ids)
+    if action_update.related_flow_edge_ids is not None:
+        row["Related Flow Edges"] = "; ".join(action_update.related_flow_edge_ids)
     row["Last Updated"] = timestamp
     assign_if_meaningful(row, "Owning Workflow", action_update.owning_workflow)
+
+
+def validate_action_transition(before: str, after: str, action_id: str) -> None:
+    if before.lower() in {"done", "cancelled"} and after != before.lower():
+        raise ValueError(f"terminal action {action_id} cannot transition from {before} to {after}")
+
+
+def build_action_flow_contract(rows: list[dict[str, str]], ledger_path: Path) -> dict[str, Any]:
+    fingerprint = "sha256:" + hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    actions: list[dict[str, Any]] = []
+    for row in rows:
+        action_id = row.get("Action ID", "").strip()
+        status = row.get("Status", "").strip().lower()
+        revision = row.get("Baseline Revision", "").strip()
+        created_at = row.get("Created At", "").strip()
+        updated_at = row.get("Last Updated", "").strip()
+        if not action_id or status not in ACTION_STATUSES or not revision.isdigit() or int(revision) < 1 or not created_at or not updated_at:
+            continue
+        actions.append(
+            {
+                "action_id": action_id,
+                "status": status,
+                "created_at": clean_iso_timestamp(created_at, f"action {action_id} created_at"),
+                "updated_at": clean_iso_timestamp(updated_at, f"action {action_id} updated_at"),
+                "started_at": clean_iso_timestamp(row.get("Started At"), f"action {action_id} started_at"),
+                "done_at": clean_iso_timestamp(row.get("Done At"), f"action {action_id} done_at"),
+                "cancelled_at": clean_iso_timestamp(row.get("Cancelled At"), f"action {action_id} cancelled_at"),
+                "baseline_revision": int(revision),
+                "related_plan_item_ids": normalize_stable_id_list(re.split(r"\s*[;,]\s*", row.get("Related Plan Items", "")), "related_plan_item_ids"),
+                "related_flow_edge_ids": normalize_stable_id_list(re.split(r"\s*[;,]\s*", row.get("Related Flow Edges", "")), "related_flow_edge_ids"),
+                "source": {
+                    "artifact_id": "ACTION-LEDGER",
+                    "artifact_path": "actions/action-ledger.md",
+                    "source_fingerprint": fingerprint,
+                },
+            }
+        )
+    return {
+        "action_flow_schema_version": "1.0.0",
+        "actions": sorted(actions, key=lambda item: item["action_id"]),
+        "compatibility": {"strategy": "preserve-unmapped", "migration_error_code": "ADP-ACTION-FLOW-MIGRATION-REQUIRED"},
+    }
 
 
 def assign_if_meaningful(row: dict[str, str], field_name: str, value: str) -> None:
@@ -1383,44 +1523,165 @@ def parse_date(value: str) -> date | None:
         return None
 
 
+def validate_update_targets(memory_root: Path, updates: list[StatusUpdate]) -> None:
+    for update in updates:
+        record_path = memory_root / "workstreams" / update.workstream_id / "delivery-record.md"
+        if record_path.is_file():
+            record_path.read_text(encoding="utf-8")
+            continue
+        project_action_scope = (
+            update.workstream_id in PROJECT_ACTION_IDS
+            and bool(update.actions)
+            and not any(
+                [
+                    update.status,
+                    update.phase,
+                    update.progress,
+                    update.blockers,
+                    update.risks,
+                    update.dependencies,
+                    update.change_notes,
+                ]
+            )
+        )
+        if update.actions and (project_action_scope or not has_wdr_delta(update)):
+            continue
+        raise ValueError(f"delivery-record.md not found for workstream {update.workstream_id}")
+
+
+def changed_staged_files(memory_root: Path, staged_root: Path) -> list[Path]:
+    changed: list[Path] = []
+    for staged_path in sorted(path for path in staged_root.rglob("*") if path.is_file()):
+        relative = staged_path.relative_to(staged_root)
+        canonical_path = memory_root / relative
+        if not canonical_path.is_file() or canonical_path.read_bytes() != staged_path.read_bytes():
+            changed.append(relative)
+    return changed
+
+
+def write_temp_bytes(path: Path, content: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(raw_temp)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
+def publish_staged_files(memory_root: Path, staged_root: Path, relatives: list[Path]) -> None:
+    originals = {
+        relative: (memory_root / relative).read_bytes() if (memory_root / relative).is_file() else None
+        for relative in relatives
+    }
+    prepared: dict[Path, Path] = {}
+    committed: list[Path] = []
+    try:
+        for relative in relatives:
+            prepared[relative] = write_temp_bytes(memory_root / relative, (staged_root / relative).read_bytes())
+        for relative in relatives:
+            os.replace(prepared[relative], memory_root / relative)
+            committed.append(relative)
+    except BaseException:
+        for relative in reversed(committed):
+            canonical_path = memory_root / relative
+            original = originals[relative]
+            if original is None:
+                canonical_path.unlink(missing_ok=True)
+            else:
+                restore_temp = write_temp_bytes(canonical_path, original)
+                os.replace(restore_temp, canonical_path)
+        raise
+    finally:
+        for temp_path in prepared.values():
+            temp_path.unlink(missing_ok=True)
+
+
+def remap_staged_paths(value: Any, staged_root: Path, memory_root: Path) -> Any:
+    if isinstance(value, dict):
+        return {key: remap_staged_paths(item, staged_root, memory_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [remap_staged_paths(item, staged_root, memory_root) for item in value]
+    if isinstance(value, str):
+        try:
+            return str(memory_root / Path(value).resolve().relative_to(staged_root.resolve()))
+        except ValueError:
+            return value
+    return value
+
+
 def run_update(args: argparse.Namespace) -> int:
     project_root = require_project_root(args.project_root)
     memory_root = resolve_memory_root(project_root, args.memory_root)
     updates = updates_from_args(args)
     baseline_context = validate_milestone_updates(memory_root, updates)
-    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-    action_updates = [action for update in updates for action in update.actions]
+    validate_update_targets(memory_root, updates)
+    memory_root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".status-sync-", dir=memory_root.parent) as temp_dir:
+        staged_root = Path(temp_dir) / "memory"
+        if memory_root.is_dir():
+            shutil.copytree(memory_root, staged_root)
+        else:
+            staged_root.mkdir(parents=True)
+        timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        action_updates = [action for update in updates for action in update.actions]
+        staged_ledger_path = staged_root / ACTION_LEDGER_REL
+        if action_updates:
+            staged_ledger_path = ensure_action_ledger(staged_root, False)
+            ledger_result = upsert_actions(staged_ledger_path, action_updates, timestamp, False)
+        else:
+            ledger_result = {
+                "rows": parse_action_ledger(staged_ledger_path),
+                "actions_registered": [],
+                "actions_updated": [],
+                "actions_closed": [],
+                "unresolved_gaps": [],
+            }
+        staged_action_flow_path = staged_root / "views/action-flow.json"
+        if staged_ledger_path.is_file():
+            staged_action_flow_path.parent.mkdir(parents=True, exist_ok=True)
+            staged_action_flow_path.write_text(
+                json.dumps(build_action_flow_contract(ledger_result["rows"], staged_ledger_path), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        ledger_rows = ledger_result["rows"]
+        hydrate_action_updates_from_ledger(updates, ledger_rows)
+        results = [apply_update(staged_root, update, ledger_rows, baseline_context, False) for update in updates]
+        for result, update in zip(results, updates, strict=True):
+            update_action_ids = {action.action_id for action in update.actions if action.action_id}
+            update_keys = {
+                action_key(action.owner, action.workstream, action.action, action.source)
+                for action in update.actions
+            }
+            result["actions_registered"] = related_action_ids(
+                ledger_rows, ledger_result["actions_registered"], update_action_ids, update_keys
+            )
+            result["actions_updated"] = related_action_ids(
+                ledger_rows, ledger_result["actions_updated"], update_action_ids, update_keys
+            )
+            result["actions_closed"] = related_action_ids(
+                ledger_rows, ledger_result["actions_closed"], update_action_ids, update_keys
+            )
+            result["unresolved_gaps"] = sorted(
+                set([*result.get("unresolved_gaps", []), *ledger_result["unresolved_gaps"]])
+            )
+        errors = [item for item in results if not item.get("ok")]
+        if errors:
+            raise ValueError("; ".join(str(item.get("error") or "status update failed") for item in errors))
+        changed = changed_staged_files(memory_root, staged_root)
+        if not args.dry_run:
+            publish_staged_files(memory_root, staged_root, changed)
+        results = remap_staged_paths(results, staged_root, memory_root)
     ledger_path = memory_root / ACTION_LEDGER_REL
-    if action_updates:
-        ledger_path = ensure_action_ledger(memory_root, args.dry_run)
-        ledger_result = upsert_actions(ledger_path, action_updates, timestamp, args.dry_run)
-    else:
-        ledger_result = {
-            "rows": parse_action_ledger(ledger_path),
-            "actions_registered": [],
-            "actions_updated": [],
-            "actions_closed": [],
-            "unresolved_gaps": [],
-        }
-    ledger_rows = ledger_result["rows"]
-    hydrate_action_updates_from_ledger(updates, ledger_rows)
-    results = [apply_update(memory_root, update, ledger_rows, baseline_context, args.dry_run) for update in updates]
-    for result, update in zip(results, updates, strict=True):
-        update_action_ids = {action.action_id for action in update.actions if action.action_id}
-        update_keys = {
-            action_key(action.owner, action.workstream, action.action, action.source)
-            for action in update.actions
-        }
-        related_registered = related_action_ids(ledger_rows, ledger_result["actions_registered"], update_action_ids, update_keys)
-        related_updated = related_action_ids(ledger_rows, ledger_result["actions_updated"], update_action_ids, update_keys)
-        related_closed = related_action_ids(ledger_rows, ledger_result["actions_closed"], update_action_ids, update_keys)
-        result["actions_registered"] = related_registered
-        result["actions_updated"] = related_updated
-        result["actions_closed"] = related_closed
-        result["unresolved_gaps"] = sorted(set([*result.get("unresolved_gaps", []), *ledger_result["unresolved_gaps"]]))
-    errors = [item for item in results if not item.get("ok")]
+    action_flow_path = memory_root / "views/action-flow.json"
     payload = {
-        "ok": not errors,
+        "ok": True,
         "mode": "update",
         "dry_run": args.dry_run,
         "project_root": str(project_root),
@@ -1428,6 +1689,7 @@ def run_update(args: argparse.Namespace) -> int:
         "baseline_path": str(baseline_context["path"]) if baseline_context else None,
         "baseline_revision": baseline_context["revision"] if baseline_context else None,
         "action_ledger": str(ledger_path),
+        "action_flow": str(action_flow_path) if action_flow_path.is_file() or args.dry_run else None,
         "actions_registered": ledger_result["actions_registered"],
         "actions_updated": ledger_result["actions_updated"],
         "actions_closed": ledger_result["actions_closed"],
@@ -1435,7 +1697,7 @@ def run_update(args: argparse.Namespace) -> int:
         "updates": results,
     }
     emit(payload, args.output)
-    return 0 if not errors else 1
+    return 0
 
 
 def hydrate_action_updates_from_ledger(updates: list[StatusUpdate], rows: list[dict[str, str]]) -> None:

@@ -59,7 +59,7 @@ Add only fields that are reliable:
 - `--dependency "<dependency change>"`
 - `--change-note "<scope/change note>"`
 - `--next-action "<owner/action/due>"`
-- `--milestone-id <baseline-milestone-id>` with `--milestone-status <planned|at-risk|done|blocked>`
+- `--milestone-id <baseline-milestone-id>` with `--milestone-status <planned|in-progress|at-risk|done|blocked>`
 - `--milestone-forecast YYYY-MM-DD` and/or `--milestone-actual YYYY-MM-DD`
 - `--milestone-evidence "<traceable source>"`; repeat as needed
 - `--baseline-revision <expected-revision>` to reject stale updates
@@ -113,6 +113,10 @@ For milestone updates, the script reads `plans/program-baseline.md` and validate
 For one Source + Action that affects many workstreams, send one canonical action with `workstream: "program"` and `affected_workstreams`; do not repeat the same action under every workstream unless owner, due trigger, or deliverable differs. `program` actions update the ledger and daily log without requiring a `workstreams/program/delivery-record.md`.
 
 The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, upserts `actions/action-ledger.md`, and returns JSON with changed fields, milestone IDs, baseline revision/path, action results, unresolved gaps, and action candidates. Any milestone mapping failure blocks the whole command before WDR, daily-log, or action-ledger writes. Legacy `next_actions` remain supported; structured `actions` are the durable source for the FDE action list.
+
+## Versioned Action Flow Relations
+
+`references/action-flow-relation-contract-v1.md` and `assets/action-flow-relation-v1.schema.json` own stable action identity, timestamps, explicit related plan-item/flow-edge IDs, half-open processed windows, and unmapped migration behavior for canonical graph overlays. Structured actions may supply `created_at`, `started_at`, `done_at`, `cancelled_at`, `baseline_revision`, `related_plan_item_ids`, and `related_flow_edge_ids`. The writer preserves those fields in the ledger and publishes `views/action-flow.json`; terminal actions cannot silently reopen. Legacy rows remain readable but are omitted from the canonical relation file until migrated, never inferred.
 
 ## Staleness
 

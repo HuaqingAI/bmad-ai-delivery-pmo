@@ -1,0 +1,57 @@
+{
+  "accepted_panel_preserved": {
+    "baseline_revision": 1,
+    "layout_id": "sha256:9c47f49eb4f38f102189f9055f96d16d4fecc00c38b9b343c500cc3621f805d9",
+    "panel_id": "sha256:85342eef700ccdffefaeea09d81608f589aba459c7556a00f14fec2be3fe4629",
+    "topology_id": "sha256:85c9c040b547d0f1ecb6a0ba9cda1f06b42dd228d8bb83bd6132dc48872fdaf1"
+  },
+  "checks": {
+    "accepted_flow_matches_revision_1": true,
+    "accepted_panel_still_binds_revision_1": true,
+    "overlay_only_variants_change_overlay_and_flow": true,
+    "overlay_only_variants_preserve_state": true,
+    "overlay_only_variants_preserve_topology": true,
+    "revision_incremented": true,
+    "stale_revision_consumers_blocked": true,
+    "topology_identity_changed_at_revision_break": true
+  },
+  "overlay_only_variants": {
+    "flow_graph_ids": [
+      "sha256:2a20d4c9e97e130bc0f02c7b645356ff3c566f21601e2a26e72cf954ab21935d",
+      "sha256:2dc2cc015f4a3825f8f7c169e48c34d290a954afa3917820a02940890479e8d6",
+      "sha256:5d2b888812ec1e64957289b88058c1cc59513bcd4591c0982dca565558f00686"
+    ],
+    "overlay_snapshot_ids": [
+      "sha256:82c0d495cf0da833f031003c6939ec78bd91b8cdab05a5cc420f84bb106ce38f",
+      "sha256:f35706e976221dbccc03473d238cb3f3182a81a7597825194906e85698fa92e2",
+      "sha256:fa7b522c140c2d253cf1e31447144784505c533d047f292f683ade7e0491ea49"
+    ],
+    "state_snapshot_ids": [
+      "sha256:75df940c37904cf5417cd429d8920ce98712d27e6644e972b26ada5ec8e3e5fb"
+    ],
+    "topology_ids": [
+      "sha256:85c9c040b547d0f1ecb6a0ba9cda1f06b42dd228d8bb83bd6132dc48872fdaf1"
+    ]
+  },
+  "revision_break": {
+    "blocking_codes": [
+      "actual.baseline_revision_mismatch",
+      "adp-completeness-f5cf9a1dbe73"
+    ],
+    "edge_counts": [
+      24,
+      24
+    ],
+    "from_revision": 1,
+    "from_topology_id": "sha256:85c9c040b547d0f1ecb6a0ba9cda1f06b42dd228d8bb83bd6132dc48872fdaf1",
+    "node_counts": [
+      15,
+      15
+    ],
+    "post_update_audit_id": "input-audit-ea1012e703e89535",
+    "post_update_disposition": "blocked",
+    "to_revision": 2,
+    "to_topology_id": "sha256:582adf69cd40785025688748351e1c01ccfca5b88fa4f39913703d46faaf2abb"
+  },
+  "status": "complete"
+}

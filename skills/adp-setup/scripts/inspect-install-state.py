@@ -10,6 +10,7 @@ Exit codes: 0=success, 1=validation error, 2=runtime error
 
 import argparse
 import csv
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -465,6 +466,61 @@ def expected_skill_order(module_help_path: Path) -> list[str]:
         fail(f"Could not read {module_help_path}: {error}", 2)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def inspect_resource_contract(
+    resource_path: Path,
+    item: dict[str, Any],
+) -> tuple[str, dict[str, Any], list[str], str | None]:
+    if not resource_path.is_file():
+        return "missing", {}, [], None
+
+    findings: list[str] = []
+    actual_sha256 = sha256_file(resource_path)
+    expected_sha256 = str(item.get("sha256") or "").removeprefix("sha256:")
+    if expected_sha256 and actual_sha256 != expected_sha256:
+        findings.append(
+            f"checksum mismatch: expected sha256:{expected_sha256}, got sha256:{actual_sha256}"
+        )
+
+    expected_contract = item.get("contract")
+    actual_contract: dict[str, Any] = {}
+    if isinstance(expected_contract, dict):
+        try:
+            with resource_path.open("r", encoding="utf-8-sig") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            findings.append(f"contract JSON unreadable: {error}")
+        else:
+            if not isinstance(payload, dict):
+                findings.append("contract JSON must be an object")
+            else:
+                actual_contract = {
+                    key: payload.get(key)
+                    for key in expected_contract
+                }
+                for key, expected in expected_contract.items():
+                    actual = payload.get(key)
+                    if actual != expected:
+                        findings.append(
+                            f"contract field {key!r} mismatch: expected {expected!r}, got {actual!r}"
+                        )
+
+    if findings:
+        integrity = "invalid"
+    elif expected_sha256 or isinstance(expected_contract, dict):
+        integrity = "verified"
+    else:
+        integrity = "present"
+    return integrity, actual_contract, findings, actual_sha256
+
+
 def inspect_installed_components(
     skills_root: Path,
     expected_skills: list[str],
@@ -491,6 +547,9 @@ def inspect_installed_components(
             owner = str(item.get("owner_skill") or "").strip()
             relative = str(item.get("path") or "").strip()
             resource_path = skills_root / owner / Path(relative)
+            integrity, contract, findings, actual_sha256 = inspect_resource_contract(
+                resource_path, item
+            )
             resource_rows.append(
                 {
                     "owner_skill": owner,
@@ -498,6 +557,11 @@ def inspect_installed_components(
                     "purpose": str(item.get("purpose") or ""),
                     "resolved_path": str(resource_path.resolve()),
                     "installed": bool(owner and relative and resource_path.is_file()),
+                    "integrity": integrity,
+                    "contract": contract,
+                    "expected_sha256": item.get("sha256"),
+                    "actual_sha256": actual_sha256,
+                    "findings": findings,
                 }
             )
 
@@ -507,9 +571,14 @@ def inspect_installed_components(
         for item in resource_rows
         if not item["installed"]
     ]
+    invalid_resources = [
+        f"{item['owner_skill']}/{item['path']}"
+        for item in resource_rows
+        if item["integrity"] == "invalid"
+    ]
     help_available = module_help_path.is_file()
     return {
-        "ready": help_available and not missing_skills and not missing_resources,
+        "ready": help_available and not missing_skills and not missing_resources and not invalid_resources,
         "module_help_path": str(module_help_path.resolve()),
         "module_help_available": help_available,
         "expected_skill_order": expected_skills,
@@ -517,6 +586,7 @@ def inspect_installed_components(
         "missing_skills": missing_skills,
         "shared_resources": resource_rows,
         "missing_shared_resources": missing_resources,
+        "invalid_shared_resources": invalid_resources,
     }
 
 
@@ -535,6 +605,9 @@ def memory_upgrade_report(project_root: Path) -> dict[str, Any]:
         "schemas/program-baseline.md",
         "schemas/program-status.md",
         "snapshots/program-status",
+        "snapshots/flow-graph",
+        "snapshots/management-panel",
+        "views/management-panel",
         "views/program-status.json",
         "views/program-status.md",
         "intake/program-baseline-candidate.json",
@@ -685,6 +758,14 @@ def main() -> None:
             "Missing shared resources: "
             + ", ".join(installation["missing_shared_resources"])
         )
+    if installation["invalid_shared_resources"]:
+        invalid_details = []
+        for item in installation["shared_resources"]:
+            if item["integrity"] == "invalid":
+                invalid_details.append(
+                    f"{item['owner_skill']}/{item['path']}: {'; '.join(item['findings'])}"
+                )
+        gaps.append("Invalid shared resources: " + " | ".join(invalid_details))
     upgrade_report = build_upgrade_report(
         config,
         str(module_code),

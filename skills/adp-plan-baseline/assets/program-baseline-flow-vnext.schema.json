@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:adp:program-baseline:flow-vnext",
+  "title": "ADP program baseline flow dependency vNext",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["flow_contract_version", "baseline_id", "revision", "gates", "milestones"],
+  "properties": {
+    "flow_contract_version": {"const": "1.0.0"},
+    "baseline_id": {"$ref": "#/$defs/stableId"},
+    "revision": {"type": "integer", "minimum": 1},
+    "gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}},
+    "milestones": {"type": "array", "items": {"$ref": "#/$defs/milestone"}}
+  },
+  "$defs": {
+    "stableId": {"type": "string", "pattern": "[A-Za-z0-9][A-Za-z0-9._-]*"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "reference", "confirmed_by"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1},
+        "confirmed_by": {"type": "string", "minLength": 1},
+        "source_fingerprint": {"type": "string", "pattern": "sha256:[0-9a-f]{64}"}
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact_id", "operator", "expected_value", "source"],
+      "properties": {
+        "fact_id": {"$ref": "#/$defs/stableId"},
+        "operator": {"enum": ["equals", "not-equals", "in", "not-in"]},
+        "expected_value": {},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    },
+    "dependencyObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id", "predecessor", "relationship_type", "source", "baseline_revision"],
+      "properties": {
+        "edge_id": {"$ref": "#/$defs/stableId"},
+        "predecessor": {"$ref": "#/$defs/stableId"},
+        "relationship_type": {"enum": ["dependency", "aggregation", "conditional", "rework", "informational"]},
+        "condition": {"$ref": "#/$defs/condition"},
+        "label": {"type": "string", "minLength": 1},
+        "source": {"$ref": "#/$defs/source"},
+        "baseline_revision": {"type": "integer", "minimum": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"relationship_type": {"const": "conditional"}}, "required": ["relationship_type"]},
+          "then": {"required": ["condition"]},
+          "else": {"not": {"required": ["condition"]}}
+        }
+      ]
+    },
+    "inputDependency": {
+      "oneOf": [
+        {"$ref": "#/$defs/stableId"},
+        {"$ref": "#/$defs/dependencyObject"}
+      ]
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lane_type", "lane_id"],
+      "properties": {
+        "lane_type": {"enum": ["program", "workstream"]},
+        "lane_id": {"$ref": "#/$defs/stableId"}
+      }
+    },
+    "nodeBase": {
+      "type": "object",
+      "required": ["id", "name", "node_type", "lane", "confirmation_status", "source", "dependencies", "baseline_revision"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stableId"},
+        "name": {"type": "string", "minLength": 1},
+        "node_type": {"enum": ["milestone", "gate"]},
+        "lane": {"$ref": "#/$defs/lane"},
+        "confirmation_status": {"const": "approved"},
+        "source": {"$ref": "#/$defs/source"},
+        "dependencies": {"type": "array", "items": {"$ref": "#/$defs/inputDependency"}},
+        "predecessor_rule": {"const": "all"},
+        "baseline_revision": {"type": "integer", "minimum": 1}
+      }
+    },
+    "gate": {
+      "allOf": [
+        {"$ref": "#/$defs/nodeBase"},
+        {"type": "object", "properties": {"node_type": {"const": "gate"}}, "unevaluatedProperties": false}
+      ]
+    },
+    "milestone": {
+      "allOf": [
+        {"$ref": "#/$defs/nodeBase"},
+        {
+          "type": "object",
+          "properties": {
+            "node_type": {"const": "milestone"},
+            "lane": {
+              "type": "object",
+              "properties": {"lane_type": {"const": "workstream"}},
+              "required": ["lane_type", "lane_id"]
+            }
+          },
+          "unevaluatedProperties": false
+        }
+      ]
+    }
+  }
+}

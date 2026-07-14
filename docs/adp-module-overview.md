@@ -132,6 +132,9 @@ flowchart LR
 | PRD、架构、Story、实现、验证推进 | BMM skills | ADP 不接管交付生命周期，仍由 BMM 完成详细产物。 |
 | BMM 阶段产物进入项目状态 | `adp-bmm-checkpoint-sync` | 把 checkpoint 的项目级摘要、依赖、风险、证据和缺口写入 WDR。 |
 | 日常 owner 状态变化 | `adp-status-sync` | 只同步轻量状态、blocker、next action 和 daily log。 |
+| 生成 canonical 进度与流程状态 | `adp-program-status` | 发布同一份完成度、计划健康度和节点执行/健康双轴。 |
+| 生成 canonical 流程图 | `adp-flow-graph` | 从 baseline/status/action/risk 显式关系生成拓扑、状态、scoped counts 和不可变快照。 |
+| 刷新或归档管理面板 | `adp-management-panel` | 从审计通过的 status/roadmap/flow/meeting 输入生成可直接 `file://` 打开的三视图 HTML；不重算事实。 |
 | 会议、线下沟通、业务反馈 | `adp-meeting-sync` | 把每个会议项归类为事实、决策、行动、WDR 更新、业务问题包或 no-op。 |
 | 风险、依赖、阻塞、范围变更、业务决策 | `adp-risk-dependency-change-review` | 生成风险矩阵、依赖图、变更警告和 Business Decision Packet。 |
 | L0 合同、门禁、NFR、证据规则变动 | `adp-l0-reference-sync` | 抽取对下游工作线有影响的 L0 约束，并暴露 WDR/readiness 缺口。 |
@@ -146,7 +149,9 @@ flowchart LR
 4. 每条线继续按 BMM 推进；PRD、架构、Epic/Story、实现、验证等节点用 `adp-bmm-checkpoint-sync` 同步到 ADP。
 5. 例会和线下沟通用 `adp-meeting-sync` 闭环，日常小变化用 `adp-status-sync` 更新。
 6. 遇到跨线风险、业务决策、L0 变化或验收准备时，分别调用对应 review/sync skill。
-7. 项目负责人需要全局视图、行动清单或周报时，调用 `adp-agent-program-lead`。
+7. 审计通过后依次刷新 `adp-program-status`、`adp-roadmap-sync` 和 `adp-flow-graph`；会议场景继续由 `adp-meeting-pack` 选择子图。
+8. 运行 `adp-management-panel` 刷新负责人/FDE/双周会静态面板；仅在明确 distribution profile 时归档。
+9. 项目负责人需要解释结论、打开面板或路由 refresh/archive 时，调用 `adp-agent-program-lead`。
 
 ## 边界原则
 

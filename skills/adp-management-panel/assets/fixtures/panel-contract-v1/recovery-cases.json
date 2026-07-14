@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "name": "missing-program-status",
+      "mutation": {"operation": "delete", "path": "/program_status"},
+      "expected_status": "blocked",
+      "expected_code": "panel.input.program-status.missing",
+      "expected_workflows": ["adp-state-audit", "adp-program-status"]
+    },
+    {
+      "name": "progress-schema-mismatch",
+      "mutation": {"operation": "replace", "path": "/program_status/progress/progress_schema_version", "value": "1.0.0"},
+      "expected_status": "blocked",
+      "expected_code": "panel.input.progress.migration-required",
+      "expected_workflows": ["adp-state-audit", "adp-program-status"]
+    },
+    {
+      "name": "roadmap-status-mismatch",
+      "mutation": {"operation": "replace", "path": "/roadmap/program_status_snapshot_id", "value": "ps-other"},
+      "expected_status": "blocked",
+      "expected_code": "panel.input.roadmap.identity-mismatch",
+      "expected_workflows": ["adp-roadmap-sync"]
+    },
+    {
+      "name": "flow-baseline-mismatch",
+      "mutation": {"operation": "replace", "path": "/flow_graph/topology/baseline_revision", "value": 9},
+      "expected_status": "blocked",
+      "expected_code": "panel.input.flow-graph.identity-mismatch",
+      "expected_workflows": ["adp-flow-graph"]
+    },
+    {
+      "name": "missing-fde-pack",
+      "mutation": {"operation": "delete", "path": "/meeting_packs/fde-morning"},
+      "expected_status": "degraded",
+      "expected_code": "panel.input.meeting-pack.missing",
+      "expected_workflows": ["adp-meeting-pack"]
+    },
+    {
+      "name": "missing-history-selection",
+      "mutation": {"operation": "replace", "path": "/request/history_snapshot_ids/0", "value": "ps-missing"},
+      "expected_status": "degraded",
+      "expected_code": "panel.selection.history.missing",
+      "expected_workflows": ["adp-program-status"]
+    },
+    {
+      "name": "missing-future-selection",
+      "mutation": {"operation": "replace", "path": "/request/future_horizon_dates/0", "value": "2026-08-31"},
+      "expected_status": "degraded",
+      "expected_code": "panel.selection.future.missing",
+      "expected_workflows": ["adp-program-status"]
+    },
+    {
+      "name": "unsupported-locale",
+      "mutation": {"operation": "replace", "path": "/request/locale", "value": "fr-FR"},
+      "expected_status": "degraded",
+      "expected_code": "panel.locale.fallback",
+      "expected_workflows": []
+    }
+  ]
+}

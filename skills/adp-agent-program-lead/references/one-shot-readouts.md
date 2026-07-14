@@ -33,7 +33,20 @@ uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --inten
 uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent meeting-preparation --scenario <fde-morning|business-biweekly> --memory-root "{adp-state-root}"
 ```
 
-A blocked canonical result is terminal for project-level judgment: return its `reason` and `recommended_workflows` without substituting WDR status. Use canonical fields over every conflicting detail field.
+Panel requests use the same canonical consumer before routing. It never renders HTML or writes browser state:
+
+```bash
+uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-readiness --panel-view <project-lead|fde-morning|business-biweekly> --memory-root "{adp-state-root}"
+uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-refresh --panel-view <view> --memory-root "{adp-state-root}"
+uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-open --panel-view <view> --memory-root "{adp-state-root}"
+uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-archive --panel-view <view> --distribution-profile <internal-full|shareable-summary> --memory-root "{adp-state-root}"
+```
+
+Open/readiness verifies the embedded manifest/model, immutable bundle, and program-status snapshot identity before explanation. FDE explanation includes only pack/window/readiness/lifecycle, canonical comparable delta, related forecast milestones, blockers, commitments, owner-selected flow state, and scoped counts; business explanation includes the canonical next-period outlook, decisions/readiness, and budgeted flow spine. Archive routing marks official association pending until `adp-meeting-sync` writes an applied receipt containing that panel ID.
+
+A blocked canonical result is terminal for project-level judgment: return its `reason` and `recommended_workflows` without substituting WDR status. The consumer lineage-validates the requested management Markdown against canonical snapshot, audit, baseline, source fingerprints, progress/flow identity, locale, generator, and render profile; a present but stale or mismatched file remains blocked. Use canonical fields over every conflicting detail field.
+
+The legacy `scripts/render_program_views.py` entry point accepts only its read-only core options. `ADP-PL-LEGACY-RENDERER-MIGRATION-REQUIRED` means an old renderer-only option was supplied: run `adp-program-status` to regenerate canonical views, then rerun this consumer.
 
 For operational detail, choose exactly one capability ID and optionally repeat `--workstream`:
 

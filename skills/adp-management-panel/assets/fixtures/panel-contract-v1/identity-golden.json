@@ -1,0 +1,12 @@
+{
+  "internal-full": {
+    "panel_model_id": "sha256:e7abae2c9dcaccd57457218eb5125d468919ed463972c94d3b3819e7bc391ee4",
+    "layout_id": "sha256:f0b704d44a215dd7f9de96f9386558b34d4506aa9bfd24aac440e38f4d76b754",
+    "panel_id": "sha256:4f2839be44d68e52121eda81d59fd852daf5dfce6475902a5bea828e4b65aed2"
+  },
+  "shareable-summary": {
+    "panel_model_id": "sha256:3ae39383ac5b24f06c141b243197b37e61555a3b43e0624e6cbe2970a8f9469f",
+    "layout_id": "sha256:954c23355c8e882d74bea67f539438a083d7b7a39f53cc8ed2dc002ffe770985",
+    "panel_id": "sha256:611000064e8752583082997ae9b5530301dde06513fba0d706f050edf6987311"
+  }
+}

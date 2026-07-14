@@ -261,7 +261,10 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertEqual(result["mode"], "activation")
             self.assertEqual(result["resolved"]["communication_language"], "Chinese")
             self.assertEqual(result["resolved"]["document_output_language"], "German")
-            self.assertEqual(Path(result["resolved"]["adp_state_root"]), project_root / "state" / "adp")
+            self.assertEqual(
+                Path(result["resolved"]["adp_state_root"]).resolve(),
+                (project_root / "state" / "adp").resolve(),
+            )
             self.assertTrue(result["config_found"])
             self.assertEqual(result["configuration_errors"], [])
             self.assertFalse(result["state_exists"])
@@ -269,7 +272,10 @@ class AdpStatePrepassTests(unittest.TestCase):
             overridden = json.loads(
                 self.run_script(project_root, "--activation", "--memory-root", "explicit-memory").stdout
             )
-            self.assertEqual(Path(overridden["resolved"]["adp_state_root"]), project_root / "explicit-memory")
+            self.assertEqual(
+                Path(overridden["resolved"]["adp_state_root"]).resolve(),
+                (project_root / "explicit-memory").resolve(),
+            )
             self.assertEqual(overridden["value_sources"]["adp_state_root"], "cli --memory-root")
 
     def test_capability_rejects_noncanonical_wording(self) -> None:

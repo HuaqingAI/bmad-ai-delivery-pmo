@@ -5,12 +5,15 @@
 
 import copy
 import json
+import os
+import socket
 import tempfile
 import threading
 import unittest
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import sys
 
@@ -19,13 +22,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adp_effective_config import resolve_effective_config
 from baseline import (
     MARKER,
+    LOCK_RELATIVE,
+    baseline_write_lock,
     command_create,
     command_inspect,
+    command_lock_inspect,
+    command_lock_recover,
     command_update,
     command_validate,
     parse_baseline,
     paths,
     render_markdown,
+    flow_structural_diff,
+    normalized_dependencies,
     stamp_model,
     validate_model,
 )
@@ -71,6 +80,65 @@ def approved_model() -> dict:
 
 
 class BaselineValidationTests(unittest.TestCase):
+    def test_vnext_dependencies_validate_parallel_aggregation_and_normalize_legacy(self) -> None:
+        model = approved_model()
+        model["flow_contract_version"] = "1.0.0"
+        source = copy.deepcopy(model["gates"][0]["source"])
+        model["gates"].append(
+            {
+                "id": "GATE-MERGE",
+                "name": "Merge",
+                "planned_date": "2026-11-01",
+                "owner": "Program owner",
+                "node_type": "gate",
+                "lane": {"lane_type": "program", "lane_id": "PROGRAM"},
+                "confirmation_status": "approved",
+                "source": source,
+                "dependencies": [
+                    {"edge_id": "E-DESIGN-MERGE", "predecessor": "GATE-DESIGN", "relationship_type": "aggregation", "source": source, "baseline_revision": 1},
+                    {"edge_id": "E-CHECKOUT-MERGE", "predecessor": "MS-CHECKOUT", "relationship_type": "aggregation", "source": source, "baseline_revision": 1},
+                ],
+                "predecessor_rule": "all",
+            }
+        )
+        stored = stamp_model(model, 1, "2026-07-13T00:00:00Z")
+
+        result = validate_model(stored, execute=True)
+        edges = normalized_dependencies(stored)
+
+        self.assertTrue(result["valid"], result["findings"])
+        self.assertEqual({edge["edge_id"] for edge in edges if edge["target"] == "GATE-MERGE"}, {"E-DESIGN-MERGE", "E-CHECKOUT-MERGE"})
+        legacy = next(edge for edge in edges if edge["target"] == "MS-CHECKOUT")
+        self.assertRegex(legacy["edge_id"], r"^legacy-[0-9a-f]{20}$")
+
+    def test_vnext_rejects_duplicate_cross_revision_conditional_and_illegal_cycle(self) -> None:
+        model = stamp_model(approved_model(), 2, "2026-07-13T00:00:00Z")
+        source = copy.deepcopy(model["gates"][0]["source"])
+        model["gates"][0]["dependencies"] = [
+            {"edge_id": "E-DUP", "predecessor": "MS-CHECKOUT", "relationship_type": "dependency", "source": source, "baseline_revision": 2}
+        ]
+        model["milestones"][0]["dependencies"] = [
+            {"edge_id": "E-DUP", "predecessor": "GATE-DESIGN", "relationship_type": "conditional", "source": source, "baseline_revision": 1}
+        ]
+
+        result = validate_model(model, execute=True)
+        codes = {item["code"] for item in result["findings"]}
+
+        self.assertFalse(result["valid"])
+        self.assertTrue({"flow.edge.duplicate", "flow.condition.missing", "flow.reference.cross_revision", "flow.cycle.illegal"} <= codes)
+
+    def test_flow_diff_is_stable_by_node_and_edge_identity(self) -> None:
+        old = stamp_model(approved_model(), 1, "2026-07-13T00:00:00Z")
+        new = copy.deepcopy(old)
+        new["milestones"][0]["name"] = "Checkout accepted"
+        new["milestones"][0]["dependencies"] = []
+
+        diff = flow_structural_diff(old, new)
+
+        self.assertEqual(diff["nodes_changed"], ["MS-CHECKOUT"])
+        self.assertEqual(len(diff["edges_removed"]), 1)
+        self.assertEqual(diff["edges_added"], [])
+
     def test_stored_model_requires_revision_timestamps_and_item_lineage(self) -> None:
         model = stamp_model(approved_model(), 1, "2026-07-12T00:00:00Z")
         model.pop("created_at")
@@ -107,6 +175,27 @@ class BaselineValidationTests(unittest.TestCase):
         codes = {item["code"] for item in result["findings"]}
         self.assertIn("weight.total", codes)
         self.assertIn("completion_criteria.missing", codes)
+
+    def test_non_finite_weights_are_blocked_at_the_weight_field(self) -> None:
+        for weight in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(weight=weight):
+                model = approved_model()
+                model["weighting"] = {
+                    "enabled": True,
+                    "completion_measure": "Accepted scope points",
+                    "source": {"type": "decision", "reference": "decisions.md#weights", "confirmed_by": "Program owner"},
+                }
+                model["milestones"][0]["weight"] = weight
+
+                result = validate_model(model, execute=True, stored=False)
+
+                self.assertFalse(result["valid"])
+                self.assertTrue(
+                    any(
+                        item["code"] == "weight.non_finite" and item["path"] == "milestones[0].weight"
+                        for item in result["findings"]
+                    )
+                )
 
     def test_candidate_state_cannot_execute(self) -> None:
         model = approved_model()
@@ -204,6 +293,19 @@ class BaselineCommandTests(unittest.TestCase):
         self.assertEqual(result["findings"][0]["code"], "preview.token_required")
         self.assertFalse(paths(self.root)[0].exists())
 
+    def test_create_preview_token_is_stable_when_default_current_time_advances(self) -> None:
+        with patch("baseline.now_iso", side_effect=["2026-07-12T00:00:00Z", "2026-07-13T00:00:00Z"]):
+            _, preview = command_create(self.create_args(False, as_of=None), self.root, self.config)
+            code, executed = command_create(
+                self.create_args(True, preview["preview_token"], as_of=None),
+                self.root,
+                self.config,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(executed["preview_token"], preview["preview_token"])
+        self.assertNotEqual(executed["baseline_fingerprint"], preview["baseline_fingerprint"])
+
     def test_concurrent_create_allows_exactly_one_writer(self) -> None:
         _, preview = command_create(self.create_args(False), self.root, self.config)
         barrier = threading.Barrier(2)
@@ -217,6 +319,111 @@ class BaselineCommandTests(unittest.TestCase):
 
         self.assertEqual([code for code, _ in results].count(0), 1)
         self.assertEqual(parse_baseline(paths(self.root)[0])["revision"], 1)
+
+    def test_lock_inspect_distinguishes_live_owner_and_blocks_recovery(self) -> None:
+        args = Namespace(as_of="2026-07-14T00:00:00Z")
+
+        with baseline_write_lock(self.root):
+            inspect_code, inspected = command_lock_inspect(args, self.root, self.config)
+            recover_code, recovered = command_lock_recover(args, self.root, self.config)
+
+        self.assertEqual(inspect_code, 0)
+        self.assertEqual(inspected["lock"]["owner_state"], "live-owner")
+        self.assertEqual(inspected["lock"]["owner"]["pid"], os.getpid())
+        self.assertEqual(recover_code, 1)
+        self.assertEqual(recovered["status"], "blocked")
+        self.assertEqual(recovered["findings"][0]["code"], "write.lock_live_owner")
+        self.assertFalse(recovered["recovery_performed"])
+
+    def test_lock_recover_removes_orphan_and_preserves_immutable_audit_receipt(self) -> None:
+        lock_path = self.root / LOCK_RELATIVE
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "pid": 99999999,
+                    "hostname": socket.gethostname(),
+                    "process_start": "dead-process",
+                    "owner_token": "orphan-token",
+                    "acquired_at": "2026-07-13T00:00:00Z",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        args = Namespace(as_of="2026-07-14T00:00:00Z")
+
+        inspect_code, inspected = command_lock_inspect(args, self.root, self.config)
+        recover_code, recovered = command_lock_recover(args, self.root, self.config)
+
+        self.assertEqual(inspect_code, 0)
+        self.assertEqual(inspected["lock"]["owner_state"], "orphan")
+        self.assertEqual(inspected["lock"]["reason"], "owner-process-missing")
+        self.assertEqual(recover_code, 0)
+        self.assertEqual(recovered["status"], "complete")
+        self.assertTrue(recovered["recovery_performed"])
+        self.assertFalse(lock_path.exists())
+        receipt_path = Path(recovered["audit_receipt"])
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["event"], "baseline-lock-orphan-recovered")
+        self.assertEqual(receipt["orphan_owner"]["owner_token"], "orphan-token")
+        self.assertEqual(receipt["lock_fingerprint"], inspected["lock"]["lock_fingerprint"])
+        self.assertFalse(receipt_path.with_suffix(receipt_path.suffix + ".tmp").exists())
+
+    def test_lock_recovery_audit_failure_keeps_orphan_lock(self) -> None:
+        lock_path = self.root / LOCK_RELATIVE
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text('{"pid":99999999}\n', encoding="utf-8")
+        args = Namespace(as_of="2026-07-14T00:00:00Z")
+
+        with patch("baseline.create_immutable_json", side_effect=OSError("audit disk full")):
+            code, result = command_lock_recover(args, self.root, self.config)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "ADP-BASELINE-LOCK-RECOVERY-AUDIT-FAILED")
+        self.assertTrue(lock_path.is_file())
+
+    def test_lock_recovery_remove_failure_returns_receipt_and_keeps_lock(self) -> None:
+        lock_path = self.root / LOCK_RELATIVE
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text('{"pid":99999999}\n', encoding="utf-8")
+        real_unlink = Path.unlink
+
+        def fail_lock_only(path: Path, *args: object, **kwargs: object) -> None:
+            if path == lock_path:
+                raise PermissionError("lock is read-only")
+            real_unlink(path, *args, **kwargs)
+
+        with patch("pathlib.Path.unlink", autospec=True, side_effect=fail_lock_only):
+            code, result = command_lock_recover(
+                Namespace(as_of="2026-07-14T00:00:00Z"), self.root, self.config
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(result["error_code"], "ADP-BASELINE-LOCK-RECOVERY-REMOVE-FAILED")
+        self.assertTrue(lock_path.is_file())
+        self.assertTrue(Path(result["audit_receipt"]).is_file())
+
+    def test_concurrent_lock_recovery_has_one_audited_removal(self) -> None:
+        lock_path = self.root / LOCK_RELATIVE
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text('{"pid":99999999}\n', encoding="utf-8")
+        barrier = threading.Barrier(2)
+
+        def recover(_: int) -> tuple[int, dict]:
+            barrier.wait()
+            return command_lock_recover(Namespace(as_of="2026-07-14T00:00:00Z"), self.root, self.config)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(recover, range(2)))
+
+        self.assertEqual(sum(bool(result["recovery_performed"]) for _, result in results), 1)
+        self.assertTrue(all(code == 0 for code, _ in results))
+        receipts = list((lock_path.parent / "lock-recovery").glob("*.json"))
+        self.assertEqual(len(receipts), 1)
+        self.assertFalse(lock_path.exists())
 
     def test_update_requires_matching_revision_and_archives_exact_prior_model(self) -> None:
         self.execute_create()
@@ -299,6 +506,42 @@ class BaselineCommandTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["findings"][0]["code"], "preview.token_mismatch")
         self.assertFalse((paths(self.root)[1] / "program-baseline-r1.md").exists())
+
+    def test_update_preview_token_is_stable_when_default_current_time_advances(self) -> None:
+        self.execute_create()
+        change_path = self.root / "change.json"
+        change_path.write_text(
+            json.dumps(
+                {
+                    "changes": {"project": {"target_date": "2027-01-15"}},
+                    "change_reason": "Approved target change",
+                    "decision_source": {"type": "decision", "reference": "decisions.md#D-12", "confirmed_by": "Sponsor"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        preview_args = Namespace(
+            input=str(change_path),
+            expected_revision=1,
+            execute=False,
+            preview_token=None,
+            as_of=None,
+        )
+
+        with patch("baseline.now_iso", side_effect=["2026-07-13T00:00:00Z", "2026-07-14T00:00:00Z"]):
+            _, preview = command_update(preview_args, self.root, self.config)
+            execute_args = Namespace(
+                input=str(change_path),
+                expected_revision=1,
+                execute=True,
+                preview_token=preview["preview_token"],
+                as_of=None,
+            )
+            code, executed = command_update(execute_args, self.root, self.config)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(executed["preview_token"], preview["preview_token"])
+        self.assertNotEqual(executed["baseline_fingerprint"], preview["baseline_fingerprint"])
 
     def test_concurrent_update_allows_exactly_one_writer(self) -> None:
         self.execute_create()

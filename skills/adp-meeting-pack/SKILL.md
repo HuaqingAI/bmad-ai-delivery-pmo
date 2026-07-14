@@ -9,7 +9,7 @@ description: Renders ADP meeting view packs. Use when the user says "adp-meeting
 
 This workflow renders localized, source-traceable AI Delivery PMO meeting packs from canonical program status, roadmap, audit, and shared memory. Act as a delivery-state packager: select the audience slice and produce a concise Markdown pack plus machine-stable JSON without recomputing project status or treating the pack as durable state.
 
-The consumers are FDE owners, project leads, business stakeholders, `adp-meeting-sync`, and `adp-status-sync`. They need agenda-ready boards with sources, owners, closure criteria, and explicit gaps so meeting outcomes can be written back to ADP memory after the call.
+The consumers are FDE owners, project leads, business stakeholders, `adp-management-panel`, `adp-meeting-sync`, and `adp-status-sync`. They need agenda-ready boards with sources, owners, closure criteria, explicit panel lifecycle, and gaps so meeting outcomes can be written back to ADP memory after the call.
 
 ## Resolution rules
 
@@ -32,6 +32,8 @@ Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root unle
 Meeting packs are derived views under `{workflow.meeting_pack_output_path}/{workflow.run_folder_pattern}`. They are not a source of truth. Meeting outcomes must flow back through `adp-meeting-sync` and, for action-ledger changes, `adp-status-sync`.
 
 Both scenarios require `views/program-status.json`; route a missing or invalid view through `adp-plan-baseline`, input `adp-state-audit`, then `adp-program-status`. Business biweekly also requires `views/roadmap.json` for planned/forecast/actual timeline facts and blocks when its program-status snapshot or baseline revision is stale; recover through `adp-roadmap-sync`. Never reconstruct overall status, confidence, variance, or period delta inside the meeting workflow.
+
+When `views/flow-graph.json` is current, select a scenario subgraph without changing it: FDE starts only from exact confirmed-window allocations and adds one dependency context layer; business biweekly keeps the program lane, critical path, and at most the configured information-budget count of abnormal engineering nodes. The distillate retains parent graph identities, selection identity, scoped allocations, and unmapped records. A missing or unmatched scope produces explicit `adp-flow-graph` recovery and never recomputes counts in the meeting workflow.
 
 The renderer resolves `document_output_language` and `meeting_pack_item_limit` through the shared ADP effective config. System headings, labels, statuses, empty states, warnings, and instructions render in Chinese or English; canonical JSON keys/enums and quoted source facts remain unchanged. Unsupported language explicitly falls back to English in both the run result and artifacts. Locale belongs in metadata, not in `-zh` scenario directories.
 
@@ -69,7 +71,7 @@ The renderer writes:
 
 It validates both destinations before ingestion or writes. On a collision, show the reported paths and ask an interactive user to authorize `--replace` or choose a unique `--output-dir`; headless runs remain blocked unless the caller already supplied one of those choices.
 
-Each repeated section is deterministically sorted and capped by `meeting_pack_item_limit`. The Markdown appendix reports omitted counts; every omitted row remains available in the paired JSON under `appendix.omitted`. Business biweekly leads with canonical overall status, confidence, target baseline/forecast, gates, top variances, and decisions. FDE morning leads with the confirmed window, period delta, current blockers, commitments, due items, and cross-line escalations; full workstream history does not enter the main meeting path.
+Each repeated section is deterministically sorted and capped by `meeting_pack_item_limit`. The Markdown appendix reports omitted counts; every omitted row remains available in the paired JSON under `appendix.omitted`. Business biweekly leads with canonical overall status, confidence, target baseline/forecast, gates, top variances, and decisions. FDE morning leads with the confirmed window, canonical comparable progress delta, window-related forecast milestones, current blockers, commitments, due items, and cross-line escalations; full workstream history and resident long-range forecast do not enter the main meeting path.
 
 Treat the renderer as the sole authority for scenario-specific board selection and distillate contents. If it cannot run, reuse only a previously completed Markdown/JSON pair; otherwise report the exact failure and renderer command needed after recovery.
 
@@ -83,4 +85,4 @@ In headless mode, return only the renderer's stdout JSON unchanged, with no pros
 {"ok":false,"status":"blocked","scenario":"{meeting_scenario}","outputs":{"markdown":null,"distillate":null,"audit":null},"recommended_workflows":[],"reason":"No uv or Python 3.10+ runtime can execute render_meeting_pack.py","recovery":"Install uv or Python 3.10+ and rerun the renderer command"}
 ```
 
-Pass the distillate's emitted lineage unchanged as `meeting.lineage` to `adp-meeting-sync`. It retains the existing meeting-pack/audit/roadmap fields and adds program-status snapshot ID, baseline revision, source fingerprints, input audit ID, and generator version for the stage-9 write-back extension. After a successful result is handled, run `{workflow.on_complete}` if non-empty.
+The JSON distillate explicitly publishes stable `meeting_pack_id`, confirmed `meeting_window`, `readiness`, `lifecycle`, audit/status/flow identities, selected node/edge IDs, scoped counts, and information-budget metadata. Pass its emitted lineage unchanged as `meeting.lineage` to `adp-meeting-sync`. A pack starts as `pre-meeting-snapshot`; only a matching receipt may expose `current-derived`, `sync-failed`, or `post-sync-official`. After a successful result is handled, run `{workflow.on_complete}` if non-empty.

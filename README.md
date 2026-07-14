@@ -1,6 +1,6 @@
 # AI Delivery PMO
 
-AI Delivery PMO is a planned BMad module for coordinating complex delivery programs across multiple FDE workstreams.
+AI Delivery PMO is a BMad module for coordinating complex delivery programs across multiple FDE workstreams. Version 1.3 adds canonical progress/flow projections and a self-contained offline HTML management panel without replacing the existing JSON and Markdown contracts.
 
 The module does not replace BMM. Each workstream still uses the normal BMM lifecycle for brainstorming, PRD, architecture, epics, stories, implementation, and validation. AI Delivery PMO adds the project-level management layer around those artifacts: shared state, readiness scoring, dependency/risk visibility, evidence tracking, L0 reference sync, and stakeholder-facing views.
 
@@ -25,20 +25,28 @@ The plan has been reviewed against an X-Large Shopify-to-custom-site migration s
 
 Migration/cutover projects can reference L0 outputs for data definitions, interface contracts, cutover gates, rollback/fallback standards, monitoring, and evidence rules. ADP indexes and extracts cross-line implications; it does not own L0 delivery.
 
-## Planned Skills
+## Module Skills
 
+- `adp-setup`
 - `adp-project-kickoff`
+- `adp-plan-baseline`
 - `adp-workstream-register`
 - `adp-bmm-checkpoint-sync`
 - `adp-meeting-sync`
 - `adp-status-sync`
-- `adp-acceptance-readiness-review`
 - `adp-risk-dependency-change-review`
 - `adp-l0-reference-sync`
+- `adp-acceptance-readiness-review`
+- `adp-state-audit`
+- `adp-program-status`
+- `adp-roadmap-sync`
+- `adp-flow-graph`
+- `adp-meeting-pack`
+- `adp-management-panel`
 - `adp-agent-program-lead`
 
 ## Plan
 
-The current module plan is in [`skills/reports/fde-delivery-module-plan.md`](skills/reports/fde-delivery-module-plan.md).
+The current v1.3 module plan is in [`skills/reports/adp-html-management-panel-v1.3-plan.md`](skills/reports/adp-html-management-panel-v1.3-plan.md). Release behavior and migration notes are in [`skills/reports/adp-v1.3-release-notes.md`](skills/reports/adp-v1.3-release-notes.md).
 
 For a concise module overview and the skill-labeled delivery flow, see [`docs/adp-module-overview.md`](docs/adp-module-overview.md).

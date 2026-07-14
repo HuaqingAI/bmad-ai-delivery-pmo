@@ -31,7 +31,7 @@ Resolve the actual project root, then inspect install state:
 uv run "{skill-root}/scripts/inspect-install-state.py" "{project-root}" --module-yaml "{skill-root}/assets/module.yaml" --module-help "{skill-root}/assets/module-help.csv" --installed-skills-dir "{skill-root}/.."
 ```
 
-Use the JSON as the source of truth for module metadata, `install_state`, effective values and sources, installed-skill/shared-resource inspection, `upgrade_report`, `headless_ready`, output directories, and the installed skills root. Missing skills or the shared effective-config resolver/catalog make the installation unready; route that gap to module reinstallation before writing or legacy cleanup. Memory migration notices do not authorize setup to change memory. If arguments provide values (for example `accept all defaults`, `--headless`, or inline core/module values), overlay them on `answers_template` and skip those prompts.
+Use the JSON as the source of truth for module metadata, `install_state`, effective values and sources, installed-skill/shared-resource inspection, `upgrade_report`, `headless_ready`, output directories, and the installed skills root. Missing or invalid skills, schemas, templates, locale catalogs, panel runtime assets, or ELK version/license/checksum make the installation unready; route that gap to module reinstallation before writing or legacy cleanup. Memory migration notices do not authorize setup to change memory. If arguments provide values (for example `accept all defaults`, `--headless`, or inline core/module values), overlay them on `answers_template` and skip those prompts.
 
 ## Headless Contract
 
@@ -67,7 +67,7 @@ Use `status: "blocked"` with `unresolved_gaps` when input or installed resources
 
 ## Collect Configuration
 
-Use `effective_defaults`, `default_sources`, `config_warnings`, and `missing_required_inputs` from the inspect JSON. Ask once for missing values or overrides, showing computed defaults in brackets; never tell the user to "press enter" or "leave blank" in chat. The four ADP team settings are `default_reporting_cadence` (`weekly|biweekly|custom`), `status_stale_after_days` (1-90), `schedule_variance_tolerance_days` (0-90), and `meeting_pack_item_limit` (3-30).
+Use `effective_defaults`, `default_sources`, `config_warnings`, and `missing_required_inputs` from the inspect JSON. Ask once for missing values or overrides, showing computed defaults in brackets; never tell the user to "press enter" or "leave blank" in chat. The seven ADP settings are the existing cadence/staleness/variance/meeting limit values plus `management_panel_history_periods` (1-52, default 12), `management_panel_default_view` (`project-lead|fde-morning|business-biweekly`), and `management_panel_archive_mode` (`explicit|meeting-only|always`). A one-off archive still requires the runtime distribution profile `internal-full|shareable-summary`; setup never turns that safety boundary into a durable default.
 
 ## Write Files
 
@@ -104,7 +104,7 @@ Run `uv run "{skill-root}/scripts/cleanup-legacy.py" --help` for full usage.
 
 ## Confirm
 
-Run the install-state inspection again after merge and cleanup. Use the final inspection plus merge/help/cleanup JSON to report module version, config value sources and fallbacks, installed skills and shared resources, config paths, help rows replaced, output directories, legacy cleanup, and memory migration needs. State explicitly that the reported preserved memory/baseline paths were untouched, then display `module_greeting`.
+Run the install-state inspection again after merge and cleanup. Use the final inspection plus merge/help/cleanup JSON to report module version, config value sources and fallbacks, installed skills and shared resources, ELK version/license/checksum disposition, config paths, help rows replaced, output directories, legacy cleanup, and memory migration needs. State explicitly that the reported preserved memory/baseline/panel paths were untouched, then display `module_greeting`. A v1.2 memory tree missing the v1.3 flow/panel directories remains a non-destructive kickoff migration need, not permission for setup to create a panel.
 
 ## Outcome
 

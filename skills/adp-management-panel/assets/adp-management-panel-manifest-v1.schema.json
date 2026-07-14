@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:adp:management-panel:manifest:v1",
+  "title": "ADP management panel embedded manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "panel_schema_version",
+    "panel_model_id",
+    "panel_id",
+    "generated_at",
+    "as_of",
+    "reporting_period",
+    "baseline_revision",
+    "program_status_snapshot_id",
+    "roadmap_fingerprint",
+    "topology_id",
+    "state_snapshot_id",
+    "overlay_snapshot_id",
+    "flow_graph_id",
+    "meeting_pack_ids",
+    "history_snapshot_ids",
+    "future_horizon_dates",
+    "flow_selection_ids",
+    "source_fingerprints",
+    "input_audit_ids",
+    "artifact_audit_ids",
+    "locale",
+    "generator_version",
+    "layout_id",
+    "layout",
+    "distribution_profile",
+    "redaction",
+    "safe_embedding",
+    "recovery_status"
+  ],
+  "properties": {
+    "panel_schema_version": {"const": "1.0.0"},
+    "panel_model_id": {"$ref": "#/$defs/hashId"},
+    "panel_id": {"$ref": "#/$defs/hashId"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "as_of": {"type": "string", "format": "date"},
+    "reporting_period": {"$ref": "#/$defs/reportingPeriod"},
+    "baseline_revision": {"type": "integer", "minimum": 1},
+    "program_status_snapshot_id": {"$ref": "#/$defs/stableId"},
+    "roadmap_fingerprint": {"$ref": "#/$defs/hashId"},
+    "topology_id": {"$ref": "#/$defs/hashId"},
+    "state_snapshot_id": {"$ref": "#/$defs/hashId"},
+    "overlay_snapshot_id": {"$ref": "#/$defs/hashId"},
+    "flow_graph_id": {"$ref": "#/$defs/hashId"},
+    "meeting_pack_ids": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fde-morning", "business-biweekly"],
+      "properties": {
+        "fde-morning": {"$ref": "#/$defs/stableId"},
+        "business-biweekly": {"$ref": "#/$defs/stableId"}
+      }
+    },
+    "history_snapshot_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true},
+    "future_horizon_dates": {"type": "array", "items": {"type": "string", "format": "date"}, "uniqueItems": true},
+    "flow_selection_ids": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project-lead", "fde-morning", "business-biweekly"],
+      "properties": {
+        "project-lead": {"$ref": "#/$defs/hashId"},
+        "fde-morning": {"$ref": "#/$defs/hashId"},
+        "business-biweekly": {"$ref": "#/$defs/hashId"}
+      }
+    },
+    "source_fingerprints": {
+      "type": "object",
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"$ref": "#/$defs/hashId"}
+    },
+    "input_audit_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true},
+    "artifact_audit_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true},
+    "locale": {"$ref": "#/$defs/locale"},
+    "generator_version": {"type": "string", "minLength": 1},
+    "layout_id": {"$ref": "#/$defs/hashId"},
+    "layout": {"$ref": "#/$defs/layout"},
+    "distribution_profile": {"enum": ["internal-full", "shareable-summary"]},
+    "redaction": {"$ref": "#/$defs/redaction"},
+    "safe_embedding": {"$ref": "#/$defs/safeEmbedding"},
+    "recovery_status": {"enum": ["ready", "degraded", "blocked"]}
+  },
+  "$defs": {
+    "stableId": {"type": "string", "pattern": "[A-Za-z0-9][A-Za-z0-9._-]*"},
+    "hashId": {"type": "string", "pattern": "sha256:[0-9a-f]{64}"},
+    "reportingPeriod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date"}
+      }
+    },
+    "locale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "resolved", "fallback", "catalog_schema_version"],
+      "properties": {
+        "requested": {"type": "string", "minLength": 1},
+        "resolved": {"enum": ["zh-CN", "en"]},
+        "fallback": {"type": "boolean"},
+        "catalog_schema_version": {"const": "1.0.0"}
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layout_contract_version", "engine", "engine_version", "engine_license", "engine_sha256", "config_sha256", "node_dimensions_version"],
+      "properties": {
+        "layout_contract_version": {"const": "1.0.0"},
+        "engine": {"const": "elk-layered"},
+        "engine_version": {"type": "string", "minLength": 1},
+        "engine_license": {"type": "string", "minLength": 1},
+        "engine_sha256": {"$ref": "#/$defs/hashId"},
+        "config_sha256": {"$ref": "#/$defs/hashId"},
+        "node_dimensions_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_version", "profile", "removed_fields", "hidden_nodes", "hidden_edges", "hidden_sources", "hidden_counts", "topology_reconnected"],
+      "properties": {
+        "policy_version": {"const": "1.0.0"},
+        "profile": {"enum": ["internal-full", "shareable-summary"]},
+        "removed_fields": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "hidden_nodes": {"type": "integer", "minimum": 0},
+        "hidden_edges": {"type": "integer", "minimum": 0},
+        "hidden_sources": {"type": "integer", "minimum": 0},
+        "hidden_counts": {"type": "integer", "minimum": 0},
+        "topology_reconnected": {"const": false}
+      }
+    },
+    "safeEmbedding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "escaped_codepoints", "dom_text_only", "svg_allowlist", "forbidden"],
+      "properties": {
+        "strategy": {"const": "json-script-text"},
+        "escaped_codepoints": {
+          "type": "array",
+          "const": ["U+003C", "U+003E", "U+0026", "U+2028", "U+2029"]
+        },
+        "dom_text_only": {"const": true},
+        "svg_allowlist": {"type": "array", "items": {"enum": ["svg", "g", "path", "line", "rect", "circle", "polygon", "text", "tspan", "title", "desc", "defs", "marker"]}, "uniqueItems": true},
+        "forbidden": {
+          "type": "array",
+          "const": ["innerHTML", "foreignObject", "event-attributes", "external-href", "source-css"]
+        }
+      }
+    }
+  }
+}

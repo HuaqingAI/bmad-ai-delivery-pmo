@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -104,6 +105,21 @@ class SyncMeetingTests(unittest.TestCase):
         )
         return memory_root
 
+    def create_panel_archive(self, memory_root: Path, panel_id: str) -> str:
+        archive = memory_root / "snapshots/management-panel" / f"{panel_id}.html"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "panel_id": panel_id,
+            "distribution_profile": "internal-full",
+        }
+        archive.write_text(
+            '<script type="application/json" id="adp-panel-manifest">'
+            + json.dumps(manifest, sort_keys=True)
+            + "</script>\n",
+            encoding="utf-8",
+        )
+        return archive.relative_to(memory_root).as_posix()
+
     def test_sync_writes_meeting_daily_decision_packet_and_wdr(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -151,7 +167,7 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual(intake["updates"][0]["id"], "l1-checkout")
             self.assertEqual(intake["updates"][0]["source"], "adp-meeting-sync")
             self.assertEqual(intake["updates"][0]["actions"][0]["owner"], "FDE-A")
-            archive_rel = Path(result["touched"]["meeting_archives"][0]).relative_to(memory_root).as_posix()
+            archive_rel = Path(result["touched"]["meeting_archives"][0]).resolve().relative_to(memory_root.resolve()).as_posix()
             self.assertEqual(intake["updates"][0]["actions"][0]["source"], f"{archive_rel}#M-001")
             self.assertIn("--updates-file", result["next_actions"][0])
             decision_log = (memory_root / "decisions" / "decision-log.md").read_text(encoding="utf-8")
@@ -205,10 +221,105 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual(intake["meeting"]["meeting_instance_id"], result["meeting"]["meeting_instance_id"])
             receipt = json.loads(Path(result["receipt"]).read_text(encoding="utf-8"))
             self.assertEqual(receipt["status"], "applied")
+            self.assertEqual(receipt["input_hash"], receipt["plan_fingerprint"])
             self.assertEqual(receipt["lineage"], expected_lineage)
             cursor = json.loads(Path(result["cursor"]["path"]).read_text(encoding="utf-8"))
             self.assertEqual(cursor["meeting_instance_id"], result["meeting"]["meeting_instance_id"])
             self.assertEqual(cursor["ended_at"], "2026-07-10T09:30:00+08:00")
+
+    def test_successful_sync_receipt_preserves_official_panel_archive_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            panel_id = "sha256:" + "a" * 64
+            archive = self.create_panel_archive(memory_root, panel_id)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-10",
+                    "type": "FDE morning",
+                    "title": "Official panel association",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                    "lineage": self.vnext_lineage(),
+                    "panel_archive": {
+                        "panel_id": panel_id,
+                        "archive": archive,
+                        "distribution_profile": "internal-full",
+                    },
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "no_op",
+                        "text": "No durable change",
+                        "no_op_reason": "Meeting confirmed the displayed state.",
+                    }
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+            receipt = json.loads(Path(result["receipt"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(receipt["status"], "applied")
+            self.assertEqual(receipt["official_panel_archive"]["panel_id"], panel_id)
+            self.assertEqual(receipt["official_panel_archive"]["archive"], archive)
+            self.assertEqual(receipt["official_panel_archive"]["receipt_status"], "applied")
+            self.assertEqual(result["official_panel_archive"]["panel_id"], panel_id)
+
+    def test_dry_run_and_invalid_archive_never_claim_official_panel_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            panel_id = "sha256:" + "b" * 64
+            archive = self.create_panel_archive(memory_root, panel_id)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-10",
+                    "type": "business biweekly",
+                    "title": "Dry-run archive",
+                    "source": "meeting pack",
+                    "started_at": "2026-07-10T09:00:00+08:00",
+                    "ended_at": "2026-07-10T09:20:00+08:00",
+                    "lineage": self.vnext_lineage("business-biweekly"),
+                    "panel_archive": {
+                        "panel_id": panel_id,
+                        "archive": archive,
+                        "distribution_profile": "internal-full",
+                    },
+                },
+                "items": [{"id": "M-001", "classification": "no_op", "text": "Dry run", "no_op_reason": "Fixture"}],
+            }
+
+            dry_run = self.run_script_with_args(project_root, plan, "--dry-run")
+            self.assertEqual(dry_run["replay_status"], "planned")
+            self.assertNotIn("official_panel_archive", dry_run)
+            self.assertFalse(Path(dry_run["planned_receipt"]).exists())
+
+            plan["meeting"]["panel_archive"]["panel_id"] = "sha256:" + "c" * 64
+            plan_path = project_root / "invalid-panel.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--plan",
+                    str(plan_path),
+                    "--meeting-note-template",
+                    str(DEFAULT_MEETING_TEMPLATE),
+                    "--business-decision-packet-template",
+                    str(DEFAULT_PACKET_TEMPLATE),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            invalid = json.loads(completed.stdout)
+            self.assertFalse(invalid["ok"])
+            self.assertEqual(invalid["status"], "blocked")
+            self.assertNotIn("official_panel_archive", invalid)
 
     def test_meeting_pack_distillate_injects_verified_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -493,6 +604,46 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertIn("no_op requires no_op_reason", errors)
             self.assertIn("meeting.lineage is missing", errors)
 
+    def test_impossible_calendar_meeting_date_fails_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-02-30",
+                    "type": "FDE internal sync",
+                    "title": "Impossible date",
+                    "source": "notes.md",
+                },
+                "items": [{"id": "M-001", "classification": "fact", "text": "Must not land."}],
+            }
+            plan_path = project_root / "invalid-date-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--plan",
+                    str(plan_path),
+                    "--meeting-note-template",
+                    str(DEFAULT_MEETING_TEMPLATE),
+                    "--business-decision-packet-template",
+                    str(DEFAULT_PACKET_TEMPLATE),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("meeting.date must be a real calendar date", "\n".join(result["validation_errors"]))
+            self.assertEqual(list((memory_root / "meetings").iterdir()), [])
+            self.assertEqual(list((memory_root / "daily").iterdir()), [])
+
     def test_sync_without_actions_does_not_write_status_intake(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -622,6 +773,79 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual(before, (daily_path.read_text(encoding="utf-8"), wdr_path.read_text(encoding="utf-8"), decision_path.read_text(encoding="utf-8")))
             self.assertEqual(len(list((memory_root / "meetings").glob("*.md"))), 1)
             self.assertEqual(len(list((memory_root / "meetings" / "receipts").glob("*.json"))), 1)
+
+    def test_concurrent_same_and_different_instances_do_not_lose_or_duplicate_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            base_meeting = {
+                "date": "2026-07-10",
+                "type": "FDE internal sync",
+                "source": "notes.md",
+            }
+            same = {
+                "meeting": {**base_meeting, "meeting_instance_id": "mi-concurrent-same", "title": "Concurrent same"},
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "decision",
+                        "text": "Keep concurrent decision A.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "confirmer": "FDE-A",
+                    }
+                ],
+            }
+            different = {
+                "meeting": {**base_meeting, "meeting_instance_id": "mi-concurrent-other", "title": "Concurrent other"},
+                "items": [
+                    {
+                        "id": "M-002",
+                        "classification": "decision",
+                        "text": "Keep concurrent decision B.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "confirmer": "FDE-A",
+                    }
+                ],
+            }
+            plan_paths = []
+            for index, payload in enumerate((same, same, different), start=1):
+                path = project_root / f"concurrent-{index}.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                plan_paths.append(path)
+
+            def invoke(path: Path) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        str(project_root),
+                        "--plan",
+                        str(path),
+                        "--meeting-note-template",
+                        str(DEFAULT_MEETING_TEMPLATE),
+                        "--business-decision-packet-template",
+                        str(DEFAULT_PACKET_TEMPLATE),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                completed = list(pool.map(invoke, plan_paths))
+            results = [json.loads(item.stdout) for item in completed]
+
+            self.assertEqual([item.returncode for item in completed], [0, 0, 0], results)
+            self.assertEqual({item["replay_status"] for item in results}, {"applied", "idempotent-no-op"})
+            self.assertEqual(len(list((memory_root / "meetings/receipts").glob("*.json"))), 2)
+            self.assertEqual(len(list((memory_root / "meetings").glob("*.md"))), 2)
+            daily = (memory_root / "daily/2026-07-10.md").read_text(encoding="utf-8")
+            wdr = (memory_root / "workstreams/l1-checkout/delivery-record.md").read_text(encoding="utf-8")
+            for text in ("Keep concurrent decision A.", "Keep concurrent decision B."):
+                self.assertEqual(daily.count(text), 1)
+                self.assertEqual(wdr.count(text), 1)
+            self.assertEqual(list(memory_root.rglob("*.tmp")), [])
 
     def test_same_instance_changed_plan_is_explicit_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

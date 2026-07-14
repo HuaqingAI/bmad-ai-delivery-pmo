@@ -67,6 +67,10 @@ Keep the categories distinct because each one needs a different closure path:
 
 Every surfaced risk, dependency, blocker, or change must have an owner, affected line or lines, impact, and next action or explicit acceptance. If any field is missing, keep the item visible as a gap instead of filling it with a guess.
 
+## Versioned Risk Flow Relations
+
+`references/risk-flow-relation-contract-v1.md` and `assets/risk-flow-relation-v1.schema.json` own stable risk IDs, independent lifecycle/relation state, explicit plan-item/flow-edge relations, and unmapped migration behavior for canonical graph overlays. The generator publishes `views/risk-flow.json`; explicit inline relation fields are preserved, while absent relations stay empty for `adp-flow-graph` to expose as unmapped. No graph consumer may guess relations from prose.
+
 ## Business Decision Packets
 
 Create a packet when the next move requires business or project-lead judgment rather than FDE execution. The packet must include background, the unresolved question, options, impacts, recommendation, deadline or trigger, affected workstreams, and requested decision owner.
@@ -91,5 +95,5 @@ Do not call a project healthy just because no risk text was found. Missing risk,
 - ADP reviews project-level coordination state; BMM artifacts remain the delivery detail source.
 - Preserve source records. This workflow writes derived views and optional decision packets.
 - Combine risk, dependency, and change review in one pass so escalation is not split across disconnected reports.
-- Keep dependency maps useful as Markdown tables in v1; visual graphs are optional future work.
+- Keep the current dependency map useful as a Markdown table; canonical flow topology and overlay projection belong to `adp-flow-graph`, not this renderer.
 - For migration or cutover projects, surface cutover, rollback, data sync, monitoring, L0 gate, and evidence-rule concerns as risk or dependency items, but leave readiness scoring to `adp-acceptance-readiness-review`.

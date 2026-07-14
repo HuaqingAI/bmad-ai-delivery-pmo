@@ -38,6 +38,8 @@ Route by intent:
 | `update` | Preview or apply an approved change against an expected revision and archive the prior revision. |
 | `validate` | Read-only structural, lineage, dependency, date, critical-path, and weighting checks. |
 | `inspect` | Localized current or historical baseline summary and revision lineage. |
+| `lock-inspect` | Read-only lock owner classification: absent, live owner, orphan, or unverifiable remote owner. |
+| `lock-recover` | Remove only a revalidated orphan lock after preserving an immutable recovery receipt. |
 
 ## Candidate Judgment
 
@@ -71,7 +73,25 @@ uv run "{skill-root}/scripts/baseline.py" update "{project-root}" --input <chang
 
 `--execute` is the only write path. It recomputes the preview token under the write lock; changed input or a changed current baseline blocks the write. A revision mismatch, unapproved item, missing lineage, dependency cycle, duplicate ID, invalid ISO date, or unauditable weighting also blocks. Never edit `program-baseline.md` or `baseline-history/` manually to bypass a finding.
 
+## Lock Inspection And Recovery
+
+A blocked writer never guesses that a lock is stale. Inspect owner PID, host, acquisition time, and process identity first:
+
+```text
+uv run "{skill-root}/scripts/baseline.py" lock-inspect "{project-root}"
+```
+
+`live-owner` and unverifiable remote ownership remain blocked. Only `orphan` is recoverable; PID reuse is rejected when process identity differs. Recovery re-inspects under a recovery guard, writes an immutable receipt under `plans/lock-recovery/`, compares the lock fingerprint, and only then removes it:
+
+```text
+uv run "{skill-root}/scripts/baseline.py" lock-recover "{project-root}"
+```
+
+If receipt publication fails or the lock changes, retain the lock and return a deterministic finding. Never delete `.program-baseline.lock` manually.
+
 ## Validate And Inspect
+
+For flow-bearing vNext input, load `assets/program-baseline-flow-vnext.schema.json` and the **Flow dependency vNext contract** in `assets/program-baseline-schema.md`. Legacy string dependencies normalize by that contract before validation and topology identity; milestone/gate remains the only node boundary. Validation covers stable edge IDs, same-revision references, conditions, aggregation targets, and explicit rework cycles. Update previews expose `flow_diff` by node and edge identity.
 
 Run deterministic validation whenever another workflow questions baseline integrity:
 
@@ -90,7 +110,7 @@ Treat JSON `status`, `findings`, `baseline_revision`, `value_sources`, and `writ
 
 ## Headless Contract
 
-Headless use never asks for confirmation. `propose`, `validate`, and `inspect` remain read-only. `create` and `update` may write only with complete input, explicit `--execute`, and the reviewed `preview_token`; otherwise they do not write. A blocked run returns deterministic findings and `recommended_next_step` instead of guessing missing facts.
+Headless use never asks for confirmation. `propose`, `validate`, `inspect`, and `lock-inspect` remain read-only. `lock-recover` requires a verified orphan and emits an audit receipt. `create` and `update` may write only with complete input, explicit `--execute`, and the reviewed `preview_token`; otherwise they do not write. A blocked run returns deterministic findings and `recommended_next_step` instead of guessing missing facts.
 
 ## Guardrails
 
@@ -99,6 +119,7 @@ Headless use never asks for confirmation. `propose`, `validate`, and `inspect` r
 - Every gate and milestone has a stable ID, owner, planned date, confirmation state, source, and stamped baseline revision.
 - Weighting is optional and disabled by default. When enabled, every weighted milestone needs auditable completion criteria and weights must total 100.
 - Baseline changes require a reason and approved decision source. Forecast and actual state belong to `adp-status-sync`, never here.
+- Lock recovery writes audit receipts only; it never changes baseline facts or revision history.
 - If the scripts cannot run, prepare a review-only candidate from `assets/baseline-input.example.json`; do not write or claim deterministic validation, conflict protection, or archival.
 
 ## Output Contract

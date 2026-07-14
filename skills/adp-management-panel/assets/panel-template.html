@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN" data-adp-panel="1">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>ADP Management Panel</title>
+  <style>{{PANEL_CSS}}</style>
+</head>
+<body data-default-view="{{DEFAULT_VIEW}}">
+  <a class="skip-link" href="#panel-main">Skip to panel content</a>
+  <div id="panel-app" class="panel-app" hidden>
+    <header class="status-shell">
+      <div class="brand-block">
+        <span class="product-mark" aria-hidden="true">ADP</span>
+        <div><strong>Management Panel</strong><span id="project-name" class="muted">Program delivery</span></div>
+      </div>
+      <dl id="status-strip" class="status-strip"></dl>
+      <div id="quality-banner" class="quality-banner" role="status"></div>
+    </header>
+    <nav class="view-nav" aria-label="Panel views">
+      <a id="nav-project-lead" href="#v=1&amp;view=project-lead&amp;mode=quantitative-progress">Project lead</a>
+      <a id="nav-fde-morning" href="#v=1&amp;view=fde-morning&amp;mode=quantitative-progress">FDE morning</a>
+      <a id="nav-business-biweekly" href="#v=1&amp;view=business-biweekly&amp;mode=quantitative-progress">Business biweekly</a>
+    </nav>
+    <div class="tool-band" aria-label="Panel controls">
+      <div id="mode-control" class="segmented" role="group" aria-label="Visualization mode"></div>
+      <div class="filters" role="search">
+        <label>Workstream<select id="filter-workstream"><option value="all">All</option></select></label>
+        <label>Status<select id="filter-status"><option value="all">All</option></select></label>
+        <label>Owner<select id="filter-owner"><option value="all">All</option></select></label>
+        <label>Period<select id="filter-period"><option value="current">Current</option></select></label>
+        <label>Search<input id="filter-search" type="search" autocomplete="off"></label>
+        <button id="clear-filters" type="button">Clear</button>
+      </div>
+      <output id="result-count" aria-live="polite"></output>
+    </div>
+    <main id="panel-main" tabindex="-1">
+      <section id="dynamic-view" aria-live="polite"></section>
+    </main>
+  </div>
+  {{STATIC_FALLBACK}}
+  <script type="application/json" id="adp-panel-model">{{MODEL_JSON}}</script>
+  <script type="application/json" id="adp-panel-manifest">{{MANIFEST_JSON}}</script>
+  <script id="adp-elk-runtime">{{ELK_JS}}</script>
+  <script id="adp-panel-runtime">{{PANEL_JS}}</script>
+</body>
+</html>

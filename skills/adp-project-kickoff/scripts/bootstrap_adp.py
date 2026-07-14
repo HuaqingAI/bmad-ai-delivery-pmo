@@ -83,6 +83,8 @@ DIRECTORIES = [
     "schemas",
     "snapshots",
     "snapshots/program-status",
+    "snapshots/flow-graph",
+    "snapshots/management-panel",
     "l0",
     "meetings",
     "meetings/raw",
@@ -96,6 +98,7 @@ DIRECTORIES = [
     "audits",
     "workstreams",
     "views",
+    "views/management-panel",
     "views/meeting-packs",
     "views/meeting-packs/fde-morning",
     "views/meeting-packs/business-biweekly",
@@ -1053,6 +1056,7 @@ def main() -> int:
                 else ["Run adp-workstream-register for each active FDE workstream."]
             ),
             "Run adp-l0-reference-sync when L0 source artifacts exist.",
+            "After status, roadmap, flow-graph, and meeting inputs pass audit, run adp-management-panel refresh to create the first panel; kickoff never writes placeholder panel or flow-graph artifacts.",
         ],
     }
     emit(result, args.output)

@@ -10,10 +10,15 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import re
+import socket
+import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -31,6 +36,9 @@ MEMORY_RELATIVE = Path("_bmad-output/adp/memory")
 BASELINE_RELATIVE = MEMORY_RELATIVE / "plans/program-baseline.md"
 HISTORY_RELATIVE = MEMORY_RELATIVE / "plans/baseline-history"
 LOCK_RELATIVE = MEMORY_RELATIVE / "plans/.program-baseline.lock"
+LOCK_RECOVERY_RELATIVE = MEMORY_RELATIVE / "plans/lock-recovery"
+LOCK_RECOVERY_GUARD_RELATIVE = MEMORY_RELATIVE / "plans/.program-baseline.lock-recovering"
+LOCK_SCHEMA_VERSION = "1.0"
 
 
 class WriteLockUnavailable(RuntimeError):
@@ -145,8 +153,16 @@ def _validate_item(
         findings.append(finding("confirmation.required", "blocked", f"{path}.confirmation_status", "executed baseline items must be confirmed or approved"))
     _validate_source(item.get("source"), f"{path}.source", execute, findings)
     dependencies = item.get("dependencies", [])
-    if not isinstance(dependencies, list) or any(not isinstance(value, str) for value in dependencies):
-        findings.append(finding("dependencies.invalid", "blocked", f"{path}.dependencies", "dependencies must be an array of stable IDs"))
+    if not isinstance(dependencies, list) or any(not isinstance(value, (str, dict)) for value in dependencies):
+        findings.append(finding("dependencies.invalid", "blocked", f"{path}.dependencies", "dependencies must be stable IDs or vNext dependency objects"))
+    if item.get("node_type") is not None and item.get("node_type") != kind:
+        findings.append(finding("flow.node_type.invalid", "blocked", f"{path}.node_type", f"node_type must be {kind}"))
+    lane = item.get("lane")
+    if lane is not None:
+        if not isinstance(lane, dict) or lane.get("lane_type") not in {"program", "workstream"} or not isinstance(lane.get("lane_id"), str) or not ID_PATTERN.fullmatch(lane["lane_id"]):
+            findings.append(finding("flow.lane.invalid", "blocked", f"{path}.lane", "lane must identify a stable program or workstream lane"))
+        elif kind == "milestone" and lane.get("lane_type") != "workstream":
+            findings.append(finding("flow.lane.invalid", "blocked", f"{path}.lane", "milestones must use a workstream lane"))
     tolerance = item.get("tolerance_days")
     if tolerance is not None and (not isinstance(tolerance, int) or isinstance(tolerance, bool) or not 0 <= tolerance <= 90):
         findings.append(finding("tolerance.invalid", "blocked", f"{path}.tolerance_days", "tolerance_days must be an integer from 0 through 90"))
@@ -179,6 +195,70 @@ def _find_cycles(graph: dict[str, list[str]]) -> list[list[str]]:
     return cycles
 
 
+def normalize_legacy_dependency(
+    baseline_id: str,
+    revision: int,
+    predecessor: str,
+    target: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    seed = f"{baseline_id}\n{revision}\n{predecessor}\n{target}".encode("utf-8")
+    return {
+        "edge_id": "legacy-" + hashlib.sha256(seed).hexdigest()[:20],
+        "predecessor": predecessor,
+        "relationship_type": "dependency",
+        "source": copy.deepcopy(source),
+        "baseline_revision": revision,
+    }
+
+
+def normalized_dependencies(model: dict[str, Any]) -> list[dict[str, Any]]:
+    baseline_id = str(model.get("baseline_id") or "")
+    revision = model.get("revision") if isinstance(model.get("revision"), int) else 1
+    result: list[dict[str, Any]] = []
+    for collection in ("gates", "milestones"):
+        for item in model.get(collection, []) if isinstance(model.get(collection), list) else []:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            for supplied in item.get("dependencies", []) if isinstance(item.get("dependencies"), list) else []:
+                if isinstance(supplied, str):
+                    dep = normalize_legacy_dependency(baseline_id, revision, supplied, item["id"], item.get("source") or {})
+                elif isinstance(supplied, dict):
+                    dep = copy.deepcopy(supplied)
+                else:
+                    continue
+                dep["target"] = item["id"]
+                result.append(dep)
+    return result
+
+
+def _illegal_flow_cycle(nodes: set[str], edges: list[dict[str, Any]]) -> bool:
+    adjacency: dict[str, list[tuple[str, dict[str, Any]]]] = {node: [] for node in nodes}
+    for edge in edges:
+        predecessor = str(edge.get("predecessor") or "")
+        target = str(edge.get("target") or "")
+        if predecessor in nodes and target in nodes:
+            adjacency[predecessor].append((target, edge))
+
+    def path(current: str, goal: str, visited: set[str]) -> list[dict[str, Any]] | None:
+        if current == goal:
+            return []
+        visited.add(current)
+        for target, edge in adjacency.get(current, []):
+            if target in visited:
+                continue
+            suffix = path(target, goal, visited)
+            if suffix is not None:
+                return [edge, *suffix]
+        return None
+
+    for edge in edges:
+        suffix = path(str(edge.get("target") or ""), str(edge.get("predecessor") or ""), set())
+        if suffix is not None and any(item.get("relationship_type") != "rework" for item in [edge, *suffix]):
+            return True
+    return False
+
+
 def validate_model(model: Any, execute: bool = False, stored: bool = True) -> dict[str, Any]:
     findings: list[dict[str, str]] = []
     if not isinstance(model, dict):
@@ -192,6 +272,8 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
             findings.append(finding("field.missing", "blocked", key, f"required field {key} is missing"))
     if model.get("schema_version") != "1.0":
         findings.append(finding("schema.unsupported", "blocked", "schema_version", "schema_version must be 1.0"))
+    if model.get("flow_contract_version") not in {None, "1.0.0"}:
+        findings.append(finding("flow.schema.unsupported", "blocked", "flow_contract_version", "flow_contract_version must be 1.0.0"))
     baseline_id = model.get("baseline_id")
     if not isinstance(baseline_id, str) or not ID_PATTERN.fullmatch(baseline_id):
         findings.append(finding("baseline_id.invalid", "blocked", "baseline_id", "baseline_id must be a stable ID"))
@@ -262,13 +344,55 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
         if not isinstance(dependencies, list):
             continue
         graph[item_id] = []
-        for dependency in dependencies:
+        for supplied in dependencies:
+            dependency = supplied if isinstance(supplied, str) else supplied.get("predecessor")
             if dependency not in canonical_ids:
                 findings.append(finding("dependency.unknown", "blocked", f"{path}.dependencies", f"unknown dependency {dependency!r}"))
             else:
                 graph[item_id].append(dependency)
-    for cycle in _find_cycles(graph):
-        findings.append(finding("dependency.cycle", "blocked", "dependencies", "dependency cycle: " + " -> ".join(cycle)))
+    flow_edges = normalized_dependencies(model)
+    edge_ids: dict[str, str] = {}
+    for index, edge in enumerate(flow_edges):
+        edge_path = f"flow_edges[{index}]"
+        edge_id = edge.get("edge_id")
+        if not isinstance(edge_id, str) or not ID_PATTERN.fullmatch(edge_id):
+            findings.append(finding("flow.edge.invalid", "blocked", f"{edge_path}.edge_id", "edge_id must be a stable ID"))
+        elif edge_id in edge_ids:
+            findings.append(finding("flow.edge.duplicate", "blocked", f"{edge_path}.edge_id", f"edge_id duplicates {edge_ids[edge_id]}"))
+        else:
+            edge_ids[edge_id] = edge_path
+        relationship_type = edge.get("relationship_type")
+        if relationship_type not in {"dependency", "aggregation", "conditional", "rework", "informational"}:
+            findings.append(finding("flow.relationship.invalid", "blocked", f"{edge_path}.relationship_type", "relationship_type is not supported"))
+        if relationship_type == "conditional":
+            condition = edge.get("condition")
+            if not isinstance(condition, dict):
+                findings.append(finding("flow.condition.missing", "blocked", f"{edge_path}.condition", "conditional dependencies require a canonical condition fact"))
+            else:
+                for key in ("fact_id", "operator", "expected_value", "source"):
+                    if key not in condition:
+                        findings.append(finding("flow.condition.missing", "blocked", f"{edge_path}.condition.{key}", f"conditional fact requires {key}"))
+                if condition.get("operator") not in {"equals", "not-equals", "in", "not-in"}:
+                    findings.append(finding("flow.condition.invalid", "blocked", f"{edge_path}.condition.operator", "condition operator is invalid"))
+        elif "condition" in edge:
+            findings.append(finding("flow.condition.invalid", "blocked", f"{edge_path}.condition", "only conditional dependencies may carry condition"))
+        _validate_source(edge.get("source"), f"{edge_path}.source", execute, findings)
+        if stored and edge.get("baseline_revision") != revision:
+            findings.append(finding("flow.reference.cross_revision", "blocked", f"{edge_path}.baseline_revision", f"edge revision does not match baseline revision {revision}"))
+    node_by_id = {str(row.get("id")): row for _, row in all_items if isinstance(row.get("id"), str)}
+    for target in sorted({str(edge.get("target")) for edge in flow_edges if edge.get("relationship_type") == "aggregation"}):
+        incoming = [edge for edge in flow_edges if edge.get("target") == target and edge.get("relationship_type") == "aggregation"]
+        if len(incoming) < 2 or node_by_id.get(target, {}).get("predecessor_rule") != "all":
+            findings.append(finding("flow.aggregation.rule", "blocked", f"nodes.{target}.predecessor_rule", "aggregation targets require at least two inputs and predecessor_rule all"))
+    if all(
+        isinstance(value, str)
+        for _, row in all_items
+        for value in (row.get("dependencies", []) if isinstance(row.get("dependencies"), list) else [])
+    ):
+        for cycle in _find_cycles(graph):
+            findings.append(finding("dependency.cycle", "blocked", "dependencies", "dependency cycle: " + " -> ".join(cycle)))
+    if _illegal_flow_cycle(canonical_ids, flow_edges):
+        findings.append(finding("flow.cycle.illegal", "blocked", "dependencies", "dependency cycles are allowed only when every loop edge is explicit rework"))
     if stored and isinstance(revision, int) and not isinstance(revision, bool) and revision > 0:
         for path, row in all_items:
             if "baseline_revision" in row and row["baseline_revision"] != revision:
@@ -297,7 +421,9 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
             if not isinstance(milestone, dict):
                 continue
             weight = milestone.get("weight")
-            if not isinstance(weight, (int, float)) or isinstance(weight, bool) or weight <= 0:
+            if isinstance(weight, float) and not math.isfinite(weight):
+                findings.append(finding("weight.non_finite", "blocked", f"milestones[{index}].weight", "milestone weight must be finite"))
+            elif not isinstance(weight, (int, float)) or isinstance(weight, bool) or weight <= 0:
                 findings.append(finding("weight.missing", "blocked", f"milestones[{index}].weight", "every milestone needs a positive weight when weighting is enabled"))
             else:
                 total += float(weight)
@@ -323,6 +449,9 @@ def stamp_model(model: dict[str, Any], revision: int, timestamp: str, created_at
         for item in stamped.get(collection, []):
             if isinstance(item, dict):
                 item["baseline_revision"] = revision
+                for dependency in item.get("dependencies", []) if isinstance(item.get("dependencies"), list) else []:
+                    if isinstance(dependency, dict):
+                        dependency["baseline_revision"] = revision
     return stamped
 
 
@@ -353,7 +482,7 @@ def render_markdown(model: dict[str, Any], locale: str, config: dict[str, Any]) 
     lines.extend(["", f"## {message('baseline.gates', locale)}", ""])
     gate_rows = []
     for gate in model.get("gates", []):
-        gate_rows.append([gate["id"], gate["name"], format_date(gate["planned_date"], locale), gate["owner"], ", ".join(gate.get("dependencies", [])) or "-", message("value.yes" if gate["id"] in critical_ids else "value.no", locale), source_ref(gate.get("source"))])
+        gate_rows.append([gate["id"], gate["name"], format_date(gate["planned_date"], locale), gate["owner"], ", ".join(dependency_display(value) for value in gate.get("dependencies", [])) or "-", message("value.yes" if gate["id"] in critical_ids else "value.no", locale), source_ref(gate.get("source"))])
     lines.extend(_markdown_table(
         [message("field.id", locale), message("field.name", locale), message("field.planned_date", locale), message("field.owner", locale), message("field.dependencies", locale), message("field.critical", locale), message("field.source", locale)],
         gate_rows or [[message("baseline.no_items", locale), "-", "-", "-", "-", "-", "-"]],
@@ -361,7 +490,7 @@ def render_markdown(model: dict[str, Any], locale: str, config: dict[str, Any]) 
     lines.extend(["", f"## {message('baseline.milestones', locale)}", ""])
     milestone_rows = []
     for milestone in model.get("milestones", []):
-        milestone_rows.append([milestone["id"], milestone["name"], milestone["workstream_id"], format_date(milestone["planned_date"], locale), milestone["owner"], ", ".join(milestone.get("dependencies", [])) or "-", source_ref(milestone.get("source"))])
+        milestone_rows.append([milestone["id"], milestone["name"], milestone["workstream_id"], format_date(milestone["planned_date"], locale), milestone["owner"], ", ".join(dependency_display(value) for value in milestone.get("dependencies", [])) or "-", source_ref(milestone.get("source"))])
     lines.extend(_markdown_table(
         [message("field.id", locale), message("field.name", locale), message("field.workstream", locale), message("field.planned_date", locale), message("field.owner", locale), message("field.dependencies", locale), message("field.source", locale)],
         milestone_rows or [[message("baseline.no_items", locale), "-", "-", "-", "-", "-", "-"]],
@@ -374,6 +503,14 @@ def render_markdown(model: dict[str, Any], locale: str, config: dict[str, Any]) 
         lines.extend([f"> {message('warning.config_fallback', locale, keys=', '.join(fallbacks))}", ""])
     lines.extend([MARKER, "", "```json", canonical_json(model), "```", ""])
     return "\n".join(lines)
+
+
+def dependency_display(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return f"{value.get('edge_id', '?')}:{value.get('predecessor', '?')}:{value.get('relationship_type', '?')}"
+    return str(value)
 
 
 def atomic_write(path: Path, text: str, *, replace: bool = True) -> None:
@@ -397,25 +534,185 @@ def atomic_write(path: Path, text: str, *, replace: bool = True) -> None:
         raise
 
 
+def process_start_identity(pid: int) -> str | None:
+    proc_stat = Path(f"/proc/{pid}/stat")
+    try:
+        fields = proc_stat.read_text(encoding="utf-8").split()
+        if len(fields) > 21:
+            return f"linux-start-ticks:{fields[21]}"
+    except (OSError, UnicodeError):
+        pass
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
+    value = completed.stdout.strip()
+    return f"ps-lstart:{value}" if completed.returncode == 0 and value else None
+
+
+def process_is_live(pid: Any) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_owner_metadata(timestamp: str | None = None) -> dict[str, Any]:
+    pid = os.getpid()
+    acquired_at = (
+        now_iso(timestamp)
+        if timestamp
+        else datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    return {
+        "schema_version": LOCK_SCHEMA_VERSION,
+        "pid": pid,
+        "hostname": socket.gethostname(),
+        "process_start": process_start_identity(pid),
+        "owner_token": uuid.uuid4().hex,
+        "acquired_at": acquired_at,
+    }
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def create_exclusive_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(canonical_json_bytes(value))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def create_immutable_json(path: Path, value: dict[str, Any]) -> None:
+    try:
+        create_exclusive_json(path, value)
+    except FileExistsError:
+        existing = read_json(path)
+        if existing.get("lock_fingerprint") != value.get("lock_fingerprint") or existing.get("event") != value.get("event"):
+            raise ValueError(f"lock recovery audit collision: {path}")
+
+
+def inspect_lock_path(lock_path: Path) -> dict[str, Any]:
+    if not lock_path.is_file():
+        return {
+            "present": False,
+            "path": str(lock_path),
+            "owner_state": "absent",
+            "recoverable": False,
+            "reason": "lock-not-present",
+            "owner": None,
+            "lock_fingerprint": None,
+        }
+    raw = lock_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        owner = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        owner = None
+    if not isinstance(owner, dict):
+        return {
+            "present": True,
+            "path": str(lock_path),
+            "owner_state": "orphan",
+            "recoverable": True,
+            "reason": "invalid-owner-metadata",
+            "owner": None,
+            "lock_fingerprint": digest,
+        }
+    pid = owner.get("pid")
+    owner_host = owner.get("hostname")
+    local_host = socket.gethostname()
+    if owner_host not in {None, "", local_host}:
+        state, recoverable, reason = "remote-owner", False, "owner-host-not-local"
+    elif not process_is_live(pid):
+        state, recoverable, reason = "orphan", True, "owner-process-missing"
+    else:
+        supplied_start = owner.get("process_start")
+        current_start = process_start_identity(pid)
+        if supplied_start and current_start and supplied_start != current_start:
+            state, recoverable, reason = "orphan", True, "owner-process-identity-mismatch"
+        else:
+            state, recoverable, reason = "live-owner", False, "owner-process-live"
+    return {
+        "present": True,
+        "path": str(lock_path),
+        "owner_state": state,
+        "recoverable": recoverable,
+        "reason": reason,
+        "owner": owner,
+        "lock_fingerprint": digest,
+    }
+
+
+def inspect_baseline_lock(project_root: Path) -> dict[str, Any]:
+    return inspect_lock_path(project_root / LOCK_RELATIVE)
+
+
+@contextmanager
+def recovery_guard(project_root: Path):
+    guard_path = project_root / LOCK_RECOVERY_GUARD_RELATIVE
+    owner = lock_owner_metadata()
+    for _ in range(200):
+        try:
+            create_exclusive_json(guard_path, owner)
+            break
+        except FileExistsError:
+            state = inspect_lock_path(guard_path)
+            if state["owner_state"] == "orphan":
+                guard_path.unlink(missing_ok=True)
+                continue
+            time.sleep(0.005)
+    else:
+        raise WriteLockUnavailable(str(guard_path))
+    try:
+        yield guard_path
+    finally:
+        try:
+            current = read_json(guard_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            current = {}
+        if current.get("owner_token") == owner["owner_token"]:
+            guard_path.unlink(missing_ok=True)
+
+
 @contextmanager
 def baseline_write_lock(project_root: Path):
     lock_path = project_root / LOCK_RELATIVE
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    owner = lock_owner_metadata()
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        create_exclusive_json(lock_path, owner)
     except FileExistsError as exc:
         raise WriteLockUnavailable(str(lock_path)) from exc
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps({"pid": os.getpid()}) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
         yield lock_path
     finally:
         try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+            current = read_json(lock_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            current = {}
+        if current.get("owner_token") == owner["owner_token"]:
+            lock_path.unlink(missing_ok=True)
 
 
 def merge_patch(target: Any, patch: Any) -> Any:
@@ -457,7 +754,37 @@ def fact_model(model: dict[str, Any]) -> dict[str, Any]:
         for item in result.get(collection, []):
             if isinstance(item, dict):
                 item.pop("baseline_revision", None)
+                for dependency in item.get("dependencies", []) if isinstance(item.get("dependencies"), list) else []:
+                    if isinstance(dependency, dict):
+                        dependency.pop("baseline_revision", None)
     return result
+
+
+def flow_structural_diff(old: dict[str, Any], new: dict[str, Any]) -> dict[str, list[str]]:
+    def node_map(model: dict[str, Any]) -> dict[str, Any]:
+        return {
+            str(item["id"]): {key: value for key, value in item.items() if key not in {"baseline_revision", "dependencies"}}
+            for collection in ("gates", "milestones")
+            for item in model.get(collection, []) if isinstance(item, dict) and item.get("id")
+        }
+
+    def edge_map(model: dict[str, Any]) -> dict[str, Any]:
+        return {
+            str(edge.get("edge_id")): {key: value for key, value in edge.items() if key != "baseline_revision"}
+            for edge in normalized_dependencies(model)
+            if edge.get("edge_id")
+        }
+
+    old_nodes, new_nodes = node_map(old), node_map(new)
+    old_edges, new_edges = edge_map(old), edge_map(new)
+    return {
+        "nodes_added": sorted(set(new_nodes) - set(old_nodes)),
+        "nodes_removed": sorted(set(old_nodes) - set(new_nodes)),
+        "nodes_changed": sorted(key for key in set(old_nodes) & set(new_nodes) if old_nodes[key] != new_nodes[key]),
+        "edges_added": sorted(set(new_edges) - set(old_edges)),
+        "edges_removed": sorted(set(old_edges) - set(new_edges)),
+        "edges_changed": sorted(key for key in set(old_edges) & set(new_edges) if old_edges[key] != new_edges[key]),
+    }
 
 
 def paths(project_root: Path) -> tuple[Path, Path]:
@@ -566,6 +893,151 @@ def base_result(intent: str, project_root: Path, config: dict[str, Any]) -> dict
     }
 
 
+def command_lock_inspect(args: argparse.Namespace, project_root: Path, config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    lock = inspect_baseline_lock(project_root)
+    result = base_result("lock-inspect", project_root, config)
+    result.update(
+        {
+            "status": "complete",
+            "lock": lock,
+            "recovery_command": (
+                f'python3 "{Path(__file__).resolve()}" lock-recover "{project_root}"'
+                if lock["recoverable"]
+                else None
+            ),
+            "recommended_next_step": (
+                "Run lock-recover; it will re-inspect ownership and preserve an immutable audit receipt before removing the orphan lock."
+                if lock["recoverable"]
+                else "Wait for the live owner to finish." if lock["present"] else "No baseline lock recovery is required."
+            ),
+        }
+    )
+    return 0, result
+
+
+def command_lock_recover(args: argparse.Namespace, project_root: Path, config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    result = base_result("lock-recover", project_root, config)
+    try:
+        with recovery_guard(project_root):
+            lock = inspect_baseline_lock(project_root)
+            if not lock["present"]:
+                result.update(
+                    {
+                        "status": "complete",
+                        "lock": lock,
+                        "recovery_performed": False,
+                        "audit_receipt": None,
+                        "recommended_next_step": "No baseline lock recovery is required.",
+                    }
+                )
+                return 0, result
+            if not lock["recoverable"]:
+                code = "write.lock_live_owner" if lock["owner_state"] == "live-owner" else "write.lock_owner_unverifiable"
+                result.update(
+                    {
+                        "status": "blocked",
+                        "lock": lock,
+                        "recovery_performed": False,
+                        "audit_receipt": None,
+                        "findings": [finding(code, "blocked", lock["path"], "baseline lock owner is not an orphan and cannot be recovered")],
+                        "recommended_next_step": "Wait for the owner to finish, then rerun lock-inspect. Do not delete the lock manually.",
+                    }
+                )
+                return 1, result
+
+            recovered_at = now_iso(getattr(args, "as_of", None))
+            fingerprint_value = str(lock["lock_fingerprint"])
+            receipt_path = project_root / LOCK_RECOVERY_RELATIVE / f"baseline-lock-{fingerprint_value}.json"
+            receipt = {
+                "schema_version": "1.0",
+                "event": "baseline-lock-orphan-recovered",
+                "lock_path": lock["path"],
+                "lock_fingerprint": fingerprint_value,
+                "orphan_reason": lock["reason"],
+                "orphan_owner": lock["owner"],
+                "recovered_at": recovered_at,
+                "recovered_by": lock_owner_metadata(recovered_at),
+            }
+            try:
+                create_immutable_json(receipt_path, receipt)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                result.update(
+                    {
+                        "ok": False,
+                        "status": "error",
+                        "error_code": "ADP-BASELINE-LOCK-RECOVERY-AUDIT-FAILED",
+                        "reason": str(exc),
+                        "lock": lock,
+                        "recovery_performed": False,
+                        "audit_receipt": None,
+                        "recommended_next_step": "Restore writable audit storage and rerun lock-recover; the orphan lock was retained.",
+                    }
+                )
+                return 2, result
+
+            current = inspect_baseline_lock(project_root)
+            if not current["present"]:
+                result.update(
+                    {
+                        "status": "complete",
+                        "lock": current,
+                        "recovery_performed": False,
+                        "audit_receipt": str(receipt_path),
+                        "recommended_next_step": "Another recovery removed the same orphan lock; inspect the baseline before retrying the write.",
+                    }
+                )
+                return 0, result
+            if current["lock_fingerprint"] != fingerprint_value:
+                result.update(
+                    {
+                        "status": "blocked",
+                        "lock": current,
+                        "recovery_performed": False,
+                        "audit_receipt": str(receipt_path),
+                        "findings": [finding("write.lock_changed", "blocked", current["path"], "baseline lock changed during recovery and was retained")],
+                        "recommended_next_step": "Rerun lock-inspect and do not delete the changed lock manually.",
+                    }
+                )
+                return 1, result
+            try:
+                Path(current["path"]).unlink()
+            except OSError as exc:
+                result.update(
+                    {
+                        "ok": False,
+                        "status": "error",
+                        "error_code": "ADP-BASELINE-LOCK-RECOVERY-REMOVE-FAILED",
+                        "reason": str(exc),
+                        "lock": current,
+                        "recovery_performed": False,
+                        "audit_receipt": str(receipt_path),
+                        "recommended_next_step": "Restore lock-file permissions and rerun lock-recover; the audited orphan lock was retained.",
+                    }
+                )
+                return 2, result
+            result.update(
+                {
+                    "status": "complete",
+                    "lock": {**current, "present": False, "owner_state": "recovered", "recoverable": False},
+                    "recovery_performed": True,
+                    "audit_receipt": str(receipt_path),
+                    "recommended_next_step": "Inspect the current baseline revision, then retry the reviewed baseline write.",
+                }
+            )
+            return 0, result
+    except WriteLockUnavailable as exc:
+        result.update(
+            {
+                "status": "blocked",
+                "recovery_performed": False,
+                "audit_receipt": None,
+                "findings": [finding("write.lock_recovery_busy", "blocked", str(exc), "another baseline lock recovery is active")],
+                "recommended_next_step": "Wait for the active recovery to finish, then rerun lock-inspect.",
+            }
+        )
+        return 1, result
+
+
 def command_propose(args: argparse.Namespace, project_root: Path, config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     model = read_json(Path(args.input))
     validation = validate_model(model, execute=False, stored=False)
@@ -585,13 +1057,19 @@ def command_propose(args: argparse.Namespace, project_root: Path, config: dict[s
 
 
 def _lock_conflict(intent: str, project_root: Path, config: dict[str, Any], lock_path: str) -> tuple[int, dict[str, Any]]:
+    lock = inspect_baseline_lock(project_root)
     result = base_result(intent, project_root, config)
     result.update({
         "status": "blocked",
         "dry_run": False,
         "can_apply": False,
-        "findings": [finding("write.locked", "blocked", lock_path, "another baseline writer holds the project lock")],
-        "recommended_next_step": "Wait for the active writer to finish, inspect the current revision, and retry.",
+        "lock": lock,
+        "findings": [finding("write.locked", "blocked", lock_path, f"baseline write lock state is {lock['owner_state']}")],
+        "recommended_next_step": (
+            "Run lock-inspect and then explicit lock-recover; never delete an orphan lock manually."
+            if lock["recoverable"]
+            else "Wait for the active writer to finish, inspect the current revision, and retry."
+        ),
     })
     return 1, result
 
@@ -689,7 +1167,7 @@ def _command_update(args: argparse.Namespace, project_root: Path, config: dict[s
         findings.append(finding("change.empty", "blocked", "changes", "update does not change baseline facts"))
     blocked = any(item["severity"] == "blocked" for item in findings)
     archive_path = history_path / f"program-baseline-r{current_revision}.md"
-    result.update({"status": "blocked" if blocked else "ready", "dry_run": not args.execute, "can_apply": not blocked, "baseline_revision": current_revision, "next_revision": int(current_revision) + 1, "current_baseline_fingerprint": current_fingerprint, "baseline_fingerprint": fingerprint(updated), "preview_token": preview_token, "findings": findings, "diff": changes, "planned_files": [str(archive_path), str(baseline_path)] if not blocked else [], "recommended_next_step": "Review the diff, then repeat with --execute and --preview-token." if not blocked and not args.execute else "Resolve blocked findings and rerun update."})
+    result.update({"status": "blocked" if blocked else "ready", "dry_run": not args.execute, "can_apply": not blocked, "baseline_revision": current_revision, "next_revision": int(current_revision) + 1, "current_baseline_fingerprint": current_fingerprint, "baseline_fingerprint": fingerprint(updated), "preview_token": preview_token, "findings": findings, "diff": changes, "flow_diff": flow_structural_diff(current, updated), "planned_files": [str(archive_path), str(baseline_path)] if not blocked else [], "recommended_next_step": "Review the diff, then repeat with --execute and --preview-token." if not blocked and not args.execute else "Resolve blocked findings and rerun update."})
     if blocked:
         return 1, result
     if args.execute:
@@ -717,7 +1195,6 @@ def _command_update(args: argparse.Namespace, project_root: Path, config: dict[s
 
 def command_validate(args: argparse.Namespace, project_root: Path, config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     baseline_path = Path(args.baseline).resolve() if args.baseline else paths(project_root)[0]
-    current_path = paths(project_root)[0]
     result = base_result("validate", project_root, config)
     if not baseline_path.is_file():
         result.update({"status": "blocked", "valid": False, "baseline_path": str(baseline_path), "findings": [finding("baseline.missing", "blocked", str(baseline_path), "baseline file does not exist")], "recommended_next_step": "Run adp-plan-baseline propose or create."})
@@ -799,6 +1276,13 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = subparsers.add_parser("inspect", help="Inspect current or archived baseline without writing.")
     add_common(inspect)
     inspect.add_argument("--revision", type=int, help="Archived revision to inspect; default is current.")
+
+    lock_inspect = subparsers.add_parser("lock-inspect", help="Inspect baseline write-lock ownership without changing it.")
+    add_common(lock_inspect)
+
+    lock_recover = subparsers.add_parser("lock-recover", help="Recover only a verified orphan lock and preserve an immutable audit receipt.")
+    add_common(lock_recover)
+    lock_recover.add_argument("--as-of", help="Recovery timestamp override for controlled execution and tests.")
     return parser
 
 
@@ -817,6 +1301,8 @@ def main() -> int:
             "update": command_update,
             "validate": command_validate,
             "inspect": command_inspect,
+            "lock-inspect": command_lock_inspect,
+            "lock-recover": command_lock_recover,
         }
         try:
             code, result = handlers[args.command](args, project_root, config)

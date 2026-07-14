@@ -1,0 +1,221 @@
+{
+  "flow_graph_schema_version": "1.0.0",
+  "flow_graph_id": "sha256:cf5ddad862428cc2d7dd5504bec97e609d03702a8b4d0faa4b151b87123f2911",
+  "topology": {
+    "topology_schema_version": "1.0.0",
+    "topology_id": "sha256:35db54533104623993c3a7ac6e884232c2169de1239cf3bd60def91758754ce1",
+    "baseline_id": "PROGRAM-BASELINE",
+    "baseline_revision": 2,
+    "nodes": [
+      {
+        "node_id": "G-MERGE",
+        "name": "Program integration gate",
+        "node_type": "gate",
+        "lane": {"lane_type": "program", "lane_id": "PROGRAM"},
+        "predecessor_rule": "all",
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "gates.G-MERGE", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "node_id": "M-A",
+        "name": "Lane one complete",
+        "node_type": "milestone",
+        "lane": {"lane_type": "workstream", "lane_id": "L1"},
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "milestones.M-A", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "node_id": "M-B",
+        "name": "Lane two complete",
+        "node_type": "milestone",
+        "lane": {"lane_type": "workstream", "lane_id": "L2"},
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "milestones.M-B", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "node_id": "M-C",
+        "name": "Conditional rollout",
+        "node_type": "milestone",
+        "lane": {"lane_type": "workstream", "lane_id": "L1"},
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "milestones.M-C", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "node_id": "M-D",
+        "name": "Rework verification",
+        "node_type": "milestone",
+        "lane": {"lane_type": "workstream", "lane_id": "L2"},
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "milestones.M-D", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      }
+    ],
+    "edges": [
+      {
+        "edge_id": "E-A-MERGE",
+        "predecessor": "M-A",
+        "target": "G-MERGE",
+        "relationship_type": "aggregation",
+        "label": "lane one input",
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "gates.G-MERGE.dependencies.E-A-MERGE", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "edge_id": "E-B-MERGE",
+        "predecessor": "M-B",
+        "target": "G-MERGE",
+        "relationship_type": "aggregation",
+        "label": "lane two input",
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "gates.G-MERGE.dependencies.E-B-MERGE", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "edge_id": "E-CONDITION",
+        "predecessor": "G-MERGE",
+        "target": "M-C",
+        "relationship_type": "conditional",
+        "condition": {
+          "fact_id": "DECISION-1",
+          "operator": "equals",
+          "expected_value": "approved",
+          "source": {"artifact_id": "DECISION-1", "artifact_path": "decisions/decision-log.md", "field": "DECISION-1.status", "source_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        },
+        "label": "when approved",
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "milestones.M-C.dependencies.E-CONDITION", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "edge_id": "E-INFO",
+        "predecessor": "M-A",
+        "target": "M-B",
+        "relationship_type": "informational",
+        "label": "cross-lane context",
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "milestones.M-B.dependencies.E-INFO", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      {
+        "edge_id": "E-REWORK",
+        "predecessor": "M-C",
+        "target": "M-D",
+        "relationship_type": "rework",
+        "label": "return for verification",
+        "baseline_revision": 2,
+        "source": {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "milestones.M-D.dependencies.E-REWORK", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      }
+    ],
+    "lineage": [
+      {"artifact_id": "BASELINE-R2", "artifact_path": "plans/program-baseline.md", "field": "revision.2", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    ]
+  },
+  "state": {
+    "state_schema_version": "1.0.0",
+    "state_snapshot_id": "sha256:579d51322f5e3205b7cd8d74fa81ed21586d868d57e80b4d1176de01fc34f915",
+    "topology_id": "sha256:35db54533104623993c3a7ac6e884232c2169de1239cf3bd60def91758754ce1",
+    "as_of": "2026-07-13T12:00:00Z",
+    "nodes": [
+      {
+        "node_id": "G-MERGE",
+        "execution": {"value": "ready", "rule_id": "EXEC-READY", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.G-MERGE.execution", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]},
+        "health": {"value": "blocked", "rule_id": "HEALTH-BLOCKED", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.G-MERGE.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}
+      },
+      {
+        "node_id": "M-A",
+        "execution": {"value": "in-progress", "rule_id": "EXEC-STARTED", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-A.execution", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]},
+        "health": {"value": "at-risk", "rule_id": "HEALTH-RISK", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-A.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}
+      },
+      {
+        "node_id": "M-B",
+        "execution": {"value": "complete", "rule_id": "EXEC-COMPLETE", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-B.execution", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]},
+        "health": {"value": "on-plan", "rule_id": "HEALTH-PLAN", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-B.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}
+      },
+      {
+        "node_id": "M-C",
+        "execution": {"value": "planned", "rule_id": "EXEC-PLANNED", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-C.execution", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]},
+        "health": {"value": "indeterminate", "rule_id": "HEALTH-INDETERMINATE", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-C.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}
+      },
+      {
+        "node_id": "M-D",
+        "execution": {"value": "planned", "rule_id": "EXEC-PLANNED", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-D.execution", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]},
+        "health": {"value": "on-plan", "rule_id": "HEALTH-PLAN", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.M-D.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}
+      }
+    ],
+    "relationships": [
+      {"edge_id": "E-A-MERGE", "state": {"value": "active", "rule_id": "REL-ACTIVE", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-A-MERGE.state", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}, "health": {"value": "at-risk", "rule_id": "REL-RISK", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-A-MERGE.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}},
+      {"edge_id": "E-B-MERGE", "state": {"value": "satisfied", "rule_id": "REL-SATISFIED", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-B-MERGE.state", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}, "health": {"value": "on-plan", "rule_id": "REL-PLAN", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-B-MERGE.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}},
+      {"edge_id": "E-CONDITION", "state": {"value": "pending-confirmation", "rule_id": "REL-CONDITION", "sources": [{"artifact_id": "DECISION-1", "artifact_path": "decisions/decision-log.md", "field": "DECISION-1.status", "source_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}, "health": {"value": "indeterminate", "rule_id": "REL-INDETERMINATE", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-CONDITION.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}},
+      {"edge_id": "E-INFO", "state": {"value": "active", "rule_id": "REL-ACTIVE", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-INFO.state", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}, "health": {"value": "on-plan", "rule_id": "REL-PLAN", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-INFO.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}},
+      {"edge_id": "E-REWORK", "state": {"value": "inactive", "rule_id": "REL-INACTIVE", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-REWORK.state", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}, "health": {"value": "on-plan", "rule_id": "REL-PLAN", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "relations.E-REWORK.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}}
+    ],
+    "lineage": [
+      {"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+    ]
+  },
+  "overlays": {
+    "overlay_schema_version": "1.0.0",
+    "overlay_snapshot_id": "sha256:47c0fdf4f68a01a9d40f9a44bc1158bf266942615ec721d221f22be886b0fc85",
+    "topology_id": "sha256:35db54533104623993c3a7ac6e884232c2169de1239cf3bd60def91758754ce1",
+    "scopes": [
+      {
+        "scope_id": "ACTIVE-2026-07-13",
+        "scope_kind": "active-as-of",
+        "as_of": "2026-07-13T12:00:00Z",
+        "processed_window": {"start_inclusive": "2026-07-01T00:00:00Z", "end_exclusive": "2026-07-14T00:00:00Z"},
+        "selection_window": null,
+        "allocations": [
+          {
+            "target_type": "node",
+            "target_id": "M-A",
+            "counts": {
+              "pending": {"count": 1, "source_refs": [{"source_kind": "action", "source_id": "A-OPEN", "source_fingerprint": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]},
+              "processed": {"count": 0, "source_refs": []},
+              "risk": {"count": 1, "source_refs": [{"source_kind": "risk", "source_id": "R-OPEN", "source_fingerprint": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}]},
+              "blocked": {"count": 0, "source_refs": []}
+            }
+          },
+          {
+            "target_type": "edge",
+            "target_id": "E-A-MERGE",
+            "counts": {
+              "pending": {"count": 0, "source_refs": []},
+              "processed": {"count": 1, "source_refs": [{"source_kind": "action", "source_id": "A-DONE", "source_fingerprint": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]},
+              "risk": {"count": 1, "source_refs": [{"source_kind": "risk", "source_id": "R-BLOCKED", "source_fingerprint": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]},
+              "blocked": {"count": 1, "source_refs": [{"source_kind": "risk", "source_id": "R-BLOCKED", "source_fingerprint": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}]}
+            }
+          }
+        ]
+      }
+    ],
+    "unmapped": [
+      {
+        "source_kind": "action",
+        "source_id": "A-UNMAPPED",
+        "baseline_revision": 2,
+        "related_plan_item_ids": [],
+        "related_flow_edge_ids": [],
+        "reason": "missing-related-ids",
+        "finding_code": "flow.overlay.unmapped",
+        "recovery": "Add an explicit Related Plan Items or Related Flow Edges value."
+      }
+    ],
+    "lineage": [
+      {"artifact_id": "ACTION-LEDGER-1", "artifact_path": "actions/action-ledger.md", "field": "actions", "source_fingerprint": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+      {"artifact_id": "RISK-REGISTER-1", "artifact_path": "views/risk-matrix.md", "field": "risks", "source_fingerprint": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+    ]
+  },
+  "findings": [
+    {
+      "code": "flow.overlay.unmapped",
+      "disposition": "degraded",
+      "path": "overlays.unmapped[A-UNMAPPED]",
+      "message": "Action A-UNMAPPED has no explicit flow relation.",
+      "recovery": "Run adp-status-sync with explicit related IDs."
+    }
+  ],
+  "recovery": {"status": "required", "workflows": ["adp-status-sync"]},
+  "compatibility": {
+    "baseline": "legacy-string-normalize",
+    "program_status": "ADP-FLOW-STATE-MIGRATION-REQUIRED",
+    "actions": "ADP-ACTION-FLOW-MIGRATION-REQUIRED",
+    "risks": "ADP-RISK-FLOW-MIGRATION-REQUIRED"
+  },
+  "layout_identity_owner": "adp-management-panel"
+}

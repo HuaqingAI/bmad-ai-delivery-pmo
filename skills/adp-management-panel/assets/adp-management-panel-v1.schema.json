@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:adp:management-panel:model:v1",
+  "title": "ADP management panel model v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["panel_schema_version", "panel_model_id", "panel_id", "manifest", "selection", "catalog", "data", "views", "recovery"],
+  "properties": {
+    "panel_schema_version": {"const": "1.0.0"},
+    "panel_model_id": {"$ref": "#/$defs/hashId"},
+    "panel_id": {"$ref": "#/$defs/hashId"},
+    "manifest": {"$ref": "adp-management-panel-manifest-v1.schema.json"},
+    "selection": {"$ref": "#/$defs/selection"},
+    "catalog": {"$ref": "#/$defs/catalog"},
+    "data": {"$ref": "#/$defs/data"},
+    "views": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/view"}
+    },
+    "recovery": {"$ref": "#/$defs/recovery"}
+  },
+  "$defs": {
+    "stableId": {"type": "string", "pattern": "[A-Za-z0-9][A-Za-z0-9._-]*"},
+    "hashId": {"type": "string", "pattern": "sha256:[0-9a-f]{64}"},
+    "flowScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selection_id", "layout_scope_id", "parent_flow_graph_id", "source_owner", "scope_id", "node_ids", "edge_ids"],
+      "properties": {
+        "selection_id": {"$ref": "#/$defs/hashId"},
+        "layout_scope_id": {"$ref": "#/$defs/hashId"},
+        "parent_flow_graph_id": {"$ref": "#/$defs/hashId"},
+        "source_owner": {"enum": ["adp-flow-graph", "adp-meeting-pack"]},
+        "source_pack_id": {"$ref": "#/$defs/stableId"},
+        "scope_id": {"type": ["string", "null"]},
+        "node_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true},
+        "edge_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true}
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["history_snapshot_ids", "future_horizon_dates", "flow_scopes"],
+      "properties": {
+        "history_snapshot_ids": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true},
+        "future_horizon_dates": {"type": "array", "items": {"type": "string", "format": "date"}, "uniqueItems": true},
+        "flow_scopes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project-lead", "fde-morning", "business-biweekly"],
+          "properties": {
+            "project-lead": {"$ref": "#/$defs/flowScope"},
+            "fde-morning": {"$ref": "#/$defs/flowScope"},
+            "business-biweekly": {"$ref": "#/$defs/flowScope"}
+          }
+        }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_schema_version", "locale", "messages"],
+      "properties": {
+        "catalog_schema_version": {"const": "1.0.0"},
+        "locale": {"enum": ["zh-CN", "en"]},
+        "messages": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string"}}
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "roadmap", "flows", "meetings", "history"],
+      "properties": {
+        "status": {"type": "object"},
+        "roadmap": {"type": "object"},
+        "flows": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project-lead", "fde-morning", "business-biweekly"],
+          "properties": {
+            "project-lead": {"type": "object"},
+            "fde-morning": {"type": "object"},
+            "business-biweekly": {"type": "object"}
+          }
+        },
+        "meetings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fde-morning", "business-biweekly"],
+          "properties": {
+            "fde-morning": {"type": "object"},
+            "business-biweekly": {"type": "object"}
+          }
+        },
+        "history": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_pointer", "source_artifact", "source_pointer", "operation"],
+      "properties": {
+        "target_pointer": {"type": "string", "pattern": "/.*"},
+        "source_artifact": {"enum": ["program-status", "roadmap", "flow-graph", "fde-meeting-pack", "business-meeting-pack", "program-status-history"]},
+        "source_pointer": {"type": "string", "pattern": "(^$)|(/.*)"},
+        "operation": {"enum": ["copy", "allowlist", "stable-sort", "select", "redact"]},
+        "stable_sort_key": {"type": "string", "minLength": 1}
+      }
+    },
+    "hints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "density": {"enum": ["workbench", "meeting"]},
+        "default_expanded": {"type": "boolean"},
+        "visible_node_budget": {"type": "integer", "minimum": 1, "maximum": 40},
+        "sort_key": {"type": "string", "minLength": 1},
+        "sort_direction": {"enum": ["ascending", "descending"]},
+        "fallback": {"enum": ["stage-list", "table", "details"]},
+        "information_budget": {"type": "string", "minLength": 1}
+      }
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section_id", "bindings", "presentation_hints"],
+      "properties": {
+        "section_id": {"$ref": "#/$defs/stableId"},
+        "bindings": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/binding"}},
+        "presentation_hints": {"$ref": "#/$defs/hints"}
+      }
+    },
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["view_id", "default_visualization_mode", "visualization_modes", "sections"],
+      "properties": {
+        "view_id": {"enum": ["project-lead", "fde-morning", "business-biweekly"]},
+        "default_visualization_mode": {"enum": ["quantitative-progress", "flow-progress"]},
+        "visualization_modes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"enum": ["quantitative-progress", "flow-progress"]}
+        },
+        "sections": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/section"}}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "disposition", "source_artifact", "message", "recovery_workflows"],
+      "properties": {
+        "code": {"type": "string", "pattern": "panel[.][a-z.-]+"},
+        "disposition": {"enum": ["degraded", "blocked"]},
+        "source_artifact": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "recovery_workflows": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "findings", "workflows", "lower_level_fallback_used"],
+      "properties": {
+        "status": {"enum": ["ready", "degraded", "blocked"]},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+        "workflows": {"type": "array", "items": {"$ref": "#/$defs/stableId"}, "uniqueItems": true},
+        "lower_level_fallback_used": {"const": false}
+      }
+    }
+  }
+}

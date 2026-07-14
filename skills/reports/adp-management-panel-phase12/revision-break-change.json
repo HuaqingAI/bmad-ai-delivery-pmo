@@ -1,0 +1,13 @@
+{
+  "changes": {
+    "project": {
+      "target_date": "2026-09-01"
+    }
+  },
+  "change_reason": "Phase 12 isolated identity-break acceptance probe",
+  "decision_source": {
+    "type": "decision",
+    "reference": "skills/reports/adp-management-panel-phase12/acceptance-report.md#identity-breaks",
+    "confirmed_by": "Phase 12 isolated acceptance"
+  }
+}

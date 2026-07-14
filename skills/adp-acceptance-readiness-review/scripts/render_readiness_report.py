@@ -463,7 +463,9 @@ def main() -> int:
         emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
         return 2
     locale = str(config.get("document_locale") or "en")
-    message = lambda key: config_module.message(key, locale)
+
+    def message(key: str) -> str:
+        return config_module.message(key, locale)
     try:
         packet = load_packet(resolve_path(project_root, args.input))
     except (OSError, ValueError, json.JSONDecodeError) as exc:

@@ -5,7 +5,7 @@ description: Bootstraps shared ADP project memory. Use when the user says "adp-p
 
 ## Overview
 
-This workflow initializes shared ADP memory, including plan and snapshot directories, schemas, baseline intake, L0 placeholders, decision logs, audits, meeting-pack folders, and starter views. Act as a delivery setup facilitator: preserve existing work and leave a usable state surface without a long questionnaire.
+This workflow initializes shared ADP memory, including plan and snapshot directories, schemas, baseline intake, L0 placeholders, decision logs, audits, meeting-pack folders, flow-graph and management-panel directories, and starter views. Act as a delivery setup facilitator: preserve existing work and leave a usable state surface without a long questionnaire.
 
 The consumer is the FDE team, project lead, and later ADP workflows. They need files that make project state consistent across workstreams without replacing BMM lifecycle artifacts. BMM outputs remain the source of truth; Workstream Delivery Records are the project-level synchronization surface.
 
@@ -97,7 +97,7 @@ Do not claim the project is ready just because the scaffold exists. The kickoff 
 
 ## Files Created
 
-The scaffold copies `assets/adp-memory-templates/` into ADP memory while preserving existing files; use script JSON for exact paths. `actions/action-ledger.md` remains the durable action source; `views/fde-actions.md`, `views/meeting-packs/*`, `views/program-status.*`, and `views/roadmap.*` are derived. A confirmed PRD plan additionally creates the two `intake/workstream-registration-plan.*` files without overwriting either.
+The scaffold copies `assets/adp-memory-templates/` into ADP memory while preserving existing files; use script JSON for exact paths. `actions/action-ledger.md` remains the durable action source; `views/fde-actions.md`, `views/meeting-packs/*`, `views/program-status.*`, and `views/roadmap.*` are derived. It creates empty `snapshots/flow-graph/`, `snapshots/management-panel/`, and `views/management-panel/` directories but no placeholder `flow-graph.json`, panel bundle, or `index.html`; their owner workflows publish only after audited canonical inputs are ready. A confirmed PRD plan additionally creates the two `intake/workstream-registration-plan.*` files without overwriting either.
 
 ## Guardrails
 
@@ -107,4 +107,6 @@ The scaffold copies `assets/adp-memory-templates/` into ADP memory while preserv
 - Make gaps visible rather than filling them with invented defaults.
 - Preserve baseline ownership: kickoff scaffolds intake and history only; `adp-plan-baseline` alone writes or versions the approved baseline.
 - Preserve snapshot ownership: kickoff creates the snapshot directory and guidance only; `adp-program-status` alone writes immutable status snapshots.
+- Preserve flow and panel ownership: kickoff only creates their directories; `adp-flow-graph` and `adp-management-panel` alone publish graph, bundle, HTML, and archive artifacts.
+- Upgrade non-destructively: a v1.2 tree gains only missing v1.3 directories and templates; existing baselines, current views, immutable snapshots, panel HTML, manifests, and receipts remain byte-for-byte unchanged.
 - For migration or cutover projects, initialize the same structure and mark the profile; readiness and L0 workflows own detailed cutover judgment later.

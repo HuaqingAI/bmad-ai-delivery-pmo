@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -54,6 +55,7 @@ class Workstream:
     dependencies_note: str = "TBD"
     change_notes: str = "TBD"
     next_actions: str = "TBD"
+    last_status_sync: str = "TBD"
     depends_on: list[str] = field(default_factory=list)
     impacts: list[str] = field(default_factory=list)
     l0_references: list[str] = field(default_factory=list)
@@ -245,6 +247,7 @@ def parse_workstream(record_path: Path) -> Workstream:
         dependencies_note=status.get("dependencies", "TBD"),
         change_notes=status.get("scope or change notes", "TBD"),
         next_actions=status.get("next actions", "TBD"),
+        last_status_sync=status.get("last status sync", "TBD"),
         depends_on=parse_cross_links(cross, "Depends on"),
         impacts=parse_cross_links(cross, "Impacts"),
         l0_references=parse_cross_links(cross, "L0 references"),
@@ -275,8 +278,8 @@ def discover_records(memory_root: Path, selected: list[str]) -> tuple[list[Path]
     return sorted(workstreams_root.glob("*/delivery-record.md")), []
 
 
-def risk_entries(workstreams: list[Workstream]) -> tuple[list[dict[str, str]], list[str]]:
-    entries: list[dict[str, str]] = []
+def risk_entries(workstreams: list[Workstream], baseline_revision: int | None = None, memory_root: Path | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    entries: list[dict[str, Any]] = []
     gaps: list[str] = []
     if not workstreams:
         return [], [MISSING_WORKSTREAM_GAP]
@@ -284,17 +287,17 @@ def risk_entries(workstreams: list[Workstream]) -> tuple[list[dict[str, str]], l
     for ws in workstreams:
         affected = ", ".join([*ws.impacts, ws.workstream_id]) if ws.impacts else ws.workstream_id
         if is_meaningful(ws.blockers):
-            entries.append(make_risk(ws, "blocker", ws.blockers, affected))
+            entries.append(make_risk(ws, "blocker", ws.blockers, affected, baseline_revision, memory_root))
         else:
             gaps.append(f"{ws.workstream_id}: blocker status is missing or TBD")
 
         if is_meaningful(ws.risks):
-            entries.append(make_risk(ws, "risk", ws.risks, affected))
+            entries.append(make_risk(ws, "risk", ws.risks, affected, baseline_revision, memory_root))
         else:
             gaps.append(f"{ws.workstream_id}: risk exposure is missing or TBD")
 
         if is_meaningful(ws.change_notes):
-            entries.append(make_risk(ws, "change", ws.change_notes, affected))
+            entries.append(make_risk(ws, "change", ws.change_notes, affected, baseline_revision, memory_root))
 
         if not ws.depends_on and not ws.l0_references and not is_meaningful(ws.dependencies_note):
             gaps.append(f"{ws.workstream_id}: dependencies are missing or TBD")
@@ -307,8 +310,7 @@ def risk_entries(workstreams: list[Workstream]) -> tuple[list[dict[str, str]], l
             if any(token in row_type for token in ["change", "scope", "risk acceptance", "business decision"]):
                 impact = row.get("impact", "TBD")
                 owner = row.get("owner", ws.owner)
-                entries.append(
-                    {
+                entry = {
                         "type": "decision/change",
                         "workstream": ws.workstream_id,
                         "description": decision,
@@ -321,8 +323,9 @@ def risk_entries(workstreams: list[Workstream]) -> tuple[list[dict[str, str]], l
                             row.get("escalation", ""),
                             extract_inline_field(decision, ["escalation", "upgrade", "升级"]),
                         ),
-                    },
-                )
+                    }
+                entry.update(canonical_risk_fields(ws, "decision/change", decision, baseline_revision, memory_root))
+                entries.append(entry)
     gaps.extend(risk_detail_gaps(entries))
     return entries, gaps
 
@@ -332,10 +335,16 @@ def make_risk(
     entry_type: str,
     description: str,
     affected: str,
-) -> dict[str, str]:
-    labels = ["severity", "likelihood", "escalation", "严重度", "可能性", "升级"]
+    baseline_revision: int | None = None,
+    memory_root: Path | None = None,
+) -> dict[str, Any]:
+    labels = [
+        "severity", "likelihood", "escalation", "严重度", "可能性", "升级",
+        "risk_id", "lifecycle", "relation_state", "observed_at", "terminal_at",
+        "baseline_revision", "related_plan_item_ids", "related_flow_edge_ids",
+    ]
     next_action = ws.next_actions if is_meaningful(ws.next_actions) else "Assign concrete next action"
-    return {
+    entry: dict[str, Any] = {
         "type": entry_type,
         "workstream": ws.workstream_id,
         "description": strip_inline_fields(description, labels),
@@ -345,6 +354,133 @@ def make_risk(
         "affected": affected,
         "next_action": next_action,
         "escalation": extract_inline_field(description, ["escalation", "upgrade", "升级"]),
+    }
+    entry.update(canonical_risk_fields(ws, entry_type, description, baseline_revision, memory_root))
+    return entry
+
+
+def canonical_risk_fields(
+    ws: Workstream,
+    entry_type: str,
+    description: str,
+    baseline_revision: int | None,
+    memory_root: Path | None,
+) -> dict[str, Any]:
+    explicit_id = extract_inline_field(description, ["risk_id"])
+    semantic_description = strip_inline_fields(
+        description,
+        ["risk_id", "lifecycle", "relation_state", "observed_at", "terminal_at", "baseline_revision", "related_plan_item_ids", "related_flow_edge_ids"],
+    )
+    if is_meaningful(explicit_id):
+        risk_id = explicit_id.strip()
+    else:
+        digest = hashlib.sha256(f"{ws.workstream_id}\n{entry_type}\n{semantic_description.strip().casefold()}".encode("utf-8")).hexdigest()[:16]
+        risk_id = f"RISK-{digest}"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", risk_id):
+        risk_id = "RISK-" + hashlib.sha256(risk_id.encode("utf-8")).hexdigest()[:16]
+    lifecycle = extract_inline_field(description, ["lifecycle"])
+    default_lifecycle = "mitigating" if entry_type == "blocker" else ("monitoring" if "change" in entry_type else "open")
+    lifecycle = lifecycle.strip().lower() if is_meaningful(lifecycle) else default_lifecycle
+    if lifecycle not in {"open", "monitoring", "mitigating", "accepted", "closed", "cancelled"}:
+        lifecycle = default_lifecycle
+    relation_state = extract_inline_field(description, ["relation_state"])
+    default_relation = "blocked" if entry_type == "blocker" else ("watching" if "change" in entry_type else "at-risk")
+    relation_state = relation_state.strip().lower() if is_meaningful(relation_state) else default_relation
+    if relation_state not in {"watching", "at-risk", "blocked", "resolved", "not-applicable"}:
+        relation_state = default_relation
+    observed = extract_inline_field(description, ["observed_at"])
+    observed_at = normalize_contract_timestamp(observed if is_meaningful(observed) else ws.last_status_sync)
+    terminal = extract_inline_field(description, ["terminal_at"])
+    terminal_at = normalize_contract_timestamp(terminal) if is_meaningful(terminal) else None
+    explicit_revision = extract_inline_field(description, ["baseline_revision"])
+    revision = int(explicit_revision) if is_meaningful(explicit_revision) and explicit_revision.isdigit() else baseline_revision
+    related_nodes = parse_related_ids(extract_inline_field(description, ["related_plan_item_ids"]))
+    related_edges = parse_related_ids(extract_inline_field(description, ["related_flow_edge_ids"]))
+    source_path = ws.path.as_posix()
+    if memory_root is not None:
+        try:
+            source_path = ws.path.resolve().relative_to(memory_root.resolve()).as_posix()
+        except ValueError:
+            pass
+    source_fingerprint = "sha256:" + hashlib.sha256(ws.path.read_bytes()).hexdigest()
+    return {
+        "risk_id": risk_id,
+        "lifecycle": lifecycle,
+        "relation_state": relation_state,
+        "observed_at": observed_at,
+        "terminal_at": terminal_at,
+        "baseline_revision": revision,
+        "related_plan_item_ids": related_nodes,
+        "related_flow_edge_ids": related_edges,
+        "rule_id": "RISK-" + relation_state.upper(),
+        "sources": [
+            {
+                "artifact_id": f"WDR-{ws.workstream_id.upper()}",
+                "artifact_path": source_path,
+                "field": f"Project Status.{entry_type}",
+                "source_fingerprint": source_fingerprint,
+            }
+        ],
+    }
+
+
+def normalize_contract_timestamp(value: str) -> str:
+    text = str(value or "").strip().strip("`")
+    if not is_meaningful(text):
+        return "1970-01-01T00:00:00Z"
+    try:
+        if "T" not in text:
+            parsed = datetime.fromisoformat(text + "T00:00:00+00:00")
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "1970-01-01T00:00:00Z"
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_related_ids(value: str) -> list[str]:
+    if not is_meaningful(value):
+        return []
+    return sorted(
+        {
+            item.strip()
+            for item in re.split(r"\s*[;/+]\s*", value)
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", item.strip())
+        }
+    )
+
+
+def baseline_revision(memory_root: Path) -> int | None:
+    path = memory_root / "plans/program-baseline.md"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8-sig")
+    marker = text.find("<!-- adp:program-baseline:v1 -->")
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text[marker:], re.DOTALL) if marker >= 0 else None
+    if not match:
+        return None
+    value = json.loads(match.group(1)).get("revision")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def risk_flow_contract(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    risks = [
+        {
+            key: entry[key]
+            for key in (
+                "risk_id", "lifecycle", "relation_state", "observed_at", "terminal_at",
+                "baseline_revision", "related_plan_item_ids", "related_flow_edge_ids", "rule_id", "sources",
+            )
+        }
+        for entry in entries
+        if isinstance(entry.get("baseline_revision"), int)
+    ]
+    return {
+        "risk_flow_schema_version": "1.0.0",
+        "risks": sorted(risks, key=lambda item: item["risk_id"]),
+        "compatibility": {"strategy": "preserve-unmapped", "migration_error_code": "ADP-RISK-FLOW-MIGRATION-REQUIRED"},
     }
 
 
@@ -548,18 +684,23 @@ def main() -> int:
         emit({"ok": False, "error": config.get("error", "shared ADP effective config could not be resolved")}, args.output)
         return 2
     locale = str(config.get("document_locale") or "en")
-    message = lambda key: config_module.message(key, locale)
+
+    def message(key: str) -> str:
+        return config_module.message(key, locale)
 
     records, missing = discover_records(memory_root, args.workstream)
     workstreams = [parse_workstream(path) for path in records]
-    risks, gaps = risk_entries(workstreams)
+    current_revision = baseline_revision(memory_root)
+    risks, gaps = risk_entries(workstreams, current_revision, memory_root)
     dependencies = dependency_entries(workstreams)
     generated_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
     risk_path = memory_root / "views" / "risk-matrix.md"
     dependency_path = memory_root / "views" / "dependency-map.md"
+    risk_flow_path = memory_root / "views" / "risk-flow.json"
     write_text(risk_path, render_risk_matrix(risks, gaps, generated_at, message), args.dry_run)
     write_text(dependency_path, render_dependency_map(dependencies, generated_at, message), args.dry_run)
+    write_text(risk_flow_path, json.dumps(risk_flow_contract(risks), ensure_ascii=False, indent=2, sort_keys=True) + "\n", args.dry_run)
 
     packet_path = None
     if args.packet_title or args.packet_question:
@@ -578,6 +719,8 @@ def main() -> int:
         "missing_workstreams": missing,
         "risk_matrix_path": str(risk_path),
         "dependency_map_path": str(dependency_path),
+        "risk_flow_path": str(risk_flow_path),
+        "baseline_revision": current_revision,
         "business_decision_packet_path": packet_path,
         "counts": {
             "risk_entries": len(risks),

@@ -1,0 +1,30 @@
+{
+  "baseline_id": "PROGRAM-BASELINE",
+  "revision": 2,
+  "target": "G-MERGE",
+  "source": {
+    "type": "approved-plan",
+    "reference": "plans/program-baseline.md#G-MERGE",
+    "confirmed_by": "Program owner"
+  },
+  "cases": [
+    {
+      "input": "M-A",
+      "expected": {
+        "edge_id": "legacy-80ad6429208fceb444d1",
+        "predecessor": "M-A",
+        "relationship_type": "dependency",
+        "source": {
+          "type": "approved-plan",
+          "reference": "plans/program-baseline.md#G-MERGE",
+          "confirmed_by": "Program owner"
+        },
+        "baseline_revision": 2
+      }
+    }
+  ],
+  "migration": {
+    "strategy": "normalize-before-validation-and-identity",
+    "unsupported_consumer_error": "ADP-BASELINE-FLOW-MIGRATION-REQUIRED"
+  }
+}

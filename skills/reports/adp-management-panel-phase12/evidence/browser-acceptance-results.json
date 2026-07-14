@@ -1,0 +1,80 @@
+{
+  "status": "complete",
+  "browser": "Google Chrome",
+  "files": {
+    "current": {
+      "panel_id": "sha256:85342eef700ccdffefaeea09d81608f589aba459c7556a00f14fec2be3fe4629",
+      "layout_id": "sha256:9c47f49eb4f38f102189f9055f96d16d4fecc00c38b9b343c500cc3621f805d9",
+      "profile": "internal-full"
+    },
+    "internal": {
+      "panel_id": "sha256:85342eef700ccdffefaeea09d81608f589aba459c7556a00f14fec2be3fe4629",
+      "layout_id": "sha256:9c47f49eb4f38f102189f9055f96d16d4fecc00c38b9b343c500cc3621f805d9",
+      "profile": "internal-full"
+    },
+    "shareable": {
+      "panel_id": "sha256:62c00b2efa328d4c6a1e25db655fa68853448d7c7a790dbf43b209f60ececafa",
+      "layout_id": "sha256:ba841ccd44e83589a1512ce1a8c6867241d65bd3897f2ae4d63fe4d90578b9e5",
+      "profile": "shareable-summary",
+      "redaction": {
+        "hidden_counts": 0,
+        "hidden_edges": 23,
+        "hidden_nodes": 10,
+        "hidden_sources": 705,
+        "policy_version": "1.0.0",
+        "profile": "shareable-summary",
+        "removed_fields": [
+          "allocations",
+          "counts",
+          "id",
+          "lineage",
+          "milestone_ids",
+          "next_milestone_ids",
+          "owner",
+          "paths",
+          "selected_edge_ids",
+          "selected_node_ids",
+          "source",
+          "source_fingerprints",
+          "source_refs",
+          "sources",
+          "value_lineage"
+        ],
+        "topology_reconnected": false
+      }
+    },
+    "english": {
+      "panel_id": "sha256:d44ff9fa3f2ae7b645f2145215c75760e097ddb1ceaa8ec8b26a1a171bf52c48",
+      "layout_id": "sha256:1bd24a4262f3800e483b35ee31b55ae6c564c481e73b314bb3c6ff0345607e32",
+      "locale": "en"
+    }
+  },
+  "checks": [
+    "project lead completion/health, history, trend, full flow, keyboard source drill-down and browser refresh",
+    "FDE confirmed window, degraded pre-meeting lifecycle, zero exact allocations and 20 unmapped risk disclosure",
+    "business blocked pre-meeting lifecycle and 14-node/22-edge selected spine",
+    "320 CSS px and 400-percent-equivalent semantic reflow",
+    "desktop 200-percent-equivalent reflow",
+    "ELK failure semantic fallback",
+    "JavaScript-off direct anchor and semantic fallback",
+    "forced colors and reduced motion smoke",
+    "versioned malformed hash normalization and Back navigation",
+    "print-to-PDF with semantic flow fallback",
+    "internal archive offline identity and lifecycle",
+    "shareable offline redaction, no topology reconnection and no source/owner/count leakage",
+    "English offline archive and long mixed content"
+  ],
+  "screenshots": [
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/project-lead-1920x1080.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/project-flow-1920x1080.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/fde-morning-1280x720.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/business-biweekly-1920x1080.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/mobile-320x800.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/desktop-200-percent.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/elk-failure-fallback.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/no-js-fde-320x800.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/shareable-archive.png",
+    "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/english-project-lead.png"
+  ],
+  "print": "/Users/hq-it/repository/github/huaqingai/bmad-ai-delivery-pmo/skills/reports/adp-management-panel-phase12/evidence/business-flow-print.pdf"
+}

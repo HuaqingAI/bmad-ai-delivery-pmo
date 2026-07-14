@@ -9,9 +9,52 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "review_risk_dependency_change.py"
+FLOW_TEST_ROOT = Path(__file__).resolve().parents[3] / "adp-flow-graph/scripts/tests"
+sys.path.insert(0, str(FLOW_TEST_ROOT))
+from flow_contract_testkit import load_json as load_contract_json, validate_schema  # noqa: E402
+RISK_SCHEMA = Path(__file__).resolve().parents[2] / "assets/risk-flow-relation-v1.schema.json"
 
 
 class ReviewRiskDependencyChangeTests(unittest.TestCase):
+    def test_risk_flow_contract_has_stable_identity_lifecycle_and_relations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            record = memory / "workstreams/alpha/delivery-record.md"
+            record.write_text(
+                record.read_text(encoding="utf-8")
+                .replace(
+                    "Payment API contract not baseline; severity: critical; likelihood: likely",
+                    "Payment API contract not baseline; severity: critical; likelihood: likely; risk_id: R-PAYMENT; lifecycle: mitigating; relation_state: blocked; related_plan_item_ids: MS-PAYMENT+G-PAYMENT; related_flow_edge_ids: E-PAYMENT",
+                )
+                .replace("- Next actions: Confirm payment contract and refund scope", "- Next actions: Confirm payment contract and refund scope\n- Last status sync: 2026-07-13T08:00:00Z"),
+                encoding="utf-8",
+            )
+            baseline = memory / "plans/program-baseline.md"
+            baseline.parent.mkdir(parents=True)
+            baseline.write_text(
+                "# Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps({"revision": 2})
+                + "\n```\n",
+                encoding="utf-8",
+            )
+
+            first = run_script(project)
+            first_contract = json.loads(Path(first["risk_flow_path"]).read_text(encoding="utf-8"))
+            second = run_script(project)
+            second_contract = json.loads(Path(second["risk_flow_path"]).read_text(encoding="utf-8"))
+            risk = next(item for item in first_contract["risks"] if item["risk_id"] == "R-PAYMENT")
+
+            self.assertEqual(first_contract, second_contract)
+            self.assertEqual(risk["lifecycle"], "mitigating")
+            self.assertEqual(risk["relation_state"], "blocked")
+            self.assertEqual(risk["baseline_revision"], 2)
+            self.assertEqual(risk["related_plan_item_ids"], ["G-PAYMENT", "MS-PAYMENT"])
+            self.assertEqual(risk["related_flow_edge_ids"], ["E-PAYMENT"])
+            self.assertEqual(risk["observed_at"], "2026-07-13T08:00:00Z")
+            self.assertEqual(validate_schema(first_contract, load_contract_json(RISK_SCHEMA)), [])
+
     def test_writes_risk_matrix_and_dependency_map(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -46,6 +89,7 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertFalse((memory / "views" / "risk-matrix.md").exists())
             self.assertFalse((memory / "views" / "dependency-map.md").exists())
+            self.assertFalse((memory / "views" / "risk-flow.json").exists())
 
     def test_creates_business_decision_packet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,7 +126,7 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             packet_text = packet_path.read_text(encoding="utf-8")
             self.assertIn("Should refunds be included", packet_text)
             self.assertIn("Business lead", packet_text)
-            self.assertTrue(packet_path.is_relative_to(memory))
+            self.assertTrue(packet_path.resolve().is_relative_to(memory.resolve()))
 
     def test_packet_filename_is_collision_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

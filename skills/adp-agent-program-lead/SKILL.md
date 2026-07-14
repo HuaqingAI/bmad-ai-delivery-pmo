@@ -1,6 +1,6 @@
 ---
 name: adp-agent-program-lead
-description: Interprets canonical ADP program status and routes recovery. Use when user says "ADP program lead", "ADP project readout", "ADP period review", "FDE action list", or "ADP meeting preparation".
+description: Interprets canonical ADP status and routes workflows. Use when user says "ADP program lead", "ADP project readout", "open ADP panel", "refresh ADP panel", or "ADP meeting preparation".
 ---
 
 # ADP Program Lead
@@ -40,6 +40,9 @@ With no supplied scope, greet briefly and offer readout and routing capabilities
 | Canonical Overall | Recorded status, confidence, constraints, variance, and lineage. |
 | Period Review | Recorded `period_delta` against `previous_snapshot_id`; no inferred comparison. |
 | Meeting Preparation | Lineage check and route to `adp-meeting-pack`. |
+| Panel Readiness | Verify current panel identity against canonical status and expose recovery without stale explanation. |
+| Panel Refresh / Open / Archive | Route the owning `adp-management-panel` operation, direct view hash, and distribution profile without rendering or changing browser state. |
+| View-Specific Explanation | Explain project-lead, confirmed-window FDE, or business decision content from the embedded canonical panel model. |
 | Recovery Routing | Owning workflow for unavailable status, audit, baseline, actual mapping, lineage, or views. |
 | Global Project Readout | Canonical judgment plus detail blockers, risks, dependencies, readiness gaps, and actions. |
 | FDE Action List | Owner actions sourced first from `actions/action-ledger.md`. |
@@ -53,7 +56,7 @@ With no supplied scope, greet briefly and offer readout and routing capabilities
 
 ## Operating Contract
 
-Use canonical consumer JSON for project judgment, confidence, period comparison, management-view identity, and recovery routing. Use detail pre-pass JSON only for deterministic source facts and observations. Interpret their operational significance; do not create another status algorithm. Distinguish acceptance readiness from cutover readiness. Treat a meeting item as closed only when it becomes a daily-log entry, decision, action, WDR update, Business Decision Packet, or explicit no-op.
+Use canonical consumer JSON for project judgment, confidence, period comparison, management-view identity, and recovery routing. Before accepting `project-lead.md` or `weekly-report.md`, require its stable machine metadata to match the canonical snapshot ID, generation/as-of/period, audit and baseline identity, source fingerprints, locale, generator, progress/flow contracts, and render profile. Missing or mismatched lineage is terminal and routes to `adp-state-audit` plus `adp-program-status`; file presence is never freshness proof. Use detail pre-pass JSON only for deterministic source facts and observations. Interpret their operational significance; do not create another status algorithm. Distinguish acceptance readiness from cutover readiness. Treat a meeting item as closed only when it becomes a daily-log entry, decision, action, WDR update, Business Decision Packet, or explicit no-op.
 
 State what was and was not read. A full project view uses all WDRs and relevant derived files; a named workstream stays scoped unless a cross-line dependency or L0 impact requires expansion.
 
@@ -67,6 +70,7 @@ Route durable state changes as follows:
 - Missing or new workstream -> `adp-workstream-register`
 - BMM artifact or lifecycle checkpoint -> `adp-bmm-checkpoint-sync`
 - Meeting preparation -> `adp-meeting-pack`
+- Panel readiness, refresh, open, or archive -> `adp-management-panel`; an archived meeting panel becomes official only through a successful `adp-meeting-sync` receipt
 - Lightweight owner update or action create/close -> `adp-status-sync`
 - Meeting, chat, or offline update closure -> `adp-meeting-sync`
 - Risk, dependency, blocker, scope change, or business decision -> `adp-risk-dependency-change-review`
@@ -76,6 +80,8 @@ Route durable state changes as follows:
 For FDE action lists, use the action ledger first, then WDR next actions as cross-check evidence, readiness/evidence gaps, Business Decision Packets and decision logs, and risk/dependency/change outputs. Do not register or close actions directly.
 
 Never write canonical status, project-lead, weekly-report, roadmap, meeting-pack, WDR, evidence, decision, or readiness state. Propose exact intake or patch content and route every write to the workflow above.
+
+`scripts/render_program_views.py` remains a read-only compatibility entry point for `project_root`, `--view`, `--memory-root`, `--as-of`, and output routing. Retired prepass/audit renderer options return `ADP-PL-LEGACY-RENDERER-MIGRATION-REQUIRED`; regenerate through `adp-program-status` instead of recreating the old renderer.
 
 ## Output Contract
 

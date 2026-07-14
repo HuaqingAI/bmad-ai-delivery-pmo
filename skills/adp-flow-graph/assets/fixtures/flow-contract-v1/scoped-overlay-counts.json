@@ -1,0 +1,36 @@
+{
+  "scope": {
+    "scope_id": "REPORT-2026-07",
+    "scope_kind": "reporting-period",
+    "as_of": "2026-08-01T00:00:00Z",
+    "processed_window": {
+      "start_inclusive": "2026-07-01T00:00:00Z",
+      "end_exclusive": "2026-08-01T00:00:00Z"
+    },
+    "selection_window": {
+      "start_inclusive": "2026-07-01T00:00:00Z",
+      "end_exclusive": "2026-08-01T00:00:00Z"
+    }
+  },
+  "actions": [
+    {"action_id": "A-OPEN", "status": "open", "created_at": "2026-07-01T00:00:00Z", "started_at": null, "done_at": null, "cancelled_at": null, "baseline_revision": 2, "related_plan_item_ids": ["M-A"], "related_flow_edge_ids": []},
+    {"action_id": "A-BLOCKED", "status": "blocked", "created_at": "2026-06-25T00:00:00Z", "started_at": "2026-07-02T00:00:00Z", "done_at": null, "cancelled_at": null, "baseline_revision": 2, "related_plan_item_ids": ["M-A"], "related_flow_edge_ids": []},
+    {"action_id": "A-DONE-START", "status": "done", "created_at": "2026-06-01T00:00:00Z", "started_at": "2026-06-20T00:00:00Z", "done_at": "2026-07-01T00:00:00Z", "cancelled_at": null, "baseline_revision": 2, "related_plan_item_ids": [], "related_flow_edge_ids": ["E-A-MERGE"]},
+    {"action_id": "A-DONE-END", "status": "done", "created_at": "2026-06-01T00:00:00Z", "started_at": "2026-06-20T00:00:00Z", "done_at": "2026-08-01T00:00:00Z", "cancelled_at": null, "baseline_revision": 2, "related_plan_item_ids": ["M-A"], "related_flow_edge_ids": []},
+    {"action_id": "A-CANCELLED", "status": "cancelled", "created_at": "2026-07-01T00:00:00Z", "started_at": null, "done_at": null, "cancelled_at": "2026-07-05T00:00:00Z", "baseline_revision": 2, "related_plan_item_ids": ["M-A"], "related_flow_edge_ids": []},
+    {"action_id": "A-UNMAPPED", "status": "open", "created_at": "2026-07-01T00:00:00Z", "started_at": null, "done_at": null, "cancelled_at": null, "baseline_revision": 2, "related_plan_item_ids": [], "related_flow_edge_ids": []}
+  ],
+  "risks": [
+    {"risk_id": "R-OPEN", "lifecycle": "open", "relation_state": "at-risk", "observed_at": "2026-07-01T00:00:00Z", "terminal_at": null, "baseline_revision": 2, "related_plan_item_ids": ["M-A"], "related_flow_edge_ids": []},
+    {"risk_id": "R-BLOCKED", "lifecycle": "mitigating", "relation_state": "blocked", "observed_at": "2026-07-02T00:00:00Z", "terminal_at": null, "baseline_revision": 2, "related_plan_item_ids": [], "related_flow_edge_ids": ["E-A-MERGE"]},
+    {"risk_id": "R-CLOSED", "lifecycle": "closed", "relation_state": "resolved", "observed_at": "2026-06-01T00:00:00Z", "terminal_at": "2026-07-03T00:00:00Z", "baseline_revision": 2, "related_plan_item_ids": ["M-A"], "related_flow_edge_ids": []},
+    {"risk_id": "R-UNKNOWN", "lifecycle": "open", "relation_state": "watching", "observed_at": "2026-07-01T00:00:00Z", "terminal_at": null, "baseline_revision": 2, "related_plan_item_ids": ["UNKNOWN"], "related_flow_edge_ids": []}
+  ],
+  "known_node_ids": ["M-A"],
+  "known_edge_ids": ["E-A-MERGE"],
+  "expected": {
+    "M-A": {"pending": ["A-BLOCKED", "A-OPEN"], "processed": [], "risk": ["R-OPEN"], "blocked": ["A-BLOCKED"]},
+    "E-A-MERGE": {"pending": [], "processed": ["A-DONE-START"], "risk": ["R-BLOCKED"], "blocked": ["R-BLOCKED"]},
+    "unmapped": ["A-UNMAPPED", "R-UNKNOWN"]
+  }
+}

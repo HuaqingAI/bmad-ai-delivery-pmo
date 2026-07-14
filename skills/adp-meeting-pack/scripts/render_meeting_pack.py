@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -28,8 +29,11 @@ DEFAULT_RUN_FOLDER_PATTERN = "{scenario}"
 DEFAULT_PREPASS_SCRIPT = SKILLS_ROOT / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
 DEFAULT_AUDIT_SCRIPT = SKILLS_ROOT / "adp-state-audit" / "scripts" / "audit_state.py"
 DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
+LOCALE_CATALOG_PATH = SKILLS_ROOT / "adp-plan-baseline" / "assets" / "locale-catalog.json"
 GENERATOR_VERSION = "2.0.0"
 DISTILLATE_SCHEMA_VERSION = 2
+PROGRESS_SCHEMA_VERSION = "2.0.0"
+PROGRESS_MIGRATION_ERROR = "ADP-PROGRESS-MIGRATION-REQUIRED"
 SCENARIO_CAPABILITIES = {
     "fde-morning": "fde-action-list",
     "business-biweekly": "global-project-readout",
@@ -173,6 +177,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "recommended_workflows": ["adp-plan-baseline", "adp-state-audit", "adp-program-status"],
         }
     if args.scenario == "business-biweekly":
+        meeting_window = business_meeting_window(program_status["data"], pack_date)
         roadmap_contract = validate_business_roadmap(memory_root, program_status["data"])
         if not roadmap_contract.get("ok"):
             return {
@@ -183,6 +188,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "language": language,
                 "recommended_workflows": ["adp-roadmap-sync"],
             }
+    selection_limit = int(config.get("values", {}).get("meeting_pack_item_limit", 10))
+    flow_graph = load_flow_graph(
+        memory_root,
+        program_status["data"],
+        args.scenario,
+        meeting_window,
+        selection_limit=selection_limit,
+    )
 
     output_dir = resolve_output_dir(
         args.output_dir,
@@ -247,15 +260,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         audit,
         audit_run,
         program_status["data"],
+        flow_graph,
         meeting_window,
         config,
         locale,
         config_module,
     )
-    recommended_workflows = next_workflows(audit)
+    recommended_workflows = list(dict.fromkeys([*next_workflows(audit), *flow_graph.get("recovery", [])]))
+    distillate = build_distillate(render_context, markdown_path, distillate_path, recommended_workflows)
     markdown_path.write_text(render_markdown(render_context), encoding="utf-8", newline="\n")
     distillate_path.write_text(
-        json.dumps(build_distillate(render_context, markdown_path, distillate_path, recommended_workflows), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(distillate, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -269,11 +284,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "audit_status": audit.get("audit_status", ""),
         "language": language,
         "meeting_window": meeting_window,
+        "meeting_pack_id": distillate["meeting_pack_id"],
+        "meeting_readiness": distillate["readiness"],
+        "artifact_lifecycle": distillate["lifecycle"],
         "program_status": {
             "snapshot_id": program_status["data"].get("snapshot_id"),
             "overall_status": program_status["data"].get("overall_status"),
             "report_confidence": program_status["data"].get("report_confidence"),
             "baseline_revision": program_status["data"].get("baseline_revision"),
+            "progress_schema_version": program_status["data"].get("progress", {}).get("progress_schema_version"),
+        },
+        "flow_graph": {
+            "available": flow_graph.get("available", False),
+            "flow_graph_id": flow_graph.get("flow_graph_id"),
+            "selection_id": flow_graph.get("selection_id"),
+            "scope_id": flow_graph.get("scope_id"),
+            "selection_status": flow_graph.get("selection_status"),
         },
         "information_budget": {
             "item_limit": render_context["information_budget"]["item_limit"],
@@ -404,6 +430,7 @@ def build_context(
     audit: dict[str, Any],
     audit_run: dict[str, Any],
     program_status: dict[str, Any],
+    flow_graph: dict[str, Any],
     meeting_window: dict[str, Any] | None,
     config: dict[str, Any],
     locale: str,
@@ -440,6 +467,7 @@ def build_context(
         "roadmap_available": roadmap_available(memory_root),
         "business": business_context,
         "program_status": program_status,
+        "flow_graph": flow_graph,
         "meeting_window": meeting_window,
         "config": config,
         "locale": locale,
@@ -501,7 +529,219 @@ def load_program_status(memory_root: Path) -> dict[str, Any]:
         return {"ok": False, "reason": "canonical program-status view is missing: " + ", ".join(missing)}
     if model.get("overall_status") not in {"on-plan", "at-risk", "off-plan", "indeterminate"}:
         return {"ok": False, "reason": "canonical program-status view has an invalid overall_status"}
+    progress_error = validate_canonical_progress(model.get("progress"), model)
+    if progress_error:
+        return {"ok": False, "reason": progress_error}
     return {"ok": True, "path": rel_to_memory(memory_root, path), "data": model}
+
+
+def load_flow_graph(
+    memory_root: Path,
+    program_status: dict[str, Any],
+    scenario: str,
+    meeting_window: dict[str, Any] | None,
+    *,
+    selection_limit: int = 10,
+) -> dict[str, Any]:
+    path = memory_root / "views/flow-graph.json"
+    if not path.is_file():
+        return {"available": False, "selection_status": "graph-unavailable", "recovery": ["adp-flow-graph"]}
+    try:
+        graph = load_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"available": False, "selection_status": "graph-invalid", "reason": str(exc), "recovery": ["adp-flow-graph"]}
+    if graph.get("flow_graph_schema_version") != "1.0.0":
+        return {"available": False, "selection_status": "graph-migration-required", "recovery": ["adp-flow-graph"]}
+    topology = graph.get("topology")
+    state = graph.get("state")
+    overlays = graph.get("overlays")
+    if not isinstance(topology, dict) or not isinstance(state, dict) or not isinstance(overlays, dict):
+        return {"available": False, "selection_status": "graph-invalid", "recovery": ["adp-flow-graph"]}
+    if topology.get("baseline_revision") != program_status.get("baseline_revision"):
+        return {"available": False, "selection_status": "graph-stale", "recovery": ["adp-flow-graph"]}
+    return select_flow_subgraph(
+        graph,
+        scenario,
+        meeting_window,
+        program_status,
+        selection_limit=selection_limit,
+    )
+
+
+def select_flow_subgraph(
+    graph: dict[str, Any],
+    scenario: str,
+    meeting_window: dict[str, Any] | None,
+    program_status: dict[str, Any],
+    *,
+    selection_limit: int = 10,
+) -> dict[str, Any]:
+    topology = graph["topology"]
+    node_by_id = {item["node_id"]: item for item in topology["nodes"]}
+    state_by_id = {item["node_id"]: item for item in graph["state"]["nodes"]}
+    scopes = graph["overlays"].get("scopes", [])
+    selected_scope = None
+    selection_status = "selected"
+    if scenario == "fde-morning":
+        expected = meeting_window_bounds(meeting_window)
+        selected_scope = next(
+            (
+                scope
+                for scope in scopes
+                if scope.get("scope_kind") == "meeting-window" and scope.get("selection_window") == expected
+            ),
+            None,
+        )
+        if selected_scope is None:
+            selection_status = "meeting-scope-unavailable"
+    else:
+        selected_scope = next((scope for scope in scopes if scope.get("scope_kind") == "reporting-period"), None)
+        if selected_scope is None:
+            selection_status = "reporting-scope-unavailable"
+
+    selected_nodes: set[str] = set()
+    selected_edges: set[str] = set()
+    if selected_scope:
+        for allocation in selected_scope.get("allocations", []):
+            if not any(int(allocation.get("counts", {}).get(category, {}).get("count", 0)) > 0 for category in ("pending", "processed", "risk", "blocked")):
+                continue
+            if allocation.get("target_type") == "node":
+                selected_nodes.add(str(allocation.get("target_id")))
+            elif allocation.get("target_type") == "edge":
+                selected_edges.add(str(allocation.get("target_id")))
+    allocation_seed_nodes = set(selected_nodes)
+    allocation_seed_edges = set(selected_edges)
+    if scenario == "business-biweekly":
+        selected_nodes.clear()
+        selected_edges.clear()
+        selected_nodes.update(
+            node_id
+            for node_id, node in node_by_id.items()
+            if node.get("lane", {}).get("lane_type") == "program"
+        )
+        selected_nodes.update(
+            str(item.get("id"))
+            for item in program_status.get("critical_path", [])
+            if isinstance(item, dict) and item.get("id") in node_by_id
+        )
+        abnormal = sorted(
+            node_id
+            for node_id, item in state_by_id.items()
+            if item.get("health", {}).get("value") in {"at-risk", "blocked", "indeterminate"}
+            and node_by_id.get(node_id, {}).get("lane", {}).get("lane_type") != "program"
+            and node_id not in selected_nodes
+        )
+        selected_nodes.update(abnormal[: max(0, selection_limit)])
+        selected_edges = {
+            edge["edge_id"]
+            for edge in topology["edges"]
+            if edge["predecessor"] in selected_nodes and edge["target"] in selected_nodes
+        }
+    else:
+        for edge in topology["edges"]:
+            if (
+                edge["edge_id"] in allocation_seed_edges
+                or edge["predecessor"] in allocation_seed_nodes
+                or edge["target"] in allocation_seed_nodes
+            ):
+                selected_edges.add(edge["edge_id"])
+                selected_nodes.update([edge["predecessor"], edge["target"]])
+    nodes = [node_by_id[node_id] for node_id in sorted(selected_nodes) if node_id in node_by_id]
+    edges = [edge for edge in topology["edges"] if edge["edge_id"] in selected_edges and edge["predecessor"] in selected_nodes and edge["target"] in selected_nodes]
+    states = [state_by_id[node["node_id"]] for node in nodes]
+    relationships = [item for item in graph["state"]["relationships"] if item["edge_id"] in selected_edges]
+    allocations = [
+        {
+            **item,
+            "scope_id": (selected_scope or {}).get("scope_id"),
+            "scope_kind": (selected_scope or {}).get("scope_kind"),
+            "selection_window": (selected_scope or {}).get("selection_window"),
+        }
+        for item in (selected_scope or {}).get("allocations", [])
+        if (item.get("target_type") == "node" and item.get("target_id") in selected_nodes)
+        or (item.get("target_type") == "edge" and item.get("target_id") in selected_edges)
+    ]
+    selection_input = {
+        "flow_graph_id": graph["flow_graph_id"],
+        "scenario": scenario,
+        "scope_id": (selected_scope or {}).get("scope_id"),
+        "meeting_window": meeting_window,
+        "node_ids": [item["node_id"] for item in nodes],
+        "edge_ids": [item["edge_id"] for item in edges],
+    }
+    return {
+        "available": True,
+        "selection_status": selection_status,
+        "selection_id": "sha256:" + hashlib.sha256(json.dumps(selection_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        "flow_graph_id": graph["flow_graph_id"],
+        "topology_id": topology["topology_id"],
+        "state_snapshot_id": graph["state"]["state_snapshot_id"],
+        "overlay_snapshot_id": graph["overlays"]["overlay_snapshot_id"],
+        "scenario": scenario,
+        "scope_id": (selected_scope or {}).get("scope_id"),
+        "meeting_window": meeting_window,
+        "nodes": nodes,
+        "edges": edges,
+        "node_states": states,
+        "relationship_states": relationships,
+        "allocations": allocations,
+        "unmapped": graph["overlays"].get("unmapped", []),
+        "recovery": [] if selection_status == "selected" else ["adp-flow-graph"],
+    }
+
+
+def meeting_window_bounds(meeting_window: dict[str, Any] | None) -> dict[str, str] | None:
+    if not meeting_window or not meeting_window.get("start") or not meeting_window.get("end"):
+        return None
+    start = datetime.combine(date.fromisoformat(str(meeting_window["start"])), datetime.min.time(), tzinfo=timezone.utc)
+    end = datetime.combine(date.fromisoformat(str(meeting_window["end"])) + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+    return {
+        "start_inclusive": start.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "end_exclusive": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+def business_meeting_window(program_status: dict[str, Any], pack_date: date) -> dict[str, Any]:
+    period = program_status.get("reporting_period") if isinstance(program_status.get("reporting_period"), dict) else {}
+    start = clean(period.get("start"))
+    end = clean(period.get("end"))
+    if not start or not end:
+        raise ValueError("canonical program-status reporting_period is required for business meeting window")
+    date.fromisoformat(start)
+    date.fromisoformat(end)
+    return {
+        "scenario": "business-biweekly",
+        "meeting_date": pack_date.isoformat(),
+        "status": "confirmed",
+        "confirmation_mode": "canonical-reporting-period",
+        "start": start,
+        "end": end,
+        "reason": "window copied from canonical program-status reporting period",
+    }
+
+
+def validate_canonical_progress(progress: Any, program_status: dict[str, Any]) -> str | None:
+    if not isinstance(progress, dict) or progress.get("progress_schema_version") != PROGRESS_SCHEMA_VERSION:
+        return f"{PROGRESS_MIGRATION_ERROR}: canonical progress schema {PROGRESS_SCHEMA_VERSION} is required"
+    required = {"basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "overall", "by_workstream", "eligibility", "compatibility", "recovery"}
+    missing = sorted(required - set(progress))
+    if missing:
+        return "canonical progress is missing: " + ", ".join(missing)
+    if progress.get("basis") != "weighted-milestone":
+        return "canonical progress basis must be weighted-milestone"
+    if progress.get("as_of") != program_status.get("as_of"):
+        return "canonical progress as_of does not match program status"
+    identity = progress.get("scope_identity")
+    if not isinstance(identity, dict) or identity.get("baseline_revision") != program_status.get("baseline_revision"):
+        return "canonical progress baseline revision does not match program status"
+    overall = progress.get("overall")
+    if not isinstance(overall, dict) or not isinstance(overall.get("current"), dict):
+        return "canonical progress overall.current is required"
+    if not isinstance(progress.get("by_workstream"), list):
+        return "canonical progress by_workstream must be an array"
+    if progress.get("measurement_status") == "measurable" and progress.get("weighted_completion_percent") != overall["current"].get("actual_completion_percent"):
+        return "canonical progress legacy alias does not match overall actual completion"
+    return None
 
 
 def validate_business_roadmap(memory_root: Path, program_status: dict[str, Any]) -> dict[str, Any]:
@@ -519,6 +759,8 @@ def validate_business_roadmap(memory_root: Path, program_status: dict[str, Any])
         return {"ok": False, "reason": "canonical roadmap program-status snapshot does not match the current program-status view"}
     if roadmap.get("baseline_revision") != program_status.get("baseline_revision"):
         return {"ok": False, "reason": "canonical roadmap baseline revision does not match the current program-status view"}
+    if roadmap.get("progress") != program_status.get("progress"):
+        return {"ok": False, "reason": "canonical roadmap progress does not match the current program-status view"}
     return {"ok": True, "path": rel_to_memory(memory_root, path), "data": roadmap}
 
 
@@ -712,11 +954,89 @@ def build_fde_context(context: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "period_delta": period_delta_rows(status),
+        "progress_delta": canonical_progress_delta_rows(status, context.get("meeting_window")),
+        "forecast_milestones": fde_forecast_milestones(status, context.get("flow_graph", {}), context.get("meeting_window")),
         "blockers": blockers,
         "commitments": actions,
         "due_items": due_items,
         "escalations": escalations,
     }
+
+
+def canonical_progress_delta_rows(
+    status: dict[str, Any], meeting_window: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    if not meeting_window or meeting_window.get("status") != "confirmed":
+        return []
+    progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+    scopes: list[tuple[str, dict[str, Any]]] = []
+    overall = progress.get("overall")
+    if isinstance(overall, dict):
+        scopes.append(("program", overall))
+    for item in progress.get("by_workstream", []):
+        if isinstance(item, dict) and item.get("workstream_id"):
+            scopes.append((str(item["workstream_id"]), item))
+    rows: list[dict[str, Any]] = []
+    for scope_id, scope in scopes:
+        comparability = scope.get("comparability") if isinstance(scope.get("comparability"), dict) else {}
+        delta = comparability.get("actual_delta_pp")
+        if comparability.get("disposition") != "comparable" or delta is None:
+            continue
+        rows.append(
+            {
+                "scope_id": scope_id,
+                "workstream": scope_id,
+                "actual_delta_pp": delta,
+                "window_start": meeting_window["start"],
+                "window_end": meeting_window["end"],
+                "program_status_snapshot_id": status.get("snapshot_id"),
+                "previous_snapshot_id": comparability.get("previous_snapshot_id"),
+                "source": "views/program-status.json#/progress",
+            }
+        )
+    return rows
+
+
+def fde_forecast_milestones(
+    status: dict[str, Any], flow_selection: dict[str, Any], meeting_window: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    if not meeting_window or meeting_window.get("status") != "confirmed":
+        return []
+    selected = {str(item.get("node_id")) for item in flow_selection.get("nodes", []) if item.get("node_id")}
+    if not selected:
+        return []
+    start = date.fromisoformat(str(meeting_window["start"]))
+    end = date.fromisoformat(str(meeting_window["end"]))
+    by_id: dict[str, dict[str, Any]] = {}
+    for collection in (status.get("milestones", []), status.get("gates", []), status.get("critical_path", [])):
+        for item in collection if isinstance(collection, list) else []:
+            if isinstance(item, dict) and item.get("id"):
+                by_id.setdefault(str(item["id"]), item)
+    rows: list[dict[str, Any]] = []
+    for item_id in sorted(selected):
+        item = by_id.get(item_id)
+        if not item or not item.get("forecast_date"):
+            continue
+        try:
+            forecast = date.fromisoformat(str(item["forecast_date"]))
+        except ValueError:
+            continue
+        if not start <= forecast <= end:
+            continue
+        rows.append(
+            {
+                "ID": item_id,
+                "Name": item.get("name"),
+                "Workstream": item.get("workstream_id"),
+                "Forecast": item.get("forecast_date"),
+                "Status": item.get("status"),
+                "Rule ID": item.get("rule_id"),
+                "Source": item.get("source_references", []),
+                "window_start": meeting_window["start"],
+                "window_end": meeting_window["end"],
+            }
+        )
+    return rows
 
 
 def due_in_window(value: Any, window: dict[str, Any] | None) -> bool:
@@ -811,6 +1131,8 @@ def apply_information_budget(context: dict[str, Any]) -> None:
         apply(context, key, category)
     for key, category in [
         ("period_delta", "period_delta"),
+        ("progress_delta", "fde_progress_delta"),
+        ("forecast_milestones", "fde_forecast_milestones"),
         ("blockers", "fde_blockers"),
         ("commitments", "fde_commitments"),
         ("due_items", "fde_due"),
@@ -834,7 +1156,7 @@ def apply_information_budget(context: dict[str, Any]) -> None:
         apply(context["business"], key, category)
     context["information_budget"] = {
         "item_limit": limit,
-        "non_trimmable": ["program_summary", "meeting_window", "audit_status"],
+        "non_trimmable": ["program_summary", "meeting_pack_id", "meeting_window", "meeting_readiness", "artifact_lifecycle", "audit_status"],
         "displayed": displayed,
         "total": total,
         "omitted": omitted,
@@ -875,21 +1197,37 @@ def build_distillate(
     roadmap_version = business.get("roadmap_summary", {}).get("version", "")
     if not roadmap_version:
         roadmap_version = "unavailable" if context["scenario"] == "business-biweekly" else "not-applicable"
+    meeting_pack_id = stable_meeting_pack_id(context)
+    panel_metadata = panel_ready_metadata(context, meeting_pack_id)
+    artifact_metadata = meeting_artifact_metadata(context, meeting_pack_id)
     lineage = {
-        "meeting_pack_id": f"{context['date']}-{context['scenario']}",
+        "meeting_pack_id": meeting_pack_id,
         "meeting_pack_path": str(markdown_path),
         "scenario": context["scenario"],
         "audit_path": context["audit_path"],
         "roadmap_version": roadmap_version,
         "program_status_snapshot_id": program_status.get("snapshot_id"),
         "baseline_revision": program_status.get("baseline_revision"),
-        "source_fingerprints": program_status.get("source_fingerprints", {}),
-        "input_audit_id": program_status.get("input_audit_id"),
+        "source_fingerprints": artifact_metadata["source_fingerprints"],
+        "input_audit_id": artifact_metadata["input_audit_id"],
+        "program_status_input_audit_id": program_status.get("input_audit_id"),
         "generator_version": GENERATOR_VERSION,
+        "progress_schema_version": program_status.get("progress", {}).get("progress_schema_version"),
+        "progress_scope_identity": program_status.get("progress", {}).get("scope_identity"),
+        "flow_graph_id": context.get("flow_graph", {}).get("flow_graph_id"),
+        "flow_selection_id": context.get("flow_graph", {}).get("selection_id"),
     }
     return {
         "schema_version": DISTILLATE_SCHEMA_VERSION,
         **lineage,
+        **artifact_metadata,
+        "readiness": panel_metadata["readiness"],
+        "lifecycle": panel_metadata["lifecycle"],
+        "flow_scope_id": panel_metadata["flow_scope_id"],
+        "selected_node_ids": panel_metadata["selected_node_ids"],
+        "selected_edge_ids": panel_metadata["selected_edge_ids"],
+        "official_panel_archive": panel_metadata.get("official_panel_archive"),
+        "panel_metadata": panel_metadata,
         "date": context["date"],
         "generated_at": context["generated_at"],
         "locale": context["locale"],
@@ -903,7 +1241,9 @@ def build_distillate(
             "report_confidence_label": context["config_module"].display_label("report_confidence", program_status.get("report_confidence"), context["locale"]),
             "reporting_period": program_status.get("reporting_period"),
             "baseline_revision": program_status.get("baseline_revision"),
+            "progress": program_status.get("progress"),
         },
+        "flow_subgraph": context.get("flow_graph"),
         "paths": {
             "markdown": str(markdown_path),
             "distillate": str(distillate_path),
@@ -936,6 +1276,8 @@ def build_distillate(
             "top_variances": business.get("top_variance_items", []),
             "baseline_forecast": business.get("baseline_forecast_items", []),
             "fde_period_delta": fde.get("period_delta", []),
+            "fde_progress_delta": fde.get("progress_delta", []),
+            "fde_forecast_milestones": fde.get("forecast_milestones", []),
             "fde_blockers": fde.get("blockers", []),
             "fde_commitments": fde.get("commitments", []),
             "fde_due": fde.get("due_items", []),
@@ -977,6 +1319,115 @@ def build_distillate(
             "recommended_workflows": recommended_workflows,
         },
     }
+
+
+def stable_meeting_pack_id(context: dict[str, Any]) -> str:
+    identity = {
+        "schema_version": DISTILLATE_SCHEMA_VERSION,
+        "scenario": context["scenario"],
+        "date": context["date"],
+        "meeting_window": context.get("meeting_window"),
+        "program_status_snapshot_id": context.get("program_status", {}).get("snapshot_id"),
+        "baseline_revision": context.get("program_status", {}).get("baseline_revision"),
+        "flow_graph_id": context.get("flow_graph", {}).get("flow_graph_id"),
+        "flow_selection_id": context.get("flow_graph", {}).get("selection_id"),
+        "input_audit_id": context.get("program_status", {}).get("input_audit_id"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"mp-{context['scenario']}-{context['date']}-{digest}"
+
+
+def meeting_artifact_metadata(context: dict[str, Any], meeting_pack_id: str) -> dict[str, Any]:
+    program_status = context["program_status"]
+    audit = context.get("audit") if isinstance(context.get("audit"), dict) else {}
+    source_fingerprints = audit.get("source_fingerprints")
+    if not isinstance(source_fingerprints, dict) or not source_fingerprints:
+        source_fingerprints = program_status.get("source_fingerprints", {})
+    input_audit_id = audit.get("input_audit_id") or program_status.get("input_audit_id")
+    title_key = "meeting.title.fde" if context["scenario"] == "fde-morning" else "meeting.title.business"
+    title = context["config_module"].message(title_key, context["locale"])
+    language = language_metadata(context["config"], context["locale"], context["config_module"])
+    return {
+        "meeting_pack_id": meeting_pack_id,
+        "title": title,
+        "generated_at": context["generated_at"],
+        "as_of": program_status.get("as_of"),
+        "reporting_period": program_status.get("reporting_period"),
+        "report_confidence": program_status.get("report_confidence"),
+        "scenario": context["scenario"],
+        "input_audit_id": input_audit_id,
+        "baseline_revision": program_status.get("baseline_revision"),
+        "source_fingerprints": source_fingerprints,
+        "locale": context["locale"],
+        "locale_fallback": language["fallback"],
+        "render_contract": {
+            "catalog_locale": context["locale"],
+            "catalog_fingerprint": hashlib.sha256(LOCALE_CATALOG_PATH.read_bytes()).hexdigest(),
+            "message_keys": [title_key],
+            "unresolved_message_keys": [],
+            "source_fact_translation_persisted": False,
+            "localized_system_text": [title],
+        },
+        "generator_version": GENERATOR_VERSION,
+        "program_status_snapshot_id": program_status.get("snapshot_id"),
+    }
+
+
+def panel_ready_metadata(context: dict[str, Any], meeting_pack_id: str) -> dict[str, Any]:
+    flow = context.get("flow_graph", {})
+    audit = context.get("audit", {})
+    audit_status = clean(audit.get("audit_status")).lower()
+    if audit_status in {"blocked", "fail", "failed"}:
+        readiness = "blocked"
+    elif audit_status != "pass" or flow.get("selection_status") != "selected":
+        readiness = "degraded"
+    else:
+        readiness = "ready"
+    lifecycle = resolve_meeting_lifecycle(Path(context["memory_root"]), meeting_pack_id)
+    metadata = {
+        "contract_version": "1.0.0",
+        "meeting_pack_id": meeting_pack_id,
+        "scenario": context["scenario"],
+        "meeting_window": context.get("meeting_window"),
+        "readiness": readiness,
+        "lifecycle": lifecycle["lifecycle"],
+        "input_audit_id": audit.get("input_audit_id") or context.get("program_status", {}).get("input_audit_id"),
+        "program_status_snapshot_id": context.get("program_status", {}).get("snapshot_id"),
+        "baseline_revision": context.get("program_status", {}).get("baseline_revision"),
+        "flow_graph_id": flow.get("flow_graph_id"),
+        "flow_selection_id": flow.get("selection_id"),
+        "flow_scope_id": flow.get("scope_id"),
+        "selected_node_ids": [item.get("node_id") for item in flow.get("nodes", []) if item.get("node_id")],
+        "selected_edge_ids": [item.get("edge_id") for item in flow.get("edges", []) if item.get("edge_id")],
+        "information_budget": {
+            key: value for key, value in context.get("information_budget", {}).items() if key != "omitted"
+        },
+    }
+    if lifecycle.get("official_panel_archive"):
+        metadata["official_panel_archive"] = lifecycle["official_panel_archive"]
+    return metadata
+
+
+def resolve_meeting_lifecycle(memory_root: Path, meeting_pack_id: str) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    for path in sorted((memory_root / "meetings" / "receipts").glob("*.json")):
+        try:
+            receipt = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if receipt.get("lineage", {}).get("meeting_pack_id") == meeting_pack_id:
+            matches.append(receipt)
+    if not matches:
+        return {"lifecycle": "pre-meeting-snapshot"}
+    receipt = max(matches, key=lambda item: clean(item.get("applied_at") or item.get("started_at")))
+    if receipt.get("status") != "applied" or receipt.get("sync_status") == "failed":
+        return {"lifecycle": "sync-failed"}
+    official = receipt.get("official_panel_archive")
+    if isinstance(official, dict) and official.get("panel_id"):
+        return {"lifecycle": "post-sync-official", "official_panel_archive": official}
+    return {"lifecycle": "current-derived"}
 
 
 def build_business_biweekly_context(
@@ -1441,8 +1892,13 @@ def action_board_rows(action_groups: dict[str, list[dict[str, str]]]) -> list[di
 
 def render_markdown(context: dict[str, Any]) -> str:
     if context["scenario"] == "business-biweekly":
-        return render_business_biweekly(context)
-    return render_fde_morning(context)
+        rendered = render_business_biweekly(context)
+    else:
+        rendered = render_fde_morning(context)
+    metadata = meeting_artifact_metadata(context, stable_meeting_pack_id(context))
+    return rendered.rstrip() + "\n\n<!-- adp:artifact-metadata:v1 -->\n\n```json\n" + json.dumps(
+        metadata, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n```\n"
 
 
 def render_fde_morning(context: dict[str, Any]) -> str:
@@ -1460,6 +1916,7 @@ def render_fde_morning(context: dict[str, Any]) -> str:
             "",
         ]
     )
+    lines.extend(render_progress(context, include_forecast=False))
     lines.extend(localized_section(context, "meeting.section.period_delta", ["Change Type", "Item", "From", "To", "Source"], fde["period_delta"]))
     lines.extend(localized_section(context, "meeting.section.today_blockers", ["Severity", "Source", "Workstream", "Item", "Owner"], fde["blockers"]))
     lines.extend(localized_section(context, "meeting.section.today_commitments", ["Owner", "Action ID", "Status", "Workstream", "Action", "Due / Trigger", "Closure Criteria", "Source"], fde["commitments"]))
@@ -1496,6 +1953,7 @@ def render_business_biweekly(context: dict[str, Any]) -> str:
             "",
         ]
     )
+    lines.extend(render_progress(context, include_forecast=True))
     lines.extend(localized_section(context, "meeting.section.baseline_forecast", ["ID", "Name", "Workstream", "Status", "Planned", "Forecast", "Actual", "Variance", "Rule ID", "Source"], business["baseline_forecast_items"]))
     lines.extend(localized_section(context, "meeting.section.gates", ["ID", "Name", "Status", "Planned", "Forecast", "Actual", "Variance", "Rule ID", "Source"], business["gate_items"]))
     lines.extend(localized_section(context, "meeting.section.top_variances", ["ID", "Name", "Workstream", "Status", "Planned", "Forecast", "Actual", "Variance", "Rule ID", "Source"], business["top_variance_items"]))
@@ -1516,6 +1974,50 @@ def render_business_biweekly(context: dict[str, Any]) -> str:
     lines.extend(omitted_appendix(context))
     lines.extend(source_inventory(context))
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_progress(context: dict[str, Any], *, include_forecast: bool) -> list[str]:
+    progress = context["program_status"]["progress"]
+    current = progress["overall"]["current"]
+    forecast = progress["overall"]["forecast_summary"]
+    lines = [
+        f"## {message(context, 'status.progress_title')}",
+        "",
+        f"- {message(context, 'status.progress_schema')}: `{progress['progress_schema_version']}`",
+        f"- {message(context, 'status.progress_measurement')}: `{progress['measurement_status']}`",
+        f"- {message(context, 'status.progress_actual')}: {progress_value(current['actual_completion_percent'], '%')}",
+        f"- {message(context, 'status.progress_planned')}: {progress_value(current['planned_completion_percent'], '%')}",
+        f"- {message(context, 'status.progress_gap')}: {progress_value(current['completion_gap_pp'], ' pp')}",
+    ]
+    if include_forecast:
+        lines.extend(
+            [
+                f"- {message(context, 'status.progress_forecast')}: {progress_value(forecast['forecast_completion_percent'], '%')}",
+                f"- {message(context, 'status.progress_coverage')}: {progress_value(forecast['forecast_coverage_percent'], '%')} (`{forecast['forecast_coverage_status']}`)",
+            ]
+        )
+    lines.extend([f"- {message(context, 'status.progress_comparability')}: `{progress['overall']['comparability']['disposition']}`", ""])
+    rows: list[dict[str, str]] = []
+    for item in progress["by_workstream"]:
+        values = item["current"]
+        rows.append(
+            {
+                "Workstream": item["workstream_id"],
+                "Kind": item["progress_kind"],
+                "Measurement": item["measurement_status"],
+                "Actual": progress_value(values["actual_completion_percent"], "%"),
+                "Planned": progress_value(values["planned_completion_percent"], "%"),
+                "Gap": progress_value(values["completion_gap_pp"], " pp"),
+                "Project Weight": progress_value(values["project_weight_percent"], "%"),
+                "Contribution": progress_value(values["completed_contribution_pp"], " pp"),
+            }
+        )
+    lines.extend(localized_section(context, "status.progress_workstreams", ["Workstream", "Kind", "Measurement", "Actual", "Planned", "Gap", "Project Weight", "Contribution"], rows))
+    return lines
+
+
+def progress_value(value: Any, suffix: str) -> str:
+    return "-" if value is None else f"{float(value):.2f}{suffix}"
 
 
 def header_lines(context: dict[str, Any], title: str) -> list[str]:

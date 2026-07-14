@@ -69,6 +69,33 @@ def clean_scalar(value: str) -> Any:
     return text
 
 
+def strip_yaml_comment(value: str) -> str:
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+        elif quote == "'":
+            if character == quote:
+                if index + 1 < len(value) and value[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+        elif character in {"'", '"'}:
+            quote = character
+        elif character == "#":
+            return value[:index].rstrip()
+        index += 1
+    return value.rstrip()
+
+
 def parse_simple_yaml(path: Path) -> tuple[dict[str, Any], list[str]]:
     values: dict[str, Any] = {}
     warnings: list[str] = []
@@ -76,7 +103,7 @@ def parse_simple_yaml(path: Path) -> tuple[dict[str, Any], list[str]]:
     for line_no, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
-        content = raw.split("#", 1)[0].rstrip()
+        content = strip_yaml_comment(raw)
         if ":" not in content:
             warnings.append(f"{path}: ignored non key-value YAML at line {line_no}")
             continue

@@ -1,0 +1,80 @@
+{
+  "baseline": {
+    "flow_contract_version": "1.0.0",
+    "baseline_id": "PROGRAM-BASELINE",
+    "revision": 2,
+    "gates": [
+      {
+        "id": "G-MERGE",
+        "name": "Merge gate",
+        "node_type": "gate",
+        "lane": {"lane_type": "program", "lane_id": "PROGRAM"},
+        "confirmation_status": "approved",
+        "source": {"type": "approved-plan", "reference": "plans/program-baseline.md#G-MERGE", "confirmed_by": "Program owner"},
+        "dependencies": [
+          {"edge_id": "E-A", "predecessor": "M-A", "relationship_type": "aggregation", "source": {"type": "approved-plan", "reference": "plans/program-baseline.md#G-MERGE", "confirmed_by": "Program owner"}, "baseline_revision": 2},
+          {"edge_id": "E-B", "predecessor": "M-B", "relationship_type": "aggregation", "source": {"type": "approved-plan", "reference": "plans/program-baseline.md#G-MERGE", "confirmed_by": "Program owner"}, "baseline_revision": 2}
+        ],
+        "predecessor_rule": "all",
+        "baseline_revision": 2
+      }
+    ],
+    "milestones": [
+      {"id": "M-A", "name": "Lane A", "node_type": "milestone", "lane": {"lane_type": "workstream", "lane_id": "L1"}, "confirmation_status": "approved", "source": {"type": "approved-plan", "reference": "plans/program-baseline.md#M-A", "confirmed_by": "L1 owner"}, "dependencies": [], "baseline_revision": 2},
+      {"id": "M-B", "name": "Lane B", "node_type": "milestone", "lane": {"lane_type": "workstream", "lane_id": "L2"}, "confirmation_status": "approved", "source": {"type": "approved-plan", "reference": "plans/program-baseline.md#M-B", "confirmed_by": "L2 owner"}, "dependencies": [], "baseline_revision": 2}
+    ]
+  },
+  "program_status": {
+    "flow_state_schema_version": "1.0.0",
+    "baseline_id": "PROGRAM-BASELINE",
+    "baseline_revision": 2,
+    "as_of": "2026-07-13T12:00:00Z",
+    "node_states": [
+      {
+        "node_id": "G-MERGE",
+        "baseline_revision": 2,
+        "evaluated_at": "2026-07-13T12:00:00Z",
+        "execution": {"value": "ready", "rule_id": "EXEC-READY", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.G-MERGE.execution", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]},
+        "health": {"value": "blocked", "rule_id": "HEALTH-BLOCKED", "sources": [{"artifact_id": "STATUS-1", "artifact_path": "views/program-status.json", "field": "flow_state.G-MERGE.health", "source_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}
+      }
+    ],
+    "compatibility": {"strategy": "version-required", "migration_error_code": "ADP-FLOW-STATE-MIGRATION-REQUIRED"}
+  },
+  "actions": {
+    "action_flow_schema_version": "1.0.0",
+    "actions": [
+      {
+        "action_id": "A-DONE",
+        "status": "done",
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-10T00:00:00Z",
+        "started_at": "2026-07-02T00:00:00Z",
+        "done_at": "2026-07-10T00:00:00Z",
+        "cancelled_at": null,
+        "baseline_revision": 2,
+        "related_plan_item_ids": ["M-A"],
+        "related_flow_edge_ids": [],
+        "source": {"artifact_id": "ACTION-LEDGER-1", "artifact_path": "actions/action-ledger.md", "source_fingerprint": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+      }
+    ],
+    "compatibility": {"strategy": "preserve-unmapped", "migration_error_code": "ADP-ACTION-FLOW-MIGRATION-REQUIRED"}
+  },
+  "risks": {
+    "risk_flow_schema_version": "1.0.0",
+    "risks": [
+      {
+        "risk_id": "R-BLOCKED",
+        "lifecycle": "mitigating",
+        "relation_state": "blocked",
+        "observed_at": "2026-07-02T00:00:00Z",
+        "terminal_at": null,
+        "baseline_revision": 2,
+        "related_plan_item_ids": [],
+        "related_flow_edge_ids": ["E-A"],
+        "rule_id": "RISK-BLOCKED",
+        "sources": [{"artifact_id": "RISK-REGISTER-1", "artifact_path": "views/risk-matrix.md", "field": "R-BLOCKED", "source_fingerprint": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}]
+      }
+    ],
+    "compatibility": {"strategy": "preserve-unmapped", "migration_error_code": "ADP-RISK-FLOW-MIGRATION-REQUIRED"}
+  }
+}

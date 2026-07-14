@@ -15,12 +15,18 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from progress_projection import (
+    ProgressContractError,
+    build_progress_projection,
+    validate_progress_projection,
+)
 
-GENERATOR_VERSION = "1.0.0"
+
+GENERATOR_VERSION = "2.0.2"
 SCHEMA_VERSION = "1.0"
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_CONFIG_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/adp_effective_config.py"
@@ -30,7 +36,7 @@ DEFAULT_MEMLOG_SCRIPT = Path(__file__).resolve().parents[3] / "_bmad/scripts/mem
 STATUS_VALUES = {"on-plan", "at-risk", "off-plan", "indeterminate"}
 STATUS_RANK = {"on-plan": 0, "indeterminate": 1, "at-risk": 2, "off-plan": 3}
 CONFIDENCE_RANK = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
-MILESTONE_STATUSES = {"planned", "at-risk", "done", "blocked"}
+MILESTONE_STATUSES = {"planned", "in-progress", "at-risk", "done", "blocked"}
 MISSING_VALUES = {"", "tbd", "n/a", "na", "none", "unknown", "-"}
 SIGNAL_TYPES = {"gate", "milestone", "dependency", "readiness", "project"}
 SNAPSHOT_FILE = re.compile(r"^ps-[0-9a-f]{16}\.json$")
@@ -126,7 +132,7 @@ def main() -> int:
         result = run(args)
     except DependencyError as exc:
         result = dependency_failure_result(args, exc)
-    except (ContractError, OSError, json.JSONDecodeError, ImportError) as exc:
+    except (ContractError, ProgressContractError, OSError, json.JSONDecodeError, ImportError) as exc:
         result = failure_result(args, str(exc))
     if args.headless:
         result = finalize_headless_result(args, result, memlog or resolve_headless_memlog(args))
@@ -252,7 +258,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ["adp-state-audit"],
         )
     for key, value in audit.get("source_fingerprints", {}).items():
-        source_fingerprints.setdefault(normalize_path_key(str(key)), normalize_hash(value))
+        normalized_key = normalize_path_key(str(key))
+        if any(normalize_path_key(existing) == normalized_key for existing in source_fingerprints):
+            continue
+        source_fingerprints[normalized_key] = normalize_hash(value)
 
     signals: list[dict[str, Any]] = []
     if args.signals_json:
@@ -260,6 +269,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         signals = validate_signals(load_json(signal_path), baseline)
         add_file_source(project_root, signal_path, "status-signals", source_inventory, source_fingerprints)
         add_signal_sources(project_root, signals, source_inventory, source_fingerprints)
+        signals, signal_findings = filter_current_signals(
+            signals,
+            as_of,
+            int(config.get("values", {}).get("status_stale_after_days", 7)),
+        )
+        findings.extend(signal_findings)
 
     previous = resolve_previous_snapshot(memory_root, args.previous_snapshot, period, exclude_id=None)
     model = compute_model(
@@ -332,6 +347,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "input_audit_id": model["input_audit_id"],
         "as_of": model["as_of"],
         "period_delta": model["period_delta"],
+        "progress_schema_version": model["progress"]["progress_schema_version"],
+        "progress_measurement_status": model["progress"]["measurement_status"],
         "locale": locale,
         "fallbacks": config.get("fallbacks", []),
         "warnings": config.get("warnings", []),
@@ -366,7 +383,18 @@ def compute_model(
     milestone_signals = index_target_signals(signals, "milestone")
     gate_signals = index_target_signals(signals, "gate")
     milestones = [
-        assess_milestone(item, rows.get(str(item["id"])), milestone_signals.get(str(item["id"]), []), baseline, critical_ids, as_of, locale, config_module)
+        assess_milestone(
+            item,
+            rows.get(str(item["id"])),
+            milestone_signals.get(str(item["id"]), []),
+            baseline,
+            critical_ids,
+            as_of,
+            locale,
+            config_module,
+            findings,
+            audit,
+        )
         for item in baseline.get("milestones", [])
     ]
     gates = [
@@ -378,13 +406,29 @@ def compute_model(
     constraints = [*gates, *milestones, project_target, *standalone_signals]
     overall_status, overall_rule = overall_judgment(constraints)
     confidence, confidence_reason_keys = compute_confidence(audit, constraints, config)
-    weighted_progress = compute_weighted_progress(baseline, milestones)
-    weighted_progress["reason"] = config_module.message(weighted_progress["reason_key"], locale)
     variances = sorted_variances(constraints)
     rule_ids = sorted({overall_rule, *(str(item["rule_id"]) for item in constraints)})
     inventory = sorted(unique_dicts(source_inventory, "path"), key=lambda item: (str(item.get("type")), str(item.get("path"))))
     fingerprints = dict(sorted(source_fingerprints.items()))
-    snapshot_id = stable_snapshot_id(period, as_of, int(baseline["revision"]), fingerprints, locale)
+    progress = build_progress_projection(
+        baseline=baseline,
+        assessed_milestones=milestones,
+        assessed_gates=gates,
+        rows=rows,
+        audit=audit,
+        as_of=as_of,
+        reporting_period=period,
+        source_fingerprints=fingerprints,
+        previous_snapshot=previous,
+    )
+    snapshot_id = stable_snapshot_id(period, as_of, int(baseline["revision"]), fingerprints, locale, previous)
+    flow_state = build_flow_state(
+        baseline=baseline,
+        assessed_milestones=milestones,
+        assessed_gates=gates,
+        snapshot_id=snapshot_id,
+        as_of=as_of,
+    )
     model: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "snapshot_id": snapshot_id,
@@ -415,7 +459,9 @@ def compute_model(
             "target_date": baseline["project"]["target_date"],
             "target_assessment": project_target,
         },
-        "progress": weighted_progress,
+        "progress": progress,
+        "flow_state": flow_state,
+        "progress_reason_label": config_module.message(progress["reason_key"], locale),
         "milestones": milestones,
         "gates": gates,
         "critical_path": [item for item in constraints if item.get("critical")],
@@ -429,6 +475,104 @@ def compute_model(
     return model
 
 
+def build_flow_state(
+    *,
+    baseline: dict[str, Any],
+    assessed_milestones: list[dict[str, Any]],
+    assessed_gates: list[dict[str, Any]],
+    snapshot_id: str,
+    as_of: date,
+) -> dict[str, Any]:
+    assessed = {str(item["id"]): item for item in [*assessed_gates, *assessed_milestones]}
+    baseline_items = {
+        str(item["id"]): item
+        for collection in ("gates", "milestones")
+        for item in baseline.get(collection, [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    if set(assessed) != set(baseline_items):
+        raise ContractError("flow state requires one assessed record for every baseline milestone and gate")
+    timestamp = datetime.combine(as_of, time(23, 59, 59), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    executions: dict[str, str] = {}
+    for node_id, item in assessed.items():
+        source_status = str(item.get("source_status") or "planned")
+        if item.get("actual_date"):
+            executions[node_id] = "complete"
+        elif source_status == "in-progress":
+            executions[node_id] = "in-progress"
+        else:
+            executions[node_id] = "planned"
+
+    predecessors: dict[str, list[tuple[str, str]]] = {node_id: [] for node_id in baseline_items}
+    for target, item in baseline_items.items():
+        for supplied in item.get("dependencies", []) if isinstance(item.get("dependencies"), list) else []:
+            if isinstance(supplied, str):
+                predecessors[target].append((supplied, "dependency"))
+            elif isinstance(supplied, dict):
+                predecessors[target].append((str(supplied.get("predecessor") or ""), str(supplied.get("relationship_type") or "")))
+    changed = True
+    while changed:
+        changed = False
+        for node_id in sorted(executions):
+            if executions[node_id] != "planned":
+                continue
+            blocking = [(pred, edge_type) for pred, edge_type in predecessors[node_id] if edge_type not in {"informational", "rework", "conditional"}]
+            has_unconfirmed_branch = any(edge_type in {"conditional", "rework"} for _, edge_type in predecessors[node_id])
+            if has_unconfirmed_branch:
+                continue
+            if not blocking or all(executions.get(pred) == "complete" for pred, _ in blocking):
+                executions[node_id] = "ready"
+                changed = True
+
+    node_states: list[dict[str, Any]] = []
+    for node_id in sorted(assessed):
+        assessed_item = assessed[node_id]
+        canonical_assessment = {key: value for key, value in assessed_item.items() if key != "status_label"}
+        source_fingerprint = "sha256:" + hashlib.sha256(canonical_bytes(canonical_assessment)).hexdigest()
+        source = {
+            "artifact_id": f"PROGRAM-STATUS-R{baseline['revision']}",
+            "artifact_path": "views/program-status.json",
+            "field": f"flow_state.{node_id}",
+            "source_fingerprint": source_fingerprint,
+        }
+        execution = executions[node_id]
+        if execution == "complete":
+            execution_rule = "EXEC-ACTUAL-EVIDENCE"
+        elif execution == "in-progress":
+            execution_rule = "EXEC-STARTED"
+        elif execution == "ready":
+            execution_rule = "EXEC-PREDECESSORS-SATISFIED"
+        else:
+            execution_rule = "EXEC-PLANNED"
+        source_status = str(assessed_item.get("source_status") or "")
+        status = str(assessed_item.get("status") or "indeterminate")
+        if source_status == "blocked":
+            health, health_rule = "blocked", "HEALTH-SOURCE-BLOCKED"
+        elif status in {"at-risk", "off-plan"}:
+            health, health_rule = "at-risk", "HEALTH-PLAN-RISK"
+        elif status == "on-plan":
+            health, health_rule = "on-plan", "HEALTH-ON-PLAN"
+        else:
+            health, health_rule = "indeterminate", "HEALTH-INDETERMINATE"
+        node_states.append(
+            {
+                "node_id": node_id,
+                "baseline_revision": int(baseline["revision"]),
+                "evaluated_at": timestamp,
+                "execution": {"value": execution, "rule_id": execution_rule, "sources": [source]},
+                "health": {"value": health, "rule_id": health_rule, "sources": [source]},
+            }
+        )
+    return {
+        "flow_state_schema_version": "1.0.0",
+        "baseline_id": str(baseline["baseline_id"]),
+        "baseline_revision": int(baseline["revision"]),
+        "as_of": timestamp,
+        "node_states": node_states,
+        "compatibility": {"strategy": "version-required", "migration_error_code": "ADP-FLOW-STATE-MIGRATION-REQUIRED"},
+    }
+
+
 def assess_milestone(
     item: dict[str, Any],
     row: dict[str, Any] | None,
@@ -438,12 +582,36 @@ def assess_milestone(
     as_of: date,
     locale: str,
     config_module: Any,
+    findings: list[dict[str, Any]],
+    audit: dict[str, Any],
 ) -> dict[str, Any]:
     planned = parse_date(str(item["planned_date"]), f"milestone {item['id']} planned date")
     tolerance = item.get("tolerance_days", baseline.get("default_tolerance_days", 0))
     tolerance = int(tolerance)
     forecast = optional_date((row or {}).get("forecast"), f"milestone {item['id']} forecast")
     actual = optional_date((row or {}).get("actual"), f"milestone {item['id']} actual")
+    excluded_actual = actual
+    actual_exclusion_reason: str | None = None
+    if actual and actual > as_of:
+        actual_exclusion_reason = "future-actual"
+    elif actual and not str(item.get("completion_criteria") or "").strip():
+        actual_exclusion_reason = "missing-completion-criteria"
+    elif actual and not (row or {}).get("source_references"):
+        actual_exclusion_reason = "missing-evidence"
+    elif actual and normalize_path_key(str((row or {}).get("wdr_path") or "")) not in {
+        normalize_path_key(str(path)) for path in audit.get("source_fingerprints", {})
+    }:
+        actual_exclusion_reason = "unaudited-actual"
+    if actual_exclusion_reason:
+        findings.append(
+            program_finding(
+                "status.future_actual" if actual_exclusion_reason == "future-actual" else "status.actual_ineligible",
+                "warning",
+                f"milestone {item['id']} actual date {actual.isoformat()} was excluded by {actual_exclusion_reason}",
+                str(item["id"]),
+            )
+        )
+        actual = None
     source_status = normalized_value((row or {}).get("status")) or "planned"
     if source_status not in MILESTONE_STATUSES:
         raise ContractError(f"milestone {item['id']} has unsupported source status {source_status!r}")
@@ -464,6 +632,8 @@ def assess_milestone(
         status, rule = ("off-plan", "PS-MS-BLOCKED-PAST-TOLERANCE") if as_of > allowed else ("at-risk", "PS-MS-BLOCKED")
     elif source_status == "at-risk":
         status, rule = "at-risk", "PS-MS-SOURCE-AT-RISK"
+    elif source_status == "in-progress":
+        status, rule = "on-plan", "PS-MS-SOURCE-IN-PROGRESS"
     elif source_status == "done":
         status, rule = "indeterminate", "PS-MS-DONE-WITHOUT-ACTUAL"
     elif as_of > allowed:
@@ -481,6 +651,9 @@ def assess_milestone(
         "planned_date": planned.isoformat(),
         "forecast_date": forecast.isoformat() if forecast else None,
         "actual_date": actual.isoformat() if actual else None,
+        "excluded_future_actual_date": excluded_actual.isoformat() if excluded_actual and actual_exclusion_reason == "future-actual" else None,
+        "excluded_actual_date": excluded_actual.isoformat() if excluded_actual and actual_exclusion_reason else None,
+        "actual_exclusion_reason": actual_exclusion_reason,
         "tolerance_days": tolerance,
         "variance_days": variance,
         "source_status": source_status,
@@ -643,26 +816,6 @@ def lower_confidence(current: str, ceiling: str) -> str:
     return current if current_rank <= CONFIDENCE_RANK[ceiling] else ceiling
 
 
-def compute_weighted_progress(baseline: dict[str, Any], milestones: list[dict[str, Any]]) -> dict[str, Any]:
-    weighting = baseline.get("weighting", {})
-    if not weighting.get("enabled"):
-        return {
-            "weighted_completion_percent": None,
-            "completion_measure": None,
-            "reason_key": "status.progress_reason.weighting_disabled",
-        }
-    by_id = {str(item["id"]): item for item in baseline.get("milestones", [])}
-    completed = 0.0
-    for milestone in milestones:
-        if milestone.get("actual_date"):
-            completed += float(by_id[milestone["id"]]["weight"])
-    return {
-        "weighted_completion_percent": round(completed, 2),
-        "completion_measure": weighting["completion_measure"],
-        "reason_key": "status.progress_reason.weighted_actuals",
-    }
-
-
 def sorted_variances(constraints: list[dict[str, Any]]) -> list[dict[str, Any]]:
     selected = [item for item in constraints if item["status"] != "on-plan" or item.get("variance_days") not in {None, 0}]
     return sorted(
@@ -763,6 +916,11 @@ def collect_milestone_rows(
                 "actual": row_value(row, "actual"),
                 "source_references": split_references(row_value(row, "source")),
                 "wdr_path": relative_path(project_root, path),
+                "correction_id": row_value(row, "correction id"),
+                "correction_kind": row_value(row, "correction kind"),
+                "correction_audit_id": row_value(row, "correction audit id"),
+                "correction_source": row_value(row, "correction source"),
+                "previous_actual": row_value(row, "previous actual"),
             }
     return rows, sources, findings
 
@@ -792,7 +950,12 @@ def parse_roadmap_table(markdown: str) -> list[dict[str, str]]:
 
 
 def split_markdown_row(line: str) -> list[str]:
-    return [cell.strip().replace("\\|", "|") for cell in line.strip().strip("|").split("|")]
+    content = line.strip()
+    if content.startswith("|"):
+        content = content[1:]
+    if content.endswith("|") and not content.endswith("\\|"):
+        content = content[:-1]
+    return [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", content)]
 
 
 def normalize_header(value: str) -> str:
@@ -915,6 +1078,52 @@ def validate_signals(payload: dict[str, Any], baseline: dict[str, Any]) -> list[
     return result
 
 
+def filter_current_signals(
+    signals: list[dict[str, Any]], as_of: date, stale_after_days: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    current: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    for signal in signals:
+        observed_at = signal.get("observed_at")
+        if not observed_at:
+            current.append(signal)
+            continue
+        observed_date = parse_observed_date(str(observed_at), str(signal["id"]))
+        if observed_date > as_of:
+            findings.append(
+                program_finding(
+                    "status.signal_future",
+                    "warning",
+                    f"signal {signal['id']} observed_at {observed_date.isoformat()} is after as-of {as_of.isoformat()} and was excluded",
+                    str(signal["id"]),
+                )
+            )
+        elif (as_of - observed_date).days > stale_after_days:
+            findings.append(
+                program_finding(
+                    "status.signal_stale",
+                    "warning",
+                    f"signal {signal['id']} is older than status_stale_after_days={stale_after_days} and was excluded",
+                    str(signal["id"]),
+                )
+            )
+        else:
+            current.append(signal)
+    return current, findings
+
+
+def parse_observed_date(value: str, signal_id: str) -> date:
+    try:
+        if "T" not in value:
+            return date.fromisoformat(value)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timezone is required")
+        return parsed.astimezone(timezone.utc).date()
+    except ValueError as exc:
+        raise ContractError(f"signal {signal_id} observed_at must be an ISO date or timezone-aware timestamp") from exc
+
+
 def index_target_signals(signals: list[dict[str, Any]], kind: str) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {}
     for signal in signals:
@@ -963,13 +1172,18 @@ def resolve_previous_snapshot(
         if item.get("snapshot_id") == exclude_id:
             continue
         item_period = item.get("reporting_period", {})
-        if str(item_period.get("end") or "") <= period["end"]:
+        if str(item_period.get("end") or "") < period["end"]:
             candidates.append(item)
     return max(candidates, key=lambda item: (str(item.get("reporting_period", {}).get("end", "")), str(item.get("as_of", "")), str(item.get("snapshot_id", ""))), default=None)
 
 
 def stable_snapshot_id(
-    period: dict[str, str], as_of: date, revision: int, fingerprints: dict[str, str], locale: str
+    period: dict[str, str],
+    as_of: date,
+    revision: int,
+    fingerprints: dict[str, str],
+    locale: str,
+    previous: dict[str, Any] | None,
 ) -> str:
     payload = {
         "reporting_period": period,
@@ -978,6 +1192,7 @@ def stable_snapshot_id(
         "source_fingerprints": fingerprints,
         "locale": locale,
         "generator_version": GENERATOR_VERSION,
+        "previous_snapshot_fingerprint": hashlib.sha256(canonical_bytes(previous)).hexdigest() if previous else None,
     }
     digest = hashlib.sha256(canonical_bytes(payload)).hexdigest()[:16]
     return f"ps-{digest}"
@@ -1056,15 +1271,20 @@ def publish_staged_outputs(operation: dict[str, Any]) -> dict[str, str]:
 
 def create_immutable(path: Path, text: str, model: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(raw_temp)
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        verify_existing_snapshot(load_json(path), model)
-        return
-    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp_path, path)
+        except FileExistsError:
+            verify_existing_snapshot(load_json(path), model)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -1099,6 +1319,10 @@ def render_program_status(model: dict[str, Any], locale: str, config_module: Any
         f"## {m('status.executive_summary')}",
         "",
         m(f"status.summary.{model['overall_status']}"),
+        "",
+        f"## {m('status.progress_title')}",
+        "",
+        *render_progress(model["progress"], m),
         "",
         f"## {m('status.critical_constraints')}",
         "",
@@ -1135,6 +1359,10 @@ def render_weekly_report(model: dict[str, Any], locale: str, config_module: Any)
         "",
         f"**{status_label}** / {confidence_label}. {summary}",
         "",
+        f"## {m('status.progress_title')}",
+        "",
+        *render_progress(model["progress"], m),
+        "",
         f"## {m('status.period_changes')}",
         "",
         *render_delta(delta, m),
@@ -1168,6 +1396,10 @@ def render_project_lead(model: dict[str, Any], locale: str, config_module: Any) 
         f"- {m('field.owner')}: {model['project']['owner']}",
         f"- {m('field.target_date')}: {config_module.format_date(model['project']['target_date'], locale)}",
         "",
+        f"## {m('status.progress_title')}",
+        "",
+        *render_progress(model["progress"], m),
+        "",
         f"## {m('baseline.gates')}",
         "",
         *render_constraint_table(model["gates"], locale, config_module, m),
@@ -1190,6 +1422,7 @@ def render_project_lead(model: dict[str, Any], locale: str, config_module: Any) 
 
 def append_artifact_metadata(lines: list[str], model: dict[str, Any], render_contract: dict[str, Any]) -> None:
     metadata = {
+        "snapshot_id": model["snapshot_id"],
         "generated_at": model["generated_at"],
         "as_of": model["as_of"],
         "reporting_period": model["reporting_period"],
@@ -1202,6 +1435,9 @@ def append_artifact_metadata(lines: list[str], model: dict[str, Any], render_con
         "locale_fallback": model["locale_fallback"],
         "render_contract": render_contract,
         "generator_version": model["generator_version"],
+        "progress_schema_version": model["progress"]["progress_schema_version"],
+        "progress_scope_identity": model["progress"]["scope_identity"],
+        "flow_state_schema_version": model["flow_state"]["flow_state_schema_version"],
     }
     lines.extend(
         [
@@ -1213,6 +1449,56 @@ def append_artifact_metadata(lines: list[str], model: dict[str, Any], render_con
             "```",
         ]
     )
+
+
+def render_progress(progress: dict[str, Any], m: RenderCatalog) -> list[str]:
+    overall = progress["overall"]
+    current = overall["current"]
+    forecast = overall["forecast_summary"]
+    lines = [
+        f"- {m('status.progress_schema')}: `{progress['progress_schema_version']}`",
+        f"- {m('status.progress_measurement')}: `{progress['measurement_status']}`",
+        f"- {m('status.progress_actual')}: {display_progress_value(current['actual_completion_percent'], '%')}",
+        f"- {m('status.progress_planned')}: {display_progress_value(current['planned_completion_percent'], '%')}",
+        f"- {m('status.progress_gap')}: {display_progress_value(current['completion_gap_pp'], ' pp')}",
+        f"- {m('status.progress_forecast')}: {display_progress_value(forecast['forecast_completion_percent'], '%')}",
+        f"- {m('status.progress_coverage')}: {display_progress_value(forecast['forecast_coverage_percent'], '%')} (`{forecast['forecast_coverage_status']}`)",
+        f"- {m('status.progress_comparability')}: `{overall['comparability']['disposition']}`",
+        "",
+        f"### {m('status.progress_workstreams')}",
+        "",
+    ]
+    headers = [
+        m("field.workstream"),
+        m("status.progress_kind"),
+        m("status.progress_measurement"),
+        m("status.progress_actual"),
+        m("status.progress_planned"),
+        m("status.progress_gap"),
+        m("status.progress_project_weight"),
+        m("status.progress_contribution"),
+    ]
+    rows = []
+    for item in progress["by_workstream"]:
+        values = item["current"]
+        rows.append(
+            [
+                item["workstream_id"],
+                item["progress_kind"],
+                item["measurement_status"],
+                display_progress_value(values["actual_completion_percent"], "%"),
+                display_progress_value(values["planned_completion_percent"], "%"),
+                display_progress_value(values["completion_gap_pp"], " pp"),
+                display_progress_value(values["project_weight_percent"], "%"),
+                display_progress_value(values["completed_contribution_pp"], " pp"),
+            ]
+        )
+    lines.extend(markdown_table(headers, rows))
+    return lines
+
+
+def display_progress_value(value: Any, suffix: str) -> str:
+    return "-" if value is None else f"{float(value):.2f}{suffix}"
 
 
 def render_constraint_table(
@@ -1262,7 +1548,9 @@ def upcoming_constraints(model: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
-    clean = lambda value: str(value).replace("|", "\\|").replace("\n", " ")
+    def clean(value: Any) -> str:
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
     return [
         "| " + " | ".join(clean(value) for value in headers) + " |",
         "| " + " | ".join("---" for _ in headers) + " |",
@@ -1287,6 +1575,9 @@ def inspect_latest(project_root: Path, memory_root: Path) -> dict[str, Any]:
             "outputs": {},
         }
     model = load_json(path)
+    if not isinstance(model.get("progress"), dict):
+        raise ContractError("ADP-PROGRESS-MIGRATION-REQUIRED: canonical program-status progress v2 is missing")
+    validate_progress_projection(model["progress"])
     outputs = output_paths(memory_root, str(model.get("snapshot_id")))
     input_audit_path = next(
         (
@@ -1308,6 +1599,8 @@ def inspect_latest(project_root: Path, memory_root: Path) -> dict[str, Any]:
         "input_audit_path": str(input_audit_path) if input_audit_path else None,
         "as_of": model.get("as_of"),
         "period_delta": model.get("period_delta"),
+        "progress_schema_version": model["progress"]["progress_schema_version"],
+        "progress_measurement_status": model["progress"]["measurement_status"],
         "locale": model.get("locale"),
         "fallbacks": ["document_output_language"] if model.get("locale_fallback") else [],
         "warnings": [],
@@ -1664,6 +1957,7 @@ def recommended_from_audit(audit: dict[str, Any]) -> list[str]:
 
 def recovery_workflows(model: dict[str, Any]) -> list[str]:
     workflows = set(model.get("audit_summary", {}).get("recommended_workflows", []))
+    workflows.update(model.get("progress", {}).get("recovery", {}).get("workflows", []))
     for item in [*model.get("milestones", []), *model.get("gates", []), *model.get("signals", [])]:
         if item.get("status") == "indeterminate":
             workflows.add("adp-status-sync" if item.get("constraint_type") == "milestone" else "adp-state-audit")
@@ -1779,7 +2073,11 @@ def relative_path(project_root: Path, path: Path) -> str:
 
 
 def normalize_path_key(value: str) -> str:
-    return value.replace("\\", "/").removeprefix("./")
+    normalized = value.replace("\\", "/").removeprefix("./")
+    memory_marker = "_bmad-output/adp/memory/"
+    if memory_marker in normalized:
+        return normalized.split(memory_marker, 1)[1]
+    return normalized
 
 
 def normalize_hash(value: Any) -> str:

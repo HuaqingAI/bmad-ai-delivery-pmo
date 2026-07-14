@@ -1,0 +1,172 @@
+{
+  "contract_version": "2.0.0",
+  "rounding": "decimal-half-up-2",
+  "cases": [
+    {
+      "name": "inclusive-actual-planned-and-forecast-boundaries",
+      "as_of": "2026-07-13",
+      "horizons": ["2026-07-20"],
+      "milestones": [
+        {
+          "id": "MS-L1-A",
+          "workstream_id": "L1",
+          "weight_percent": 40,
+          "planned_date": "2026-07-13",
+          "forecast_date": null,
+          "actual_date": "2026-07-13",
+          "completion_criteria_defined": true,
+          "evidence_audited": true
+        },
+        {
+          "id": "MS-L1-B",
+          "workstream_id": "L1",
+          "weight_percent": 20,
+          "planned_date": "2026-07-27",
+          "forecast_date": "2026-07-20",
+          "actual_date": null,
+          "completion_criteria_defined": true,
+          "evidence_audited": true
+        },
+        {
+          "id": "MS-L2-A",
+          "workstream_id": "L2",
+          "weight_percent": 40,
+          "planned_date": "2026-07-10",
+          "forecast_date": null,
+          "actual_date": "2026-07-14",
+          "completion_criteria_defined": true,
+          "evidence_audited": true
+        }
+      ],
+      "expected": {
+        "actual_completion_percent": 40,
+        "planned_completion_percent": 80,
+        "completion_gap_pp": -40,
+        "forecast_points": [
+          {
+            "horizon_date": "2026-07-20",
+            "forecast_completion_percent": 60,
+            "forecast_coverage_percent": 33.33,
+            "forecast_coverage_status": "partial"
+          }
+        ],
+        "eligible_actual_ids": ["MS-L1-A"],
+        "excluded_actuals": {"MS-L2-A": "future-actual"},
+        "by_workstream": {
+          "L1": {
+            "actual_completion_percent": 66.67,
+            "planned_completion_percent": 66.67,
+            "completion_gap_pp": 0,
+            "project_weight_percent": 60,
+            "completed_contribution_pp": 40
+          },
+          "L2": {
+            "actual_completion_percent": 0,
+            "planned_completion_percent": 100,
+            "completion_gap_pp": -100,
+            "project_weight_percent": 40,
+            "completed_contribution_pp": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "missing-forecast-never-falls-back-to-planned",
+      "as_of": "2026-07-13",
+      "horizons": ["2026-07-20", "2026-07-27"],
+      "milestones": [
+        {
+          "id": "MS-DONE",
+          "workstream_id": "L1",
+          "weight_percent": 25,
+          "planned_date": "2026-07-01",
+          "forecast_date": null,
+          "actual_date": "2026-07-01",
+          "completion_criteria_defined": true,
+          "evidence_audited": true
+        },
+        {
+          "id": "MS-NO-FORECAST",
+          "workstream_id": "L1",
+          "weight_percent": 75,
+          "planned_date": "2026-07-20",
+          "forecast_date": null,
+          "actual_date": null,
+          "completion_criteria_defined": true,
+          "evidence_audited": true
+        }
+      ],
+      "expected": {
+        "actual_completion_percent": 25,
+        "planned_completion_percent": 25,
+        "completion_gap_pp": 0,
+        "forecast_points": [
+          {
+            "horizon_date": "2026-07-20",
+            "forecast_completion_percent": 25,
+            "forecast_coverage_percent": 0,
+            "forecast_coverage_status": "none"
+          },
+          {
+            "horizon_date": "2026-07-27",
+            "forecast_completion_percent": 25,
+            "forecast_coverage_percent": 0,
+            "forecast_coverage_status": "none"
+          }
+        ],
+        "eligible_actual_ids": ["MS-DONE"],
+        "excluded_actuals": {},
+        "by_workstream": {
+          "L1": {
+            "actual_completion_percent": 25,
+            "planned_completion_percent": 25,
+            "completion_gap_pp": 0,
+            "project_weight_percent": 100,
+            "completed_contribution_pp": 25
+          }
+        }
+      }
+    },
+    {
+      "name": "zero-remaining-weight-is-complete-not-ordinary-full",
+      "as_of": "2026-07-13",
+      "horizons": ["2026-07-20"],
+      "milestones": [
+        {
+          "id": "MS-ALL-DONE",
+          "workstream_id": "L1",
+          "weight_percent": 100,
+          "planned_date": "2026-07-13",
+          "forecast_date": null,
+          "actual_date": "2026-07-13",
+          "completion_criteria_defined": true,
+          "evidence_audited": true
+        }
+      ],
+      "expected": {
+        "actual_completion_percent": 100,
+        "planned_completion_percent": 100,
+        "completion_gap_pp": 0,
+        "forecast_points": [
+          {
+            "horizon_date": "2026-07-20",
+            "forecast_completion_percent": 100,
+            "forecast_coverage_percent": null,
+            "forecast_coverage_status": "complete"
+          }
+        ],
+        "eligible_actual_ids": ["MS-ALL-DONE"],
+        "excluded_actuals": {},
+        "by_workstream": {
+          "L1": {
+            "actual_completion_percent": 100,
+            "planned_completion_percent": 100,
+            "completion_gap_pp": 0,
+            "project_weight_percent": 100,
+            "completed_contribution_pp": 100
+          }
+        }
+      }
+    }
+  ]
+}

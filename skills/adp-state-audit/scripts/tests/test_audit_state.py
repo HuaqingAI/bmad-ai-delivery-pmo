@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "audit_state.py"
@@ -16,6 +17,10 @@ STABLE_INPUT_AUDIT_ID = SCRIPT_GLOBALS["stable_input_audit_id"]
 AUDIT_CONTENT_HASH = SCRIPT_GLOBALS["audit_content_hash"]
 VALIDATE_RENDER_CONTRACT = SCRIPT_GLOBALS["validate_render_contract"]
 RENDER_MARKDOWN = SCRIPT_GLOBALS["render_markdown"]
+ATOMIC_WRITE_PAIR = SCRIPT_GLOBALS["atomic_write_pair"]
+SUCCESSFUL_RECEIPT_PAYLOAD = SCRIPT_GLOBALS["successful_receipt_payload"]
+VALIDATE_FLOW_GRAPH_CONTRACT = SCRIPT_GLOBALS["validate_flow_graph_contract"]
+FINGERPRINTS_EQUAL = SCRIPT_GLOBALS["fingerprints_equal"]
 PREPASS_SCRIPT = SCRIPT.parents[2] / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
 LOCALE_CATALOG_PATH = SCRIPT.parents[2] / "adp-plan-baseline" / "assets" / "locale-catalog.json"
 LOCALE_CATALOG = json.loads(LOCALE_CATALOG_PATH.read_text(encoding="utf-8"))
@@ -60,6 +65,29 @@ L0 references:
 
 
 class AdpStateAuditTests(unittest.TestCase):
+    def test_fingerprint_comparison_accepts_only_equivalent_sha256_encodings(self) -> None:
+        digest = "a" * 64
+
+        self.assertTrue(FINGERPRINTS_EQUAL(digest, "sha256:" + digest))
+        self.assertTrue(FINGERPRINTS_EQUAL("sha256:" + digest, digest))
+        self.assertFalse(FINGERPRINTS_EQUAL("abc123", "abc123"))
+        self.assertFalse(FINGERPRINTS_EQUAL("b" * 64, digest))
+
+    def test_flow_graph_audit_recomputes_identity_references_and_counts(self) -> None:
+        graph_path = SCRIPT.parents[2] / "adp-flow-graph/assets/fixtures/flow-contract-v1/golden-parallel-aggregation-conditional-rework.json"
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(VALIDATE_FLOW_GRAPH_CONTRACT(graph), [])
+
+        tampered = json.loads(json.dumps(graph))
+        tampered["overlays"]["scopes"][0]["allocations"][0]["counts"]["pending"]["count"] = 99
+        tampered["state"]["topology_id"] = "sha256:" + "0" * 64
+        errors = VALIDATE_FLOW_GRAPH_CONTRACT(tampered)
+
+        self.assertIn("graph identity mismatch", errors)
+        self.assertIn("topology identity reference mismatch", errors)
+        self.assertTrue(any("count mismatch" in item for item in errors))
+
     def run_script(self, project_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(SCRIPT), str(project_root), *args],
@@ -1088,7 +1116,7 @@ class AdpStateAuditTests(unittest.TestCase):
                 for finding in audit[group]:
                     self.assertTrue(required_finding_fields.issubset(finding), (group, finding))
             self.assertIn("adp-status-sync", result["recommended_workflows"])
-            self.assertEqual(Path(result["outputs"]["json"]).parent, memory_root / "audits")
+            self.assertEqual(Path(result["outputs"]["json"]).parent.resolve(), (memory_root / "audits").resolve())
             self.assertTrue(audit["input_audit_id"].startswith("input-audit-"))
 
     def test_terminal_business_decision_statuses_are_closed(self) -> None:
@@ -1122,12 +1150,22 @@ class AdpStateAuditTests(unittest.TestCase):
                 json.dumps({"status": "applied", "updates": [{"id": "l1-checkout", "progress": "Done"}]}) + "\n",
                 encoding="utf-8",
             )
-            (intake_root / "legacy-actions.json").write_text(
+            legacy_intake = intake_root / "legacy-actions.json"
+            legacy_intake.write_text(
                 json.dumps({"updates": [{"id": "l1-checkout", "progress": "Applied"}]}) + "\n",
                 encoding="utf-8",
             )
             (intake_root / "legacy-actions-report.json").write_text(
-                json.dumps({"ok": True, "mode": "update", "dry_run": False, "updates": [{"ok": True}]}) + "\n",
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_hash": f"sha256:{hashlib.sha256(legacy_intake.read_bytes()).hexdigest()}",
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
             receipt_intake = intake_root / "receipt-actions.json"
@@ -1147,12 +1185,22 @@ class AdpStateAuditTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            (intake_root / "2026-07-07-2026-07-07-review-actions.json").write_text(
+            review_intake = intake_root / "2026-07-07-2026-07-07-review-actions.json"
+            review_intake.write_text(
                 json.dumps({"updates": [{"id": "l1-checkout", "progress": "Reviewed"}]}) + "\n",
                 encoding="utf-8",
             )
             (intake_root / "2026-07-07-review-actions-report.json").write_text(
-                json.dumps({"ok": True, "mode": "update", "dry_run": False, "updates": [{"ok": True}]}) + "\n",
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_hash": f"sha256:{hashlib.sha256(review_intake.read_bytes()).hexdigest()}",
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
             (intake_root / "migration-dry-run-report.json").write_text(
@@ -1166,6 +1214,41 @@ class AdpStateAuditTests(unittest.TestCase):
 
             self.assertEqual(audit["findings"]["closure"]["unconsumed_intake_files"], [])
 
+    def test_malformed_status_sync_intake_is_a_blocking_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            malformed = memory_root / "intake/status-sync/malformed-actions.json"
+            malformed.write_text("{not-json", encoding="utf-8")
+
+            completed = self.run_script(project_root, "--as-of", "2026-07-10")
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+            unconsumed = audit["findings"]["closure"]["unconsumed_intake_files"]
+
+            self.assertEqual(result["audit_status"], "blocked")
+            self.assertTrue(
+                any(
+                    item["path"] == "intake/status-sync/malformed-actions.json"
+                    and "malformed" in item["reason"]
+                    for item in unconsumed
+                )
+            )
+
+    def test_successful_receipt_requires_matching_input_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake = Path(temp_dir) / "pending-actions.json"
+            payload = {"status": "pending", "updates": [{"id": "l1-checkout"}]}
+            intake.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+            self.assertFalse(
+                SUCCESSFUL_RECEIPT_PAYLOAD(
+                    {"ok": True, "status": "applied", "applied_at": "2026-07-10T10:00:00Z"},
+                    intake,
+                    payload,
+                )
+            )
+
     def test_pending_canonical_intake_is_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -1178,6 +1261,23 @@ class AdpStateAuditTests(unittest.TestCase):
 
             self.assertEqual(result["audit_status"], "blocked")
             self.assertEqual([item["path"] for item in unconsumed], ["intake/status-sync/pending-actions.json"])
+
+    def test_audit_pair_staging_failure_cleans_temps_and_publishes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            json_path = root / "audit.json"
+            markdown_path = root / "audit.md"
+            first_temp = root / ".audit.json.first.tmp"
+            first_temp.write_text("staged", encoding="utf-8")
+            staged = Mock(side_effect=[str(first_temp), OSError("simulated staging interruption")])
+
+            with patch.dict(ATOMIC_WRITE_PAIR.__globals__, {"write_temp_text": staged}):
+                with self.assertRaises(OSError):
+                    ATOMIC_WRITE_PAIR(json_path, "{}\n", markdown_path, "# Audit\n")
+
+            self.assertFalse(json_path.exists())
+            self.assertFalse(markdown_path.exists())
+            self.assertFalse(first_temp.exists())
 
     def test_legitimate_tbd_does_not_mark_generated_view_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1619,7 +1719,10 @@ class AdpStateAuditTests(unittest.TestCase):
             result = json.loads(completed.stdout)
 
             self.assertTrue(result["ok"])
-            self.assertEqual(Path(result["outputs"]["json"]).parent, memory_root / "audits" / "2026-07-10-global")
+            self.assertEqual(
+                Path(result["outputs"]["json"]).parent.resolve(),
+                (memory_root / "audits" / "2026-07-10-global").resolve(),
+            )
 
     def test_run_folder_pattern_cannot_escape_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1985,7 +2088,7 @@ class AdpStateAuditTests(unittest.TestCase):
             trail = Path(helper_result["memlog"]).read_text(encoding="utf-8")
 
             self.assert_failure_contract(helper_result, headless=True)
-            self.assertEqual(Path(helper_result["memlog"]), memlog)
+            self.assertEqual(Path(helper_result["memlog"]).resolve(), memlog.resolve())
             self.assertIn("Memlog helper initialization failed", trail)
 
     def test_headless_success_returns_audit_trail_with_effective_parameters(self) -> None:
@@ -2006,7 +2109,7 @@ class AdpStateAuditTests(unittest.TestCase):
             trail = memlog.read_text(encoding="utf-8")
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["memlog"], str(memlog))
+            self.assertEqual(Path(result["memlog"]).resolve(), memlog.resolve())
             self.assertIn("(assumption) Resolved headless scope and effective audit parameters", trail)
             self.assertIn("(decision) Resolved headless execution and output routing", trail)
             self.assertIn('"execution_mode": "python-fallback"', trail)

@@ -30,6 +30,11 @@ The plan root is a JSON object with `meeting` and `items`. The script validates 
       "source_fingerprints": {"plans/program-baseline.md": "sha256:..."},
       "input_audit_id": "Input audit consumed by program-status",
       "generator_version": "Meeting-pack generator version"
+    },
+    "panel_archive": {
+      "panel_id": "sha256: immutable panel ID",
+      "archive": "snapshots/management-panel/<panel-id>.html",
+      "distribution_profile": "internal-full or shareable-summary"
     }
   },
   "items": [
@@ -82,6 +87,7 @@ Rules:
 - `meeting.lineage` is optional for standalone syncs. For meeting-pack runs, pass `--meeting-pack-distillate`; the writer extracts and verifies all ten lineage fields, while the plan supplies actual `started_at` / `ended_at` timestamps.
 - `meeting_instance_id` identifies the actual meeting, not a generated pack. Reusing it with the same canonical plan is an idempotent replay; reusing it with a changed plan is a conflict.
 - The writer records `plan_fingerprint`, an applied receipt, and deterministic destination markers. Only an applied receipt may advance `meetings/cursors/<scenario>.json`; dry-run and meeting-pack generation never advance it.
+- `meeting.panel_archive` is optional. When present, its HTML must exist below `snapshots/management-panel/` and its embedded manifest must match the panel ID and profile. The association becomes `post-sync-official` only after the final receipt is successfully applied.
 - `no_op` needs `no_op_reason`.
 - `business_decision_needed` needs `packet.decision_needed`.
 - `action` needs a specific owner, `affected_workstreams`, due trigger, and observable `closure_criteria`. The model records semantic uncertainty in `owner_gap` or `closure_gap`; the writer recognizes only missing values and exact `TBD` placeholders.

@@ -77,6 +77,8 @@ Before writing files, produce a compact JSON plan and inspect it for closure. Lo
 
 Use one stable `meeting_instance_id`; the writer generates it when omitted. Same ID and plan resumes or no-ops; same ID with a changed plan fingerprint conflicts.
 
+When a meeting used an archived panel, put its immutable `panel_id`, memory-relative HTML archive path, and `internal-full|shareable-summary` profile in `meeting.panel_archive`. The writer verifies the embedded manifest before any durable write. Dry-run, validation failure, conflict, applying receipts, and cursor conflict never claim an official panel association; the final applied receipt alone records `official_panel_archive`.
+
 ## Args
 
 Headless callers provide `{project-root}`, optional `--memory-root`, either exact `--task-uuid` or `--raw-evidence <path>`, optional prebuilt `--plan <plan.json>`, and one mode: `--dry-run` or `--execute`. Skip candidate confirmation only for an exact source. When no plan is supplied, save the drafted plan, initialize `.memlog.md` beside it through `{project-root}/_bmad/scripts/memlog.py`, and append only material `assumption` and `decision` entries as they occur. Return machine-readable plan, memlog, dry-run/report paths, touched paths, gaps, and next actions; supplied-plan runs create no memlog.
@@ -118,6 +120,7 @@ After syncing, report:
 - daily log, decision log, WDRs, workstream decision files, and Business Decision Packets touched
 - generated status-sync intake files for meeting actions
 - meeting instance ID, replay status, applied receipt, and scenario cursor disposition
+- the official panel ID/archive association when and only when the applied receipt contains it
 - dry-run and execute report paths, whose audits and unresolved gaps are authoritative
 - next useful workflow: usually `adp-status-sync` for cadence updates, `adp-risk-dependency-change-review` for open risk/change/business decisions, or `adp-workstream-register` for unknown workstreams
 

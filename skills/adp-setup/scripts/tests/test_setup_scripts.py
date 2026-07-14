@@ -105,15 +105,17 @@ class AdpSetupScriptTests(unittest.TestCase):
             "adp-state-audit",
             "adp-program-status",
             "adp-roadmap-sync",
+            "adp-flow-graph",
             "adp-meeting-pack",
+            "adp-management-panel",
             "adp-agent-program-lead",
         ]
 
         self.assertEqual(sorted(marketplace["skills"]), expected)
         self.assertEqual(sorted(marketplace["plugins"][0]["skills"]), expected)
         self.assertEqual([Path(path).name for path in marketplace["skills"]], expected_order)
-        self.assertEqual(marketplace["version"], "1.2.0")
-        self.assertEqual(marketplace["plugins"][0]["version"], "1.2.0")
+        self.assertEqual(marketplace["version"], "1.3.0")
+        self.assertEqual(marketplace["plugins"][0]["version"], "1.3.0")
 
     def test_module_help_registers_all_skills_in_lifecycle_order(self) -> None:
         header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
@@ -137,7 +139,9 @@ class AdpSetupScriptTests(unittest.TestCase):
             "adp-state-audit",
             "adp-program-status",
             "adp-roadmap-sync",
+            "adp-flow-graph",
             "adp-meeting-pack",
+            "adp-management-panel",
             "adp-agent-program-lead",
         ]
         self.assertEqual([row[skill_index] for row in rows], expected_order)
@@ -155,6 +159,18 @@ class AdpSetupScriptTests(unittest.TestCase):
             row_by_skill["adp-roadmap-sync"][output_index],
             "{project-root}/_bmad-output/adp/memory/views",
         )
+        self.assertEqual(
+            row_by_skill["adp-flow-graph"][output_index],
+            "{project-root}/_bmad-output/adp/memory/views",
+        )
+        self.assertEqual(
+            row_by_skill["adp-management-panel"][output_index],
+            "{project-root}/_bmad-output/adp/memory/views/management-panel",
+        )
+        self.assertIn("--scopes <json>", row_by_skill["adp-flow-graph"][args_index])
+        self.assertIn("internal-full|shareable-summary", row_by_skill["adp-management-panel"][args_index])
+        self.assertIn("action-flow relation", row_by_skill["adp-status-sync"][outputs_index])
+        self.assertIn("risk-flow relation", row_by_skill["adp-risk-dependency-change-review"][outputs_index])
         self.assertEqual(
             row_by_skill["adp-plan-baseline"][output_index],
             "{project-root}/_bmad-output/adp/memory/plans",
@@ -180,7 +196,7 @@ class AdpSetupScriptTests(unittest.TestCase):
                 ).stdout
             )
 
-            self.assertEqual(result["module"]["version"], "1.2.0")
+            self.assertEqual(result["module"]["version"], "1.3.0")
             self.assertEqual(
                 result["effective_defaults"]["module"],
                 {
@@ -188,6 +204,9 @@ class AdpSetupScriptTests(unittest.TestCase):
                     "status_stale_after_days": 7,
                     "schedule_variance_tolerance_days": 0,
                     "meeting_pack_item_limit": 10,
+                    "management_panel_history_periods": 12,
+                    "management_panel_default_view": "project-lead",
+                    "management_panel_archive_mode": "meeting-only",
                 },
             )
             self.assertTrue(result["headless_ready"])
@@ -196,6 +215,34 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertEqual(result["upgrade_report"]["memory"]["status"], "not_initialized")
             self.assertEqual(result["installed_skill_inspection"]["missing_skills"], [])
             self.assertEqual(result["installed_skill_inspection"]["missing_shared_resources"], [])
+            self.assertEqual(result["installed_skill_inspection"]["invalid_shared_resources"], [])
+            resources = {
+                f"{item['owner_skill']}/{item['path']}": item
+                for item in result["installed_skill_inspection"]["shared_resources"]
+            }
+            expected_resources = {
+                "adp-flow-graph/assets/adp-flow-graph-v1.schema.json",
+                "adp-status-sync/assets/action-flow-relation-v1.schema.json",
+                "adp-risk-dependency-change-review/assets/risk-flow-relation-v1.schema.json",
+                "adp-program-status/assets/program-status-flow-state-v1.schema.json",
+                "adp-program-status/assets/program-status-progress-v2.schema.json",
+                "adp-management-panel/assets/adp-management-panel-v1.schema.json",
+                "adp-management-panel/assets/adp-management-panel-manifest-v1.schema.json",
+                "adp-management-panel/assets/panel-template.html",
+                "adp-management-panel/assets/panel-locale-catalog-v1.json",
+                "adp-management-panel/assets/elk-resource-v1.json",
+                "adp-management-panel/assets/vendor/elk.bundled-0.9.3.js",
+                "adp-management-panel/assets/vendor/ELK-LICENSE-EPL-2.0.md",
+            }
+            self.assertTrue(expected_resources.issubset(resources))
+            elk = resources["adp-management-panel/assets/elk-resource-v1.json"]
+            self.assertEqual(elk["integrity"], "verified")
+            self.assertEqual(elk["contract"]["engine_version"], "0.9.3")
+            self.assertEqual(elk["contract"]["engine_license"], "EPL-2.0")
+            self.assertEqual(
+                elk["contract"]["engine_sha256"],
+                "sha256:b0745abd7f23cd91690a1587e377edbe19fd7233c783300290936720546216d4",
+            )
 
     def test_inspect_reports_update_and_preserves_existing_team_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -233,7 +280,13 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertEqual(result["default_sources"]["module"]["status_stale_after_days"], "existing")
             self.assertEqual(
                 result["upgrade_report"]["defaulted_module_variables"],
-                ["meeting_pack_item_limit", "schedule_variance_tolerance_days"],
+                [
+                    "management_panel_archive_mode",
+                    "management_panel_default_view",
+                    "management_panel_history_periods",
+                    "meeting_pack_item_limit",
+                    "schedule_variance_tolerance_days",
+                ],
             )
 
     def test_inspect_blocks_incomplete_installed_skill_or_shared_resource_set(self) -> None:
@@ -263,14 +316,58 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertFalse(result["headless_ready"])
             self.assertFalse(result["installation_ready"])
             self.assertEqual(result["installed_skill_inspection"]["missing_skills"], ["adp-program-status"])
-            self.assertEqual(
-                result["installed_skill_inspection"]["missing_shared_resources"],
-                [
-                    "adp-plan-baseline/scripts/adp_effective_config.py",
-                    "adp-plan-baseline/assets/locale-catalog.json",
-                ],
-            )
+            missing_resources = result["installed_skill_inspection"]["missing_shared_resources"]
+            self.assertIn("adp-plan-baseline/scripts/adp_effective_config.py", missing_resources)
+            self.assertIn("adp-plan-baseline/assets/locale-catalog.json", missing_resources)
+            self.assertIn("adp-flow-graph/assets/adp-flow-graph-v1.schema.json", missing_resources)
+            self.assertIn("adp-management-panel/assets/elk-resource-v1.json", missing_resources)
             self.assertTrue(any("Missing installed skills" in gap for gap in result["unresolved_gaps"]))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skills_dir = root / "installed-skills"
+            ready = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    str(root),
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--module-help",
+                    str(SKILL_ROOT / "assets" / "module-help.csv"),
+                    "--installed-skills-dir",
+                    str(SKILL_ROOT.parent),
+                ).stdout
+            )
+            for row in ready["installed_skill_inspection"]["skills"]:
+                target = skills_dir / row["skill"]
+                target.mkdir(parents=True, exist_ok=True)
+                (target / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+            for row in ready["installed_skill_inspection"]["shared_resources"]:
+                source = Path(row["resolved_path"])
+                target = skills_dir / row["owner_skill"] / row["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            bundle = skills_dir / "adp-management-panel" / "assets/vendor/elk.bundled-0.9.3.js"
+            bundle.write_text("tampered\n", encoding="utf-8")
+
+            tampered = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    str(root),
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--module-help",
+                    str(SKILL_ROOT / "assets" / "module-help.csv"),
+                    "--installed-skills-dir",
+                    str(skills_dir),
+                ).stdout
+            )
+            self.assertFalse(tampered["installation_ready"])
+            self.assertIn(
+                "adp-management-panel/assets/vendor/elk.bundled-0.9.3.js",
+                tampered["installed_skill_inspection"]["invalid_shared_resources"],
+            )
+            self.assertTrue(any("checksum" in gap.lower() for gap in tampered["unresolved_gaps"]))
 
     def test_inspect_install_state_computes_defaults_and_missing_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -412,6 +509,9 @@ class AdpSetupScriptTests(unittest.TestCase):
                             "status_stale_after_days": 0,
                             "schedule_variance_tolerance_days": 91,
                             "meeting_pack_item_limit": 2,
+                            "management_panel_history_periods": 0,
+                            "management_panel_default_view": "unknown",
+                            "management_panel_archive_mode": "sometimes",
                         }
                     }
                 ),
@@ -436,6 +536,9 @@ class AdpSetupScriptTests(unittest.TestCase):
             self.assertIn("status_stale_after_days must be at least 1", result["error"])
             self.assertIn("schedule_variance_tolerance_days must be at most 90", result["error"])
             self.assertIn("meeting_pack_item_limit must be at least 3", result["error"])
+            self.assertIn("management_panel_history_periods must be at least 1", result["error"])
+            self.assertIn("management_panel_default_view must be one of", result["error"])
+            self.assertIn("management_panel_archive_mode must be one of", result["error"])
 
     def test_module_yaml_user_facing_fields_are_readable_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -629,12 +732,36 @@ class AdpSetupScriptTests(unittest.TestCase):
             config_text = (bmad_dir / "config.yaml").read_text(encoding="utf-8")
 
             self.assertEqual(inspected["install_state"], "fresh_install_with_legacy")
-            self.assertTrue(all(source == "legacy" for source in inspected["default_sources"]["module"].values()))
+            sources = inspected["default_sources"]["module"]
+            self.assertTrue(
+                all(
+                    sources[key] == "legacy"
+                    for key in (
+                        "default_reporting_cadence",
+                        "status_stale_after_days",
+                        "schedule_variance_tolerance_days",
+                        "meeting_pack_item_limit",
+                    )
+                )
+            )
+            self.assertTrue(
+                all(
+                    sources[key] == "module_default"
+                    for key in (
+                        "management_panel_history_periods",
+                        "management_panel_default_view",
+                        "management_panel_archive_mode",
+                    )
+                )
+            )
             self.assertEqual(merged["status"], "success")
-            self.assertIn("version: 1.2.0", config_text)
+            self.assertIn("version: 1.3.0", config_text)
             self.assertIn("default_reporting_cadence: custom", config_text)
             self.assertIn("status_stale_after_days: 21", config_text)
             self.assertIn("meeting_pack_item_limit: 12", config_text)
+            self.assertIn("management_panel_history_periods: 12", config_text)
+            self.assertIn("management_panel_default_view: project-lead", config_text)
+            self.assertIn("management_panel_archive_mode: meeting-only", config_text)
             self.assertFalse(legacy_adp.exists())
 
     def test_merge_config_creates_output_dirs_before_writing_configs(self) -> None:

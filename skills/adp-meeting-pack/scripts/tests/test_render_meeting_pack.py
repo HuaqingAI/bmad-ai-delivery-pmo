@@ -4,10 +4,21 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "render_meeting_pack.py"
+PROGRESS_GOLDEN = SCRIPT.parents[2] / "adp-program-status" / "assets" / "fixtures" / "progress-v2" / "golden-measurable-boundary.json"
+
+
+def progress_fixture(as_of: str, revision: int, period: dict[str, str]) -> dict:
+    payload = json.loads(PROGRESS_GOLDEN.read_text(encoding="utf-8"))
+    payload["as_of"] = as_of
+    payload["reporting_period"] = {"start": period["start"], "end": period["end"]}
+    payload["scope_identity"]["baseline_revision"] = revision
+    payload["scope_identity"]["scope_revision"] = f"PROGRAM-BASELINE:r{revision}"
+    return payload
 
 
 def load_renderer_module():
@@ -56,6 +67,91 @@ L0 references:
 
 
 class RenderMeetingPackTests(unittest.TestCase):
+    def test_meeting_selects_scenario_subgraph_without_mutating_canonical_graph(self) -> None:
+        renderer = load_renderer_module()
+        graph_path = SCRIPT.parents[2] / "adp-flow-graph/assets/fixtures/flow-contract-v1/golden-parallel-aggregation-conditional-rework.json"
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["overlays"]["scopes"][0]["scope_id"] = "MEETING-2026-07-01-2026-07-13"
+        graph["overlays"]["scopes"][0]["scope_kind"] = "meeting-window"
+        graph["overlays"]["scopes"][0]["selection_window"] = {
+            "start_inclusive": "2026-07-01T00:00:00Z",
+            "end_exclusive": "2026-07-14T00:00:00Z",
+        }
+        before = json.dumps(graph, ensure_ascii=False, sort_keys=True)
+        program_status = {
+            "baseline_revision": 2,
+            "critical_path": [{"id": "G-MERGE"}, {"id": "M-A"}],
+        }
+
+        fde = renderer.select_flow_subgraph(
+            graph,
+            "fde-morning",
+            {"start": "2026-07-01", "end": "2026-07-13"},
+            program_status,
+        )
+        business = renderer.select_flow_subgraph(graph, "business-biweekly", None, program_status)
+
+        self.assertEqual(json.dumps(graph, ensure_ascii=False, sort_keys=True), before)
+        self.assertEqual(fde["flow_graph_id"], graph["flow_graph_id"])
+        self.assertEqual(fde["scope_id"], "MEETING-2026-07-01-2026-07-13")
+        self.assertEqual(fde["selection_status"], "selected")
+        self.assertTrue(fde["allocations"])
+        self.assertIn("M-A", {item["node_id"] for item in fde["nodes"]})
+        self.assertIn("G-MERGE", {item["node_id"] for item in business["nodes"]})
+        self.assertNotEqual(fde["selection_id"], business["selection_id"])
+
+    def test_fde_flow_is_seeded_only_by_confirmed_window_allocations(self) -> None:
+        renderer = load_renderer_module()
+        graph_path = SCRIPT.parents[2] / "adp-flow-graph/assets/fixtures/flow-contract-v1/golden-parallel-aggregation-conditional-rework.json"
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        scope = graph["overlays"]["scopes"][0]
+        scope["scope_id"] = "MEETING-2026-07-01-2026-07-13"
+        scope["scope_kind"] = "meeting-window"
+        scope["selection_window"] = {
+            "start_inclusive": "2026-07-01T00:00:00Z",
+            "end_exclusive": "2026-07-14T00:00:00Z",
+        }
+        outside = next(item for item in graph["state"]["nodes"] if item["node_id"] == "M-D")
+        outside["execution"]["value"] = "ready"
+        outside["health"]["value"] = "blocked"
+
+        selected = renderer.select_flow_subgraph(
+            graph,
+            "fde-morning",
+            {"start": "2026-07-01", "end": "2026-07-13", "status": "confirmed"},
+            {"baseline_revision": 2, "critical_path": []},
+        )
+
+        self.assertNotIn("M-D", {item["node_id"] for item in selected["nodes"]})
+        self.assertEqual(selected["meeting_window"]["status"], "confirmed")
+        self.assertTrue(all(item["scope_id"] == scope["scope_id"] for item in selected["allocations"]))
+
+    def test_business_flow_caps_exception_detail_to_information_budget(self) -> None:
+        renderer = load_renderer_module()
+        graph_path = SCRIPT.parents[2] / "adp-flow-graph/assets/fixtures/flow-contract-v1/golden-parallel-aggregation-conditional-rework.json"
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        scope = graph["overlays"]["scopes"][0]
+        scope["scope_kind"] = "reporting-period"
+        for item in graph["state"]["nodes"]:
+            item["health"]["value"] = "blocked"
+
+        selected = renderer.select_flow_subgraph(
+            graph,
+            "business-biweekly",
+            None,
+            {"baseline_revision": 2, "critical_path": []},
+            selection_limit=1,
+        )
+
+        engineering_nodes = [
+            item for item in selected["nodes"] if item.get("lane", {}).get("lane_type") != "program"
+        ]
+        self.assertLessEqual(len(engineering_nodes), 1)
+        selected_ids = {item["node_id"] for item in selected["nodes"]}
+        self.assertTrue(
+            all(edge["predecessor"] in selected_ids and edge["target"] in selected_ids for edge in selected["edges"])
+        )
+
     def run_script(self, project_root: Path, *args: str, check: bool = True) -> dict:
         completed = subprocess.run(
             [sys.executable, str(SCRIPT), str(project_root), *args],
@@ -115,12 +211,13 @@ class RenderMeetingPackTests(unittest.TestCase):
         return memory_root
 
     def add_program_status(self, memory_root: Path) -> None:
+        reporting_period = {"start": "2026-07-06", "end": "2026-07-10"}
         model = {
             "schema_version": "1.0",
             "snapshot_id": "ps-meeting-pack-fixture",
             "generated_at": "2026-07-10T08:00:00Z",
             "as_of": "2026-07-10",
-            "reporting_period": {"start": "2026-07-06", "end": "2026-07-10"},
+            "reporting_period": reporting_period,
             "baseline_revision": 2,
             "baseline_id": "PROGRAM-BASELINE",
             "source_inventory": [],
@@ -153,7 +250,7 @@ class RenderMeetingPackTests(unittest.TestCase):
                     "source_references": ["plans/program-baseline.md#target"],
                 },
             },
-            "progress": {"weighted_completion_percent": None},
+            "progress": progress_fixture("2026-07-10", 2, reporting_period),
             "milestones": [],
             "gates": [
                 {
@@ -306,6 +403,7 @@ class RenderMeetingPackTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        canonical_progress = json.loads((memory_root / "views" / "program-status.json").read_text(encoding="utf-8"))["progress"]
         roadmap = {
             "ok": True,
             "schema_version": 2,
@@ -318,8 +416,10 @@ class RenderMeetingPackTests(unittest.TestCase):
                 "report_confidence": "medium",
                 "input_audit_id": "audit-program-status-fixture",
                 "generator_version": "1.0.0",
+                "progress_schema_version": canonical_progress["progress_schema_version"],
                 "source": "views/program-status.json",
             },
+            "progress": canonical_progress,
             "milestone_timeline": [
                 {
                     "milestone": "Checkout validation complete",
@@ -375,7 +475,7 @@ class RenderMeetingPackTests(unittest.TestCase):
     def test_renders_fde_morning_pack_with_audit_and_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            self.scaffold(project_root)
+            memory_root = self.scaffold(project_root)
 
             result = self.run_script(
                 project_root,
@@ -411,11 +511,15 @@ class RenderMeetingPackTests(unittest.TestCase):
             self.assertIn("Post-Meeting Capture Checklist", text)
             self.assertIn("Source Inventory", text)
             distillate = json.loads(distillate_path.read_text(encoding="utf-8"))
+            canonical_progress = json.loads((memory_root / "views" / "program-status.json").read_text(encoding="utf-8"))["progress"]
             self.assertEqual(distillate["scenario"], "fde-morning")
-            self.assertEqual(distillate["meeting_pack_id"], "2026-07-10-fde-morning")
+            self.assertRegex(distillate["meeting_pack_id"], r"^mp-fde-morning-2026-07-10-[0-9a-f]{16}$")
             self.assertEqual(distillate["meeting_pack_path"], str(markdown_path))
             self.assertEqual(distillate["audit_path"], str(audit_path))
             self.assertEqual(distillate["roadmap_version"], "not-applicable")
+            self.assertEqual(distillate["program_status"]["progress"], canonical_progress)
+            self.assertIn("Actual Completion: 40.00%", text)
+            self.assertNotIn("Forecast Completion", text)
             self.assertEqual(len(distillate["boards"]["actions"]), 0)
             self.assertEqual(len(distillate["gaps"]["action_quality"]), 3)
             action_gaps = {item["Action ID"]: item["Gap"] for item in distillate["gaps"]["action_quality"]}
@@ -441,7 +545,11 @@ class RenderMeetingPackTests(unittest.TestCase):
             self.assertEqual(lineage["roadmap_version"], distillate["roadmap_version"])
             self.assertEqual(lineage["program_status_snapshot_id"], "ps-meeting-pack-fixture")
             self.assertEqual(lineage["baseline_revision"], 2)
-            self.assertEqual(lineage["input_audit_id"], "audit-program-status-fixture")
+            self.assertEqual(lineage["input_audit_id"], distillate["input_audit_id"])
+            self.assertNotEqual(lineage["input_audit_id"], "audit-program-status-fixture")
+            self.assertEqual(lineage["program_status_input_audit_id"], "audit-program-status-fixture")
+            self.assertIn("<!-- adp:artifact-metadata:v1 -->", text)
+            self.assertEqual(distillate["render_contract"]["message_keys"], ["meeting.title.fde"])
 
     def test_custom_output_path_and_run_folder_pattern(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -466,7 +574,10 @@ class RenderMeetingPackTests(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(Path(result["outputs"]["markdown"]).parent, output_base / "2026-07-10-fde-morning")
+            self.assertEqual(
+                Path(result["outputs"]["markdown"]).parent.resolve(),
+                (output_base / "2026-07-10-fde-morning").resolve(),
+            )
 
     def test_existing_pack_pair_blocks_until_replacement_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -781,6 +892,13 @@ class RenderMeetingPackTests(unittest.TestCase):
             self.assertNotIn("gantt", text.lower())
 
             distillate = json.loads(distillate_path.read_text(encoding="utf-8"))
+            canonical_status = json.loads((memory_root / "views" / "program-status.json").read_text(encoding="utf-8"))
+            canonical_roadmap = json.loads((memory_root / "views" / "roadmap.json").read_text(encoding="utf-8"))
+            self.assertEqual(distillate["program_status"]["progress"], canonical_status["progress"])
+            self.assertEqual(canonical_roadmap["progress"], canonical_status["progress"])
+            self.assertIn("Actual Completion: 40.00%", text)
+            self.assertIn("Forecast Completion: 60.00%", text)
+            self.assertIn("Forecast Coverage: 33.33%", text)
             self.assertEqual(len(distillate["boards"]["business_decisions"]), 1)
             self.assertEqual(len(distillate["boards"]["scope_change"]), 1)
             self.assertEqual(distillate["boards"]["scope_change"][0]["Item"], "Payment callback scope changed for Day-1 support.")
@@ -900,6 +1018,63 @@ class RenderMeetingPackTests(unittest.TestCase):
             self.assertNotIn("Workstream Roundtable", text)
             distillate = json.loads(Path(result["outputs"]["distillate"]).read_text(encoding="utf-8"))
             self.assertTrue(distillate["boards"]["fde_period_delta"])
+
+    def test_distillate_publishes_explicit_panel_ready_meeting_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            prepass_path, audit_path = self.write_gate_inputs(memory_root)
+
+            result = self.run_script(
+                project_root,
+                "--scenario",
+                "fde-morning",
+                "--date",
+                "2026-07-10",
+                "--period-start",
+                "2026-07-08",
+                "--period-end",
+                "2026-07-10",
+                "--prepass-json",
+                str(prepass_path),
+                "--audit",
+                str(audit_path),
+            )
+            distillate = json.loads(Path(result["outputs"]["distillate"]).read_text(encoding="utf-8"))
+
+            self.assertRegex(distillate["meeting_pack_id"], r"^mp-fde-morning-2026-07-10-[0-9a-f]{16}$")
+            self.assertEqual(distillate["meeting_window"]["status"], "confirmed")
+            self.assertEqual(distillate["readiness"], "degraded")
+            self.assertEqual(distillate["lifecycle"], "pre-meeting-snapshot")
+            self.assertNotIn("artifact_audit_id", distillate)
+            self.assertTrue(distillate["input_audit_id"])
+            self.assertEqual(distillate["panel_metadata"]["meeting_pack_id"], distillate["meeting_pack_id"])
+            self.assertEqual(distillate["panel_metadata"]["flow_selection_id"], distillate["flow_selection_id"])
+            self.assertEqual(
+                distillate["selected_node_ids"],
+                [item["node_id"] for item in distillate["flow_subgraph"].get("nodes", [])],
+            )
+
+    def test_business_pack_uses_reporting_period_as_confirmed_meeting_window(self) -> None:
+        renderer = load_renderer_module()
+        status = {
+            "reporting_period": {"start": "2026-07-01", "end": "2026-07-13"},
+        }
+
+        window = renderer.business_meeting_window(status, date(2026, 7, 13))
+
+        self.assertEqual(
+            window,
+            {
+                "scenario": "business-biweekly",
+                "meeting_date": "2026-07-13",
+                "status": "confirmed",
+                "confirmation_mode": "canonical-reporting-period",
+                "start": "2026-07-01",
+                "end": "2026-07-13",
+                "reason": "window copied from canonical program-status reporting period",
+            },
+        )
 
     def test_fde_window_prefers_applied_meeting_cursor_over_unreceipted_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

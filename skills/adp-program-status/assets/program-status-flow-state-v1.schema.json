@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:adp:program-status:flow-state-v1",
+  "title": "ADP canonical flow state v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["flow_state_schema_version", "baseline_id", "baseline_revision", "as_of", "node_states", "compatibility"],
+  "properties": {
+    "flow_state_schema_version": {"const": "1.0.0"},
+    "baseline_id": {"$ref": "#/$defs/stableId"},
+    "baseline_revision": {"type": "integer", "minimum": 1},
+    "as_of": {"type": "string", "format": "date-time"},
+    "node_states": {"type": "array", "items": {"$ref": "#/$defs/nodeState"}},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "migration_error_code"],
+      "properties": {
+        "strategy": {"const": "version-required"},
+        "migration_error_code": {"const": "ADP-FLOW-STATE-MIGRATION-REQUIRED"}
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {"type": "string", "pattern": "[A-Za-z0-9][A-Za-z0-9._-]*"},
+    "fingerprint": {"type": "string", "pattern": "sha256:[0-9a-f]{64}"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_path", "field", "source_fingerprint"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/stableId"},
+        "artifact_path": {"type": "string", "minLength": 1},
+        "field": {"type": "string", "minLength": 1},
+        "source_fingerprint": {"$ref": "#/$defs/fingerprint"}
+      }
+    },
+    "axis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "rule_id", "sources"],
+      "properties": {
+        "value": {"type": "string"},
+        "rule_id": {"$ref": "#/$defs/stableId"},
+        "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}}
+      }
+    },
+    "nodeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "baseline_revision", "evaluated_at", "execution", "health"],
+      "properties": {
+        "node_id": {"$ref": "#/$defs/stableId"},
+        "baseline_revision": {"type": "integer", "minimum": 1},
+        "evaluated_at": {"type": "string", "format": "date-time"},
+        "execution": {
+          "allOf": [
+            {"$ref": "#/$defs/axis"},
+            {"properties": {"value": {"enum": ["complete", "in-progress", "ready", "planned", "not-applicable"]}}}
+          ]
+        },
+        "health": {
+          "allOf": [
+            {"$ref": "#/$defs/axis"},
+            {"properties": {"value": {"enum": ["on-plan", "at-risk", "blocked", "indeterminate"]}}}
+          ]
+        }
+      }
+    }
+  }
+}

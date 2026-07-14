@@ -30,7 +30,10 @@ class ResolveBmadConfigTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(result["communication_language"], "Chinese")
             self.assertEqual(result["document_output_language"], "Chinese")
-            self.assertEqual(result["value_sources"]["communication_language"], str(adp_config))
+            self.assertEqual(
+                result["value_sources"]["communication_language"],
+                str(adp_config.resolve()),
+            )
 
     def test_missing_config_defaults_to_english_with_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

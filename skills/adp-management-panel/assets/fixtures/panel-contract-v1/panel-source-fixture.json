@@ -1,0 +1,145 @@
+{
+  "program_status": {
+    "schema_version": "1.0",
+    "snapshot_id": "ps-current-2026-07-13",
+    "generated_at": "2026-07-13T09:00:00Z",
+    "as_of": "2026-07-13",
+    "reporting_period": {"start": "2026-07-07", "end": "2026-07-13"},
+    "baseline_revision": 4,
+    "overall_status": "at-risk",
+    "report_confidence": "medium",
+    "input_audit_id": "input-audit-04",
+    "artifact_audit_id": "artifact-audit-04",
+    "generator_version": "adp-program-status/2.0.0",
+    "critical_path": [{"id": "G-MERGE", "status": "blocked"}],
+    "source_fingerprints": {
+      "views/program-status.json": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "roadmap": {
+    "schema_version": "1.0",
+    "generator_version": "adp-roadmap-sync/1.3.0",
+    "generated_at": "2026-07-13T09:01:00Z",
+    "as_of": "2026-07-13",
+    "baseline_revision": 4,
+    "program_status_snapshot_id": "ps-current-2026-07-13",
+    "input_audit_id": "input-audit-04",
+    "artifact_audit_id": "roadmap-audit-04",
+    "source_fingerprints": {
+      "views/roadmap.json": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "milestone_timeline": [
+      {"id": "M-A", "workstream": "L1", "planned": "2026-07-10", "forecast": "2026-07-10", "actual": "2026-07-10", "variance_days": 0, "status": "on-plan"},
+      {"id": "G-MERGE", "workstream": "program", "planned": "2026-07-18", "forecast": "2026-07-22", "actual": null, "variance_days": 4, "status": "at-risk"}
+    ],
+    "at_risk_dates": [{"id": "G-MERGE", "variance_days": 4, "status": "at-risk"}],
+    "blocked_by_decisions": [{"id": "D-04", "target": "G-MERGE"}],
+    "unmapped_items": [],
+    "excluded_items": []
+  },
+  "meeting_packs": {
+    "fde-morning": {
+      "schema_version": "1.0.0",
+      "meeting_pack_id": "2026-07-13-fde-morning",
+      "scenario": "fde-morning",
+      "date": "2026-07-13",
+      "generated_at": "2026-07-13T08:30:00Z",
+      "locale": "zh",
+      "program_status_snapshot_id": "ps-current-2026-07-13",
+      "baseline_revision": 4,
+      "input_audit_id": "input-audit-04",
+      "artifact_audit_id": "fde-pack-audit-04",
+      "meeting_window": {"start": "2026-07-12", "end": "2026-07-13", "status": "confirmed"},
+      "readiness": "ready",
+      "lifecycle": "pre-meeting-snapshot",
+      "flow_selection_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "flow_scope_id": "ACTIVE-2026-07-13",
+      "selected_node_ids": ["M-A", "G-MERGE"],
+      "selected_edge_ids": ["E-A-MERGE"],
+      "boards": {
+        "fde_period_delta": [{"workstream": "L1", "actual_delta_pp": 20}],
+        "fde_blockers": [{"id": "A-BLOCK", "owner": "internal-owner@example.com", "summary": "Gate evidence is missing"}],
+        "fde_commitments": [{"id": "A-COMMIT", "owner": "internal-owner@example.com", "due": "2026-07-13"}],
+        "fde_due": [],
+        "escalations": []
+      },
+      "source_fingerprints": {
+        "views/meeting-packs/fde.json": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    "business-biweekly": {
+      "schema_version": "1.0.0",
+      "meeting_pack_id": "2026-07-13-business-biweekly",
+      "scenario": "business-biweekly",
+      "date": "2026-07-13",
+      "generated_at": "2026-07-13T08:40:00Z",
+      "locale": "zh",
+      "program_status_snapshot_id": "ps-current-2026-07-13",
+      "baseline_revision": 4,
+      "input_audit_id": "input-audit-04",
+      "artifact_audit_id": "business-pack-audit-04",
+      "meeting_window": {"start": "2026-07-01", "end": "2026-07-13", "status": "confirmed"},
+      "readiness": "degraded",
+      "lifecycle": "pre-meeting-snapshot",
+      "flow_selection_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "flow_scope_id": "ACTIVE-2026-07-13",
+      "selected_node_ids": ["M-A", "M-B", "G-MERGE"],
+      "selected_edge_ids": ["E-A-MERGE", "E-B-MERGE"],
+      "boards": {
+        "top_variances": [{"id": "G-MERGE", "variance_days": 4}],
+        "business_decisions": [{"id": "D-04", "summary": "Approve gate exception"}],
+        "business_readiness": [{"id": "G-MERGE", "status": "blocked"}],
+        "roadmap_timeline": [{"id": "G-MERGE", "forecast": "2026-07-22"}],
+        "cross_line_business_impact": [{"id": "I-04", "summary": "Launch window may move"}],
+        "last_meeting_closure": []
+      },
+      "source_fingerprints": {
+        "views/meeting-packs/business.json": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    }
+  },
+  "history": [
+    {
+      "snapshot_id": "ps-history-2026-07-06",
+      "as_of": "2026-07-06",
+      "baseline_revision": 4,
+      "overall_status": "on-plan",
+      "report_confidence": "high",
+      "progress_current": {"actual_completion_percent": 20, "planned_completion_percent": 40, "completion_gap_pp": -20},
+      "source_fingerprint": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "snapshot_id": "ps-history-2026-06-29",
+      "as_of": "2026-06-29",
+      "baseline_revision": 3,
+      "overall_status": "on-plan",
+      "report_confidence": "medium",
+      "progress_current": {"actual_completion_percent": 10, "planned_completion_percent": 20, "completion_gap_pp": -10},
+      "source_fingerprint": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  ],
+  "request": {
+    "generated_at": "2026-07-13T09:05:00Z",
+    "locale": "zh-CN",
+    "distribution_profile": "internal-full",
+    "history_snapshot_ids": ["ps-history-2026-07-06"],
+    "future_horizon_dates": ["2026-07-20"],
+    "project_lead_node_ids": ["M-A", "M-B", "G-MERGE"],
+    "project_lead_edge_ids": ["E-A-MERGE", "E-B-MERGE"],
+    "layout": {
+      "layout_contract_version": "1.0.0",
+      "engine": "elk-layered",
+      "engine_version": "0.9.3",
+      "engine_license": "EPL-2.0",
+      "engine_sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "config_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "node_dimensions_version": "panel-node-dimensions-v1"
+    }
+  },
+  "shareable_policy": {
+    "policy_version": "1.0.0",
+    "visible_node_ids": ["M-A", "G-MERGE"],
+    "visible_edge_ids": ["E-A-MERGE"],
+    "removed_fields": ["id", "owner", "counts", "allocations", "source", "sources", "source_fingerprints", "source_refs", "paths", "lineage", "value_lineage", "milestone_ids", "next_milestone_ids", "selected_node_ids", "selected_edge_ids"]
+  }
+}

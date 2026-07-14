@@ -40,6 +40,16 @@ When explicit checkpoint, readiness, dependency, decision, or gate evidence carr
 
 Critical precedence is `off-plan` > `at-risk` > `indeterminate` > `on-plan`. A non-critical off-plan variance promotes overall status to `at-risk`, not `off-plan`. Report confidence is computed separately, so a proven delay can be `off-plan` with low confidence. Never emit a completion percentage unless the approved baseline enables weighting and every counted completion has actual evidence.
 
+## Versioned Progress Contract
+
+The production v2 contract is `references/progress-contract-v2.md`, with machine schema `assets/program-status-progress-v2.schema.json` and golden cases under `assets/fixtures/progress-v2/`. `scripts/progress_projection.py` owns its formulas, gates, lineage, compatibility, and recovery. Roadmap and meeting-pack copy the validated object. A missing or wrong version returns `ADP-PROGRESS-MIGRATION-REQUIRED`.
+
+An actual counts only with an audit-accepted WDR, completion criteria, evidence, and a date no later than as-of. A same-baseline decrease requires `Correction ID`, `Correction Kind`, `Correction Audit ID`, `Correction Source`, and `Previous Actual`; otherwise progress is blocked.
+
+## Versioned Flow State Contract
+
+`references/flow-state-contract-v1.md` and `assets/program-status-flow-state-v1.schema.json` own execution and health as independent source-backed axes for each baseline node. Every generated snapshot includes canonical `flow_state`: `ready` means applicable predecessors are satisfied, only explicit start state becomes `in-progress`, aggregation targets require every predecessor, and unresolved conditional/rework paths remain planned.
+
 ## Generate
 
 Run the deterministic generator with the project root, input audit JSON, as-of date, reporting period, and optional signals JSON. Ordinary non-interactive CLI execution returns the generation disposition before artifact validation. For headless automation, add `--headless`, pass as-of and both period boundaries explicitly, and optionally pass `--memlog`; the script records effective assumptions and decisions, runs artifact validation, and returns the only authoritative terminal result.
@@ -50,7 +60,7 @@ The generator writes:
 - replaceable `views/program-status.json` and localized `views/program-status.md`;
 - localized `views/weekly-report.md` and `views/project-lead.md`.
 
-The same period, as-of, baseline revision, locale, generator version, and source fingerprints reuse the same snapshot ID without replacing history. Different inputs create a different snapshot. A snapshot carries the hit rule IDs, input audit ID, baseline revision, source inventory, fingerprints, and period delta.
+The same period, as-of, baseline revision, locale, generator version, source fingerprints, and previous snapshot reuse the same snapshot ID without replacing history. Different inputs create a different snapshot. A snapshot carries the hit rule IDs, input audit ID, baseline revision, source inventory, fingerprints, period delta, progress scope identity, eligibility, forecast coverage, comparability, and correction lineage.
 
 After ordinary generation, run `adp-state-audit` in artifact phase against the new snapshot and views with the same input audit JSON. Headless generation writes only to an audit staging area, validates those files, and publishes the immutable snapshot and canonical views only when `safe_to_publish` is true. Artifact validation reports freshness, lineage, and language defects separately and never mutates an immutable snapshot. If validation fails, return the staged paths for diagnosis and leave canonical paths unchanged.
 

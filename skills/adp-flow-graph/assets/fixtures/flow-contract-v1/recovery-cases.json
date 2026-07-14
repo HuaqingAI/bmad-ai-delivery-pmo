@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "name": "duplicate-node",
+      "nodes": ["M-A", "M-A"],
+      "edges": [],
+      "expected_code": "flow.node.duplicate",
+      "expected_disposition": "blocked"
+    },
+    {
+      "name": "duplicate-edge",
+      "nodes": ["M-A", "M-B"],
+      "edges": [
+        {"edge_id": "E-1", "predecessor": "M-A", "target": "M-B", "relationship_type": "dependency", "baseline_revision": 2},
+        {"edge_id": "E-1", "predecessor": "M-A", "target": "M-B", "relationship_type": "dependency", "baseline_revision": 2}
+      ],
+      "expected_code": "flow.edge.duplicate",
+      "expected_disposition": "blocked"
+    },
+    {
+      "name": "unknown-reference",
+      "nodes": ["M-A"],
+      "edges": [{"edge_id": "E-1", "predecessor": "UNKNOWN", "target": "M-A", "relationship_type": "dependency", "baseline_revision": 2}],
+      "expected_code": "flow.reference.unknown",
+      "expected_disposition": "blocked"
+    },
+    {
+      "name": "cross-revision",
+      "nodes": ["M-A", "M-B"],
+      "edges": [{"edge_id": "E-1", "predecessor": "M-A", "target": "M-B", "relationship_type": "dependency", "baseline_revision": 1}],
+      "expected_code": "flow.reference.cross-revision",
+      "expected_disposition": "blocked"
+    },
+    {
+      "name": "missing-condition",
+      "nodes": ["M-A", "M-B"],
+      "edges": [{"edge_id": "E-1", "predecessor": "M-A", "target": "M-B", "relationship_type": "conditional", "baseline_revision": 2}],
+      "expected_code": "flow.condition.missing",
+      "expected_disposition": "blocked"
+    },
+    {
+      "name": "aggregation-target-without-all",
+      "nodes": ["M-A", "M-B", "G-MERGE"],
+      "edges": [
+        {"edge_id": "E-A", "predecessor": "M-A", "target": "G-MERGE", "relationship_type": "aggregation", "baseline_revision": 2},
+        {"edge_id": "E-B", "predecessor": "M-B", "target": "G-MERGE", "relationship_type": "aggregation", "baseline_revision": 2}
+      ],
+      "expected_code": "flow.aggregation.rule",
+      "expected_disposition": "blocked"
+    },
+    {
+      "name": "illegal-cycle",
+      "nodes": ["M-A", "M-B"],
+      "edges": [
+        {"edge_id": "E-A", "predecessor": "M-A", "target": "M-B", "relationship_type": "dependency", "baseline_revision": 2},
+        {"edge_id": "E-B", "predecessor": "M-B", "target": "M-A", "relationship_type": "rework", "baseline_revision": 2}
+      ],
+      "expected_code": "flow.cycle.illegal",
+      "expected_disposition": "blocked"
+    },
+    {
+      "name": "explicit-rework-cycle",
+      "nodes": ["M-A", "M-B"],
+      "edges": [
+        {"edge_id": "E-A", "predecessor": "M-A", "target": "M-B", "relationship_type": "rework", "baseline_revision": 2},
+        {"edge_id": "E-B", "predecessor": "M-B", "target": "M-A", "relationship_type": "rework", "baseline_revision": 2}
+      ],
+      "expected_code": null,
+      "expected_disposition": "ready"
+    }
+  ]
+}

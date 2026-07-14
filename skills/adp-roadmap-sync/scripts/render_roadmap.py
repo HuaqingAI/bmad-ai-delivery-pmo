@@ -20,6 +20,7 @@ from typing import Any
 
 
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
+LOCALE_CATALOG_PATH = Path(__file__).resolve().parents[2] / "adp-plan-baseline/assets/locale-catalog.json"
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 ROADMAP_SCHEMA_VERSION = 2
 GENERATOR_VERSION = "2.0.0"
@@ -36,6 +37,8 @@ VALID_TYPES = {
 VALID_STATUSES = {"planned", "at-risk", "done", "blocked"}
 PROGRAM_STATUSES = {"on-plan", "at-risk", "off-plan", "indeterminate"}
 PROGRAM_CONFIDENCE = {"high", "medium", "low", "unknown"}
+PROGRESS_SCHEMA_VERSION = "2.0.0"
+PROGRESS_MIGRATION_ERROR = "ADP-PROGRESS-MIGRATION-REQUIRED"
 VALID_CONFIDENCE = {"high", "medium", "low"}
 DECISION_COMPLETED_STATUSES = {"accepted", "closed", "done"}
 DECISION_OPEN_STATUSES = {"open"}
@@ -538,6 +541,19 @@ def validate_audit_gate(
     report_confidence = clean(payload.get("report_confidence")).lower()
     if report_confidence not in VALID_CONFIDENCE:
         return invalid("report_confidence must explicitly be high, medium, or low")
+    input_audit_id = clean(payload.get("input_audit_id"))
+    if not input_audit_id:
+        return invalid("input_audit_id is missing")
+    baseline_revision = payload.get("baseline_revision")
+    if not isinstance(baseline_revision, int) or baseline_revision < 1:
+        return invalid("baseline_revision must be a positive integer")
+    locale = clean(payload.get("locale"))
+    if not locale:
+        return invalid("locale is missing")
+    if not isinstance(payload.get("locale_fallback"), bool):
+        return invalid("locale_fallback must be a boolean")
+    if not isinstance(payload.get("source_fingerprints"), dict) or not payload["source_fingerprints"]:
+        return invalid("source_fingerprints must be a non-empty object")
     recommendations = payload.get("recommended_workflows", [])
     if not isinstance(recommendations, list):
         return invalid("recommended_workflows must be an array")
@@ -553,6 +569,12 @@ def validate_audit_gate(
         "audit_status": audit_status,
         "gate_status": gate_status,
         "report_confidence": report_confidence,
+        "input_audit_id": input_audit_id,
+        "baseline_revision": baseline_revision,
+        "scenario": "roadmap",
+        "locale": locale,
+        "locale_fallback": payload["locale_fallback"],
+        "source_fingerprints": dict(payload["source_fingerprints"]),
         "risk_bearing": risk_bearing,
         "warnings": warnings,
         "recommended_workflows": recommendations,
@@ -815,7 +837,7 @@ def load_canonical_timeline_inputs(project_root: Path, memory_root: Path, as_of:
         return {"ok": False, "error": "canonical program status is missing", "recommended_workflows": ["adp-program-status"]}
     try:
         program_status = json.loads(read_text(status_path))
-        validate_program_status_for_roadmap(program_status, baseline, as_of, project_root, baseline_path)
+        validate_program_status_for_roadmap(program_status, baseline, as_of, project_root, memory_root, baseline_path)
         snapshot_path = memory_root / "snapshots" / "program-status" / f"{program_status['snapshot_id']}.json"
         if not snapshot_path.is_file():
             raise ValueError(f"immutable program-status snapshot is missing: {snapshot_path}")
@@ -907,6 +929,7 @@ def validate_program_status_for_roadmap(
     baseline: dict[str, Any],
     as_of: date,
     project_root: Path,
+    memory_root: Path,
     baseline_path: Path,
 ) -> None:
     if not isinstance(status, dict) or status.get("schema_version") != "1.0":
@@ -937,6 +960,7 @@ def validate_program_status_for_roadmap(
             raise ValueError(f"program status {key} must be an array")
     if not isinstance(status.get("period_delta"), dict):
         raise ValueError("program status period_delta must be an object")
+    validate_canonical_progress(status.get("progress"), status, baseline)
     fingerprints = status.get("source_fingerprints")
     if not isinstance(fingerprints, dict):
         raise ValueError("program status source_fingerprints must be an object")
@@ -951,6 +975,10 @@ def validate_program_status_for_roadmap(
         source_path = Path(str(raw_path))
         if not source_path.is_absolute():
             source_path = project_root / source_path
+            if not source_path.is_file():
+                memory_source = memory_root / str(raw_path)
+                if memory_source.is_file():
+                    source_path = memory_source
         if not source_path.is_file():
             raise ValueError(f"program status source is missing: {raw_path}")
         expected = clean(raw_fingerprint).removeprefix("sha256:")
@@ -977,6 +1005,30 @@ def validate_program_status_for_roadmap(
     if target.get("planned_date") != baseline["project"]["target_date"]:
         raise ValueError("program status project target planned date differs from baseline")
     validate_status_fields(target, "project target")
+
+
+def validate_canonical_progress(progress: Any, status: dict[str, Any], baseline: dict[str, Any]) -> None:
+    if not isinstance(progress, dict) or progress.get("progress_schema_version") != PROGRESS_SCHEMA_VERSION:
+        raise ValueError(f"{PROGRESS_MIGRATION_ERROR}: canonical progress schema {PROGRESS_SCHEMA_VERSION} is required")
+    required = {"basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "overall", "by_workstream", "eligibility", "compatibility", "recovery"}
+    missing = sorted(required - set(progress))
+    if missing:
+        raise ValueError("canonical progress is missing: " + ", ".join(missing))
+    if progress.get("basis") != "weighted-milestone":
+        raise ValueError("canonical progress basis must be weighted-milestone")
+    if progress.get("as_of") != status.get("as_of"):
+        raise ValueError("canonical progress as_of does not match program status")
+    identity = progress.get("scope_identity")
+    if not isinstance(identity, dict) or identity.get("baseline_revision") != baseline.get("revision"):
+        raise ValueError("canonical progress baseline revision does not match the approved baseline")
+    overall = progress.get("overall")
+    if not isinstance(overall, dict) or not isinstance(overall.get("current"), dict):
+        raise ValueError("canonical progress overall.current is required")
+    if not isinstance(progress.get("by_workstream"), list):
+        raise ValueError("canonical progress by_workstream must be an array")
+    current = overall["current"]
+    if progress.get("measurement_status") == "measurable" and progress.get("weighted_completion_percent") != current.get("actual_completion_percent"):
+        raise ValueError("canonical progress legacy alias does not match overall actual completion")
 
 
 def validate_status_constraint(item: dict[str, Any], baseline_item: dict[str, Any], collection: str) -> None:
@@ -1228,12 +1280,27 @@ def build_roadmap(
             f"roadmap is risk-bearing because {len(source_failures)} source artifact(s) could not be trusted"
         )
     persisted_sources = fingerprint_sources(dedupe_sources(sources), memory_root)
+    render_contract = build_render_contract(audit_gate["locale"])
+    source_fingerprints = {
+        str(path): normalize_sha256(fingerprint)
+        for path, fingerprint in audit_gate["source_fingerprints"].items()
+    }
+    source_fingerprints.update(
+        {item["path"]: item["fingerprint"] for item in persisted_sources if item.get("fingerprint")}
+    )
     roadmap = {
         "ok": True,
         "schema_version": ROADMAP_SCHEMA_VERSION,
         "generator_version": GENERATOR_VERSION,
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "as_of": as_of.isoformat(),
+        "reporting_period": program_status["reporting_period"],
+        "scenario": audit_gate["scenario"],
+        "input_audit_id": audit_gate["input_audit_id"],
+        "locale": audit_gate["locale"],
+        "locale_fallback": audit_gate["locale_fallback"],
+        "render_contract": render_contract,
+        "canonical_status_title": render_contract["localized_system_text"][0],
         "project_root": str(project_root),
         "memory_root": str(memory_root),
         "audit_path": audit_gate["audit_path"],
@@ -1243,6 +1310,7 @@ def build_roadmap(
         "report_status": "risk-bearing" if risk_bearing else "normal",
         "baseline_revision": baseline["revision"],
         "baseline_id": baseline["baseline_id"],
+        "program_status_snapshot_id": program_status["snapshot_id"],
         "baseline_changes": timeline_gate["baseline_changes"],
         "program_status": {
             "snapshot_id": program_status["snapshot_id"],
@@ -1251,8 +1319,10 @@ def build_roadmap(
             "report_confidence": program_status["report_confidence"],
             "input_audit_id": program_status["input_audit_id"],
             "generator_version": program_status["generator_version"],
+            "progress_schema_version": program_status["progress"]["progress_schema_version"],
             "source": rel_to_memory(memory_root, timeline_gate["program_status_path"]),
         },
+        "progress": program_status["progress"],
         "scope": {
             "kind": "workstreams" if selected_workstreams else "global",
             "selected_workstreams": sorted(selected_workstreams),
@@ -1270,9 +1340,7 @@ def build_roadmap(
                 "TBD dates mean the source did not provide a parseable date.",
             ],
         },
-        "source_fingerprints": {
-            item["path"]: item["fingerprint"] for item in persisted_sources if item.get("fingerprint")
-        },
+        "source_fingerprints": dict(sorted(source_fingerprints.items())),
         "milestone_timeline": [asdict(item) for item in sorted(dated, key=timeline_sort_key)],
         "unscheduled_milestones": [asdict(item) for item in sorted(unscheduled, key=item_sort_key)],
         "unmapped_items": [asdict(item) for item in sorted(unmapped, key=timeline_sort_key)],
@@ -1291,6 +1359,33 @@ def build_roadmap(
         },
     }
     return {"roadmap": roadmap, "warnings": warnings}
+
+
+def build_render_contract(locale: str) -> dict[str, Any]:
+    catalog = json.loads(LOCALE_CATALOG_PATH.read_text(encoding="utf-8"))
+    selected = catalog.get(locale)
+    if not isinstance(selected, dict):
+        raise ValueError(f"shared locale catalog does not support roadmap audit locale {locale!r}")
+    key = "status.title"
+    localized = selected.get(key)
+    if not isinstance(localized, str) or not localized:
+        raise ValueError(f"shared locale catalog is missing {key!r} for {locale!r}")
+    return {
+        "catalog_locale": locale,
+        "catalog_fingerprint": file_sha256(LOCALE_CATALOG_PATH),
+        "message_keys": [key],
+        "unresolved_message_keys": [],
+        "source_fact_translation_persisted": False,
+        "localized_system_text": [localized],
+    }
+
+
+def normalize_sha256(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    digest = raw.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("source fingerprint must be a SHA-256 digest")
+    return f"sha256:{digest}"
 
 
 def discover_wdrs(memory_root: Path, selected: set[str]) -> list[Path]:
@@ -2283,6 +2378,7 @@ def render_markdown(roadmap: dict[str, Any]) -> str:
         f"Baseline revision: `{roadmap['baseline_revision']}`",
         f"Program status snapshot: `{roadmap['program_status']['snapshot_id']}`",
         f"Canonical overall status: `{roadmap['program_status']['overall_status']}`",
+        f"Canonical status model: {roadmap['canonical_status_title']}",
         "",
     ]
     if roadmap["risk_bearing"]:
@@ -2292,6 +2388,10 @@ def render_markdown(roadmap: dict[str, Any]) -> str:
         ])
     lines.extend([
         "> Derived view. Planned dates come from the approved baseline; forecast, actual, variance, and status come from the canonical program-status snapshot.",
+        "",
+        "## Canonical Progress",
+        "",
+        *render_progress(roadmap["progress"]),
         "",
         "## Source Inventory",
         "",
@@ -2323,7 +2423,77 @@ def render_markdown(roadmap: dict[str, Any]) -> str:
     add_dict_table(lines, "Blocked By Decisions", roadmap["blocked_by_decisions"], ["source", "decision", "owner", "status", "workstreams"])
     add_dict_table(lines, "Changed Since Last Roadmap", roadmap["changed_since_last_roadmap"], ["change", "id", "milestone", "fields"])
     add_dict_table(lines, "Excluded Items", roadmap["excluded_items"], ["source", "source_type", "item", "code", "risk", "reason", "workstreams"])
+    metadata = {
+        key: roadmap[key]
+        for key in (
+            "generated_at",
+            "as_of",
+            "reporting_period",
+            "report_confidence",
+            "scenario",
+            "input_audit_id",
+            "baseline_revision",
+            "program_status_snapshot_id",
+            "source_fingerprints",
+            "locale",
+            "locale_fallback",
+            "render_contract",
+            "generator_version",
+        )
+    }
+    lines.extend(
+        [
+            "<!-- adp:artifact-metadata:v1 -->",
+            "",
+            "```json",
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
+            "```",
+            "",
+        ]
+    )
     return "\n".join(lines)
+
+
+def render_progress(progress: dict[str, Any]) -> list[str]:
+    current = progress["overall"]["current"]
+    forecast = progress["overall"]["forecast_summary"]
+    lines = [
+        f"- Progress schema: `{progress['progress_schema_version']}`",
+        f"- Measurement status: `{progress['measurement_status']}`",
+        f"- Actual completion: {progress_value(current['actual_completion_percent'], '%')}",
+        f"- Planned completion: {progress_value(current['planned_completion_percent'], '%')}",
+        f"- Completion gap: {progress_value(current['completion_gap_pp'], ' pp')}",
+        f"- Forecast completion: {progress_value(forecast['forecast_completion_percent'], '%')}",
+        f"- Forecast coverage: {progress_value(forecast['forecast_coverage_percent'], '%')} (`{forecast['forecast_coverage_status']}`)",
+        f"- Comparability: `{progress['overall']['comparability']['disposition']}`",
+        "",
+        "| Workstream | Kind | Measurement | Actual | Planned | Gap | Project Weight | Contribution |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in progress["by_workstream"]:
+        values = item["current"]
+        lines.append(
+            "| "
+            + " | ".join(
+                cell(value)
+                for value in [
+                    item["workstream_id"],
+                    item["progress_kind"],
+                    item["measurement_status"],
+                    progress_value(values["actual_completion_percent"], "%"),
+                    progress_value(values["planned_completion_percent"], "%"),
+                    progress_value(values["completion_gap_pp"], " pp"),
+                    progress_value(values["project_weight_percent"], "%"),
+                    progress_value(values["completed_contribution_pp"], " pp"),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
+def progress_value(value: Any, suffix: str) -> str:
+    return "-" if value is None else f"{float(value):.2f}{suffix}"
 
 
 def add_source_table(lines: list[str], sources: list[dict[str, Any]]) -> None:
