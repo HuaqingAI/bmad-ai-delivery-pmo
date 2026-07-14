@@ -348,6 +348,24 @@ class AdpSetupScriptTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
             bundle = skills_dir / "adp-management-panel" / "assets/vendor/elk.bundled-0.9.3.js"
+            license_path = skills_dir / "adp-management-panel" / "assets/vendor/ELK-LICENSE-EPL-2.0.md"
+            bundle.write_bytes(bundle.read_bytes().replace(b"\n", b"\r\n"))
+            license_path.write_bytes(license_path.read_bytes().replace(b"\n", b"\r\n"))
+
+            windows_checkout = json.loads(
+                run_script(
+                    INSPECT_STATE,
+                    str(root),
+                    "--module-yaml",
+                    str(SKILL_ROOT / "assets" / "module.yaml"),
+                    "--module-help",
+                    str(SKILL_ROOT / "assets" / "module-help.csv"),
+                    "--installed-skills-dir",
+                    str(skills_dir),
+                ).stdout
+            )
+            self.assertTrue(windows_checkout["installation_ready"])
+
             bundle.write_text("tampered\n", encoding="utf-8")
 
             tampered = json.loads(

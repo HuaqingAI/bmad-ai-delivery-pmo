@@ -65,6 +65,11 @@ def bytes_hash(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def canonical_utf8_lf_bytes(value: bytes) -> bytes:
+    value.decode("utf-8")
+    return value.replace(b"\r\n", b"\n")
+
+
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -209,10 +214,16 @@ def _resource_validation(
     if not bundle.is_file():
         errors.append("ELK bundle is missing")
     else:
-        actual = bytes_hash(bundle.read_bytes())
-        evidence["elk_bundle_sha256"] = actual
-        if actual != resource.get("engine_sha256"):
-            errors.append("ELK bundle checksum does not match resource metadata")
+        if resource.get("engine_sha256_mode") != "utf8-lf":
+            errors.append("ELK bundle checksum mode is unsupported")
+        try:
+            actual = bytes_hash(canonical_utf8_lf_bytes(bundle.read_bytes()))
+        except UnicodeDecodeError:
+            errors.append("ELK bundle is not valid UTF-8")
+        else:
+            evidence["elk_bundle_sha256"] = actual
+            if actual != resource.get("engine_sha256"):
+                errors.append("ELK bundle checksum does not match resource metadata")
     if not license_path.is_file():
         errors.append("ELK license is missing")
     else:
@@ -658,7 +669,10 @@ def audit_panel_artifacts(
     if resource is not None:
         elk_path = panel_root / resource["bundle"]
         embedded_elk = parser.script("adp-elk-runtime")
-        expected_elk = elk_path.read_text(encoding="utf-8") if elk_path.is_file() else ""
+        try:
+            expected_elk = canonical_utf8_lf_bytes(elk_path.read_bytes()).decode("utf-8") if elk_path.is_file() else ""
+        except UnicodeDecodeError:
+            expected_elk = ""
         if parser.script_counts.get("adp-elk-runtime") != 1 or embedded_elk != expected_elk:
             findings.append(_finding("panel.artifact.elk-embedded.mismatch", "blocking", "blocked", "embedded ELK runtime does not match the pinned bundle", "panel-html", "adp-management-panel"))
 

@@ -276,9 +276,35 @@ class ManagementPanelTests(unittest.TestCase):
     def test_fixed_elk_metadata_matches_shipped_bytes_and_license(self):
         resource, _ = management_panel.verify_layout_resource()
         bundle = panel_model.SKILL_ROOT / resource["bundle"]
-        actual = "sha256:" + hashlib.sha256(bundle.read_bytes()).hexdigest()
+        canonical = management_panel.canonical_utf8_lf_bytes(bundle.read_bytes(), bundle)
+        actual = "sha256:" + hashlib.sha256(canonical).hexdigest()
         self.assertEqual(resource["engine_sha256"], actual)
+        self.assertEqual("utf8-lf", resource["engine_sha256_mode"])
         self.assertEqual("EPL-2.0", resource["engine_license"])
+
+    def test_fixed_elk_accepts_windows_crlf_checkout_and_rejects_other_changes(self):
+        source_resource = management_panel.load_json(management_panel.RESOURCE_PATH)
+        source_bundle = panel_model.SKILL_ROOT / source_resource["bundle"]
+        source_license = panel_model.SKILL_ROOT / source_resource["license"]
+        with tempfile.TemporaryDirectory() as folder:
+            skill_root = Path(folder)
+            resource_path = skill_root / "assets/elk-resource-v1.json"
+            bundle = skill_root / source_resource["bundle"]
+            license_path = skill_root / source_resource["license"]
+            resource_path.parent.mkdir(parents=True)
+            bundle.parent.mkdir(parents=True)
+            license_path.parent.mkdir(parents=True, exist_ok=True)
+            resource_path.write_text(json.dumps(source_resource), encoding="utf-8")
+            bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
+            license_path.write_text(source_license.read_text(encoding="utf-8"), encoding="utf-8")
+
+            resource, elk_js = management_panel.verify_layout_resource(resource_path, skill_root)
+
+            self.assertEqual(source_resource["engine_sha256"], resource["engine_sha256"])
+            self.assertNotIn("\r\n", elk_js)
+            bundle.write_bytes(bundle.read_bytes() + b"tampered")
+            with self.assertRaisesRegex(management_panel.PanelError, "checksum mismatch"):
+                management_panel.verify_layout_resource(resource_path, skill_root)
 
     def test_blocked_inputs_write_no_artifacts(self):
         with tempfile.TemporaryDirectory() as folder:

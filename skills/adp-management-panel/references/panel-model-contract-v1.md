@@ -56,6 +56,8 @@ The embedded manifest and immutable panel bundle repeat and agree on:
 
 Phase 7 publication must first create the immutable bundle JSON idempotently, then use one atomic replace of `views/management-panel/index.html` as the current-view commit point. Optional HTML archives use `panel_id`; same ID with different bytes is a collision. Those write mechanics are not implemented in phase 6.
 
+The fixed ELK resource declares `engine_sha256_mode: utf8-lf`. Resource verification and embedding decode UTF-8 and normalize checkout CRLF to LF before hashing; no other content transformation is accepted. This keeps layout and panel identities stable across Git checkout platforms without weakening the pinned-content check.
+
 Roadmap phase 8 adds an external, read-only `adp-state-audit` boundary: a sealed pre-render audit ID joins `input_audit_ids`, and a post-render audit validates the staged bundle and HTML before the phase 7 commit mechanics run. The post-render audit remains external to the manifest so artifact bytes do not depend circularly on their own audit hash.
 
 ## Localization

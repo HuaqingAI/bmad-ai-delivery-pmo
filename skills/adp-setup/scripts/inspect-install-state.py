@@ -467,11 +467,14 @@ def expected_skill_order(module_help_path: Path) -> list[str]:
 
 
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    value = path.read_bytes()
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    else:
+        value = value.replace(b"\r\n", b"\n")
+    return hashlib.sha256(value).hexdigest()
 
 
 def inspect_resource_contract(
@@ -482,9 +485,13 @@ def inspect_resource_contract(
         return "missing", {}, [], None
 
     findings: list[str] = []
-    actual_sha256 = sha256_file(resource_path)
+    try:
+        actual_sha256 = sha256_file(resource_path)
+    except OSError as error:
+        actual_sha256 = None
+        findings.append(f"checksum unreadable: {error}")
     expected_sha256 = str(item.get("sha256") or "").removeprefix("sha256:")
-    if expected_sha256 and actual_sha256 != expected_sha256:
+    if expected_sha256 and actual_sha256 is not None and actual_sha256 != expected_sha256:
         findings.append(
             f"checksum mismatch: expected sha256:{expected_sha256}, got sha256:{actual_sha256}"
         )

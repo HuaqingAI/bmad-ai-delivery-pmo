@@ -77,24 +77,37 @@ def canonical_json_bytes(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def canonical_utf8_lf_bytes(value: bytes, source: Path | str) -> bytes:
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PanelError(f"fixed text resource is not valid UTF-8: {source}") from exc
+    return value.replace(b"\r\n", b"\n")
+
+
 def resolve_memory_root(project_root: Path, value: str) -> Path:
     candidate = Path(value).expanduser()
     return candidate.resolve() if candidate.is_absolute() else (project_root / candidate).resolve()
 
 
-def verify_layout_resource() -> tuple[dict[str, Any], str]:
-    resource = load_json(RESOURCE_PATH)
-    bundle = SKILL_ROOT / resource["bundle"]
-    license_path = SKILL_ROOT / resource["license"]
+def verify_layout_resource(
+    resource_path: Path = RESOURCE_PATH, skill_root: Path = SKILL_ROOT
+) -> tuple[dict[str, Any], str]:
+    resource = load_json(resource_path)
+    bundle = skill_root / resource["bundle"]
+    license_path = skill_root / resource["license"]
     if not bundle.is_file() or not license_path.is_file():
         raise PanelError("fixed ELK bundle or license is missing")
-    actual = sha256_bytes(bundle.read_bytes())
+    if resource.get("engine_sha256_mode") != "utf8-lf":
+        raise PanelError("fixed ELK bundle uses an unsupported checksum mode")
+    canonical_bundle = canonical_utf8_lf_bytes(bundle.read_bytes(), bundle)
+    actual = sha256_bytes(canonical_bundle)
     if actual != resource["engine_sha256"]:
         raise PanelError(f"fixed ELK bundle checksum mismatch: expected {resource['engine_sha256']}, got {actual}")
     license_text = license_path.read_text(encoding="utf-8")
     if "Eclipse Public License" not in license_text or "2.0" not in license_text:
         raise PanelError("fixed ELK license does not identify EPL-2.0")
-    return resource, bundle.read_text(encoding="utf-8")
+    return resource, canonical_bundle.decode("utf-8")
 
 
 def load_panel_audit_module() -> Any:

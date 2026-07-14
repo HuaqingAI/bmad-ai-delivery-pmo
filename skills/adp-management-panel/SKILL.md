@@ -25,7 +25,7 @@ Accept only audited, versioned inputs from their owners:
 - `adp-meeting-pack`: FDE morning and business biweekly distillates with explicit pack ID, confirmed window, readiness, lifecycle, audit identity, information budget, and canonical flow selection.
 - Selected immutable program-status history snapshots and artifact metadata.
 
-Read `references/panel-model-contract-v1.md` for normative mapping, identity, selection, redaction, and recovery. Validate the composed model and manifest against `assets/adp-management-panel-v1.schema.json` and `assets/adp-management-panel-manifest-v1.schema.json` before any write. The fixed offline layout resource is `assets/elk-resource-v1.json`; its bundle, version, EPL-2.0 license, and SHA-256 must agree before render.
+Read `references/panel-model-contract-v1.md` for normative mapping, identity, selection, redaction, and recovery. Validate the composed model and manifest against `assets/adp-management-panel-v1.schema.json` and `assets/adp-management-panel-manifest-v1.schema.json` before any write. The fixed offline layout resource is `assets/elk-resource-v1.json`; its bundle, version, EPL-2.0 license, and SHA-256 must agree before render. Hash and embed the bundle as UTF-8 with checkout CRLF normalized to LF; every other content change fails closed.
 Every binding remains one of `copy`, `allowlist`, `stable-sort`, `select`, or `redact`; layout coordinates and localized labels are presentation metadata rather than new facts.
 
 ## Operations

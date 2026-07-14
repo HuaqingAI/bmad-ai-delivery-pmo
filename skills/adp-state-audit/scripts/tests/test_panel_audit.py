@@ -68,6 +68,33 @@ class PanelAuditTests(unittest.TestCase):
         )
         self.assertEqual(inputs["flow_graph"].get("layout_id"), None)
 
+    def test_resource_audit_accepts_windows_crlf_checkout_and_rejects_tampering(self):
+        inputs = self.inputs()
+        source_resource = panel_audit.load_json(panel_audit.RESOURCE_PATH)
+        source_bundle = panel_model.SKILL_ROOT / source_resource["bundle"]
+        source_license = panel_model.SKILL_ROOT / source_resource["license"]
+        with tempfile.TemporaryDirectory() as folder:
+            panel_root = Path(folder)
+            resource_path = panel_root / "assets/elk-resource-v1.json"
+            bundle = panel_root / source_resource["bundle"]
+            license_path = panel_root / source_resource["license"]
+            resource_path.parent.mkdir(parents=True)
+            bundle.parent.mkdir(parents=True)
+            license_path.parent.mkdir(parents=True, exist_ok=True)
+            resource_path.write_text(json.dumps(source_resource), encoding="utf-8")
+            bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
+            license_path.write_text(source_license.read_text(encoding="utf-8"), encoding="utf-8")
+
+            _, errors, evidence = panel_audit._resource_validation(
+                inputs["request"], resource_path, panel_root
+            )
+
+            self.assertEqual([], errors)
+            self.assertEqual(source_resource["engine_sha256"], evidence["elk_bundle_sha256"])
+            bundle.write_bytes(bundle.read_bytes() + b"tampered")
+            _, errors, _ = panel_audit._resource_validation(inputs["request"], resource_path, panel_root)
+            self.assertIn("ELK bundle checksum does not match resource metadata", errors)
+
     def test_pre_render_failure_and_recovery_matrix(self):
         cases = []
 
