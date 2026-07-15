@@ -105,6 +105,7 @@ class Workstream:
     impacts: list[str] = field(default_factory=list)
     dependency_facts: list[str] = field(default_factory=list)
     impact_facts: list[str] = field(default_factory=list)
+    cross_link_lines: dict[str, dict[str, int]] = field(default_factory=dict)
     l0_references: list[str] = field(default_factory=list)
     files: dict[str, str] = field(default_factory=dict)
     missing_files: list[str] = field(default_factory=list)
@@ -158,16 +159,18 @@ def canonical_cross_workstream_id(raw: str) -> str | None:
     return value.lower()
 
 
-def split_cross_workstream_entries(items: list[str]) -> tuple[list[str], list[str]]:
+def split_cross_workstream_entries(items: list[tuple[str, int]]) -> tuple[list[str], list[str], dict[str, int]]:
     ids: list[str] = []
     facts: list[str] = []
-    for item in items:
+    source_lines: dict[str, int] = {}
+    for item, line_number in items:
         workstream_id = canonical_cross_workstream_id(item)
         target = ids if workstream_id else facts
         value = workstream_id or item
         if value not in target:
             target.append(value)
-    return ids, facts
+            source_lines[value] = line_number
+    return ids, facts, source_lines
 
 
 def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
@@ -361,6 +364,36 @@ def parse_list_after_label(lines: list[str], label: str) -> list[str]:
     return out
 
 
+def parse_list_after_label_with_lines(lines: list[str], heading: str, label: str) -> list[tuple[str, int]]:
+    out: list[tuple[str, int]] = []
+    in_section = False
+    active = False
+    heading_marker = f"## {heading}".lower()
+    label_marker = f"{label}:".lower()
+    section_labels = {"depends on:", "impacts:", "l0 references:"}
+    for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        lower = stripped.lower()
+        if lower == heading_marker:
+            in_section = True
+            active = False
+            continue
+        if in_section and stripped.startswith("## "):
+            break
+        if not in_section:
+            continue
+        if lower == label_marker:
+            active = True
+            continue
+        if active and lower in section_labels:
+            break
+        if active and stripped.startswith(("- ", "* ")):
+            item = re.sub(r"^[-*]\s+", "", stripped).strip()
+            if is_meaningful(item):
+                out.append((item, line_number))
+    return out
+
+
 def parse_markdown_table(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
@@ -491,8 +524,12 @@ def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_
     identity = parse_key_bullets(section(lines, "Identity"))
     status = parse_key_bullets(section(lines, "Project Status"))
     cross = section(lines, "Cross-Workstream Links")
-    depends_on, dependency_facts = split_cross_workstream_entries(parse_list_after_label(cross, "Depends on"))
-    impacts, impact_facts = split_cross_workstream_entries(parse_list_after_label(cross, "Impacts"))
+    depends_on, dependency_facts, dependency_lines = split_cross_workstream_entries(
+        parse_list_after_label_with_lines(lines, "Cross-Workstream Links", "Depends on")
+    )
+    impacts, impact_facts, impact_lines = split_cross_workstream_entries(
+        parse_list_after_label_with_lines(lines, "Cross-Workstream Links", "Impacts")
+    )
     workstream_id = normalize_id(identity.get("workstream id") or record_path.parent.name) or record_path.parent.name
     ws = Workstream(
         workstream_id=workstream_id,
@@ -513,6 +550,7 @@ def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_
         impacts=impacts,
         dependency_facts=dependency_facts,
         impact_facts=impact_facts,
+        cross_link_lines={"depends_on": dependency_lines, "impacts": impact_lines},
         l0_references=parse_list_after_label(cross, "L0 references"),
     )
     scan_workstream_sidecars(ws, memory_root)
@@ -800,9 +838,11 @@ def registered_workstream_ids(memory_root: Path) -> set[str]:
 def cross_reference_gaps(workstreams: list[Workstream], known: set[str]) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
     for ws in workstreams:
+        source_path = ws.files.get("delivery_record", ws.path.as_posix())
         for relationship, targets in [("depends_on", ws.depends_on), ("impacts", ws.impacts)]:
             for target in targets:
                 if target not in known:
+                    source_line = ws.cross_link_lines.get(relationship, {}).get(target)
                     gaps.append(
                         {
                             "workstream": ws.workstream_id,
@@ -815,10 +855,14 @@ def cross_reference_gaps(workstreams: list[Workstream], known: set[str]) -> list
                             "field": relationship,
                             "policy_rule_id": "wdr-cross-workstream-reference-resolves",
                             "recommended_workflow": "adp-status-sync",
+                            "source": f"{source_path}:{source_line}" if source_line else source_path,
+                            "source_path": source_path,
+                            "source_line": source_line,
                         }
                     )
         for relationship, facts in [("depends_on", ws.dependency_facts), ("impacts", ws.impact_facts)]:
             for fact in facts:
+                source_line = ws.cross_link_lines.get(relationship, {}).get(fact)
                 gaps.append(
                     {
                         "workstream": ws.workstream_id,
@@ -826,11 +870,14 @@ def cross_reference_gaps(workstreams: list[Workstream], known: set[str]) -> list
                         "target": fact,
                         "gap": "descriptive cross-workstream fact should migrate out of the ID-only link list",
                         "category": "consistency",
-                        "gap_type": "descriptive_cross_workstream_entry",
+                        "gap_type": "noncanonical_cross_link_entry",
                         "blocking": False,
                         "field": relationship,
                         "policy_rule_id": "wdr-cross-workstream-links-id-only",
                         "recommended_workflow": "adp-workstream-register",
+                        "source": f"{source_path}:{source_line}" if source_line else source_path,
+                        "source_path": source_path,
+                        "source_line": source_line,
                     }
                 )
     return gaps

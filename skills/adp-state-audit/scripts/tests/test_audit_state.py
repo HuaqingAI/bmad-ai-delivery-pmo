@@ -16,6 +16,7 @@ SCENARIO_CAPABILITIES = SCRIPT_GLOBALS["SCENARIO_CAPABILITIES"]
 STABLE_INPUT_AUDIT_ID = SCRIPT_GLOBALS["stable_input_audit_id"]
 AUDIT_CONTENT_HASH = SCRIPT_GLOBALS["audit_content_hash"]
 VALIDATE_RENDER_CONTRACT = SCRIPT_GLOBALS["validate_render_contract"]
+VALIDATE_INPUT_AUDIT_INTEGRITY = SCRIPT_GLOBALS["validate_input_audit_integrity"]
 RENDER_MARKDOWN = SCRIPT_GLOBALS["render_markdown"]
 ATOMIC_WRITE_PAIR = SCRIPT_GLOBALS["atomic_write_pair"]
 SUCCESSFUL_RECEIPT_PAYLOAD = SCRIPT_GLOBALS["successful_receipt_payload"]
@@ -1112,6 +1113,7 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertIsInstance(audit["source_inventory_items"], list)
             required_finding_fields = {
                 "id",
+                "finding_id",
                 "severity",
                 "execution_disposition",
                 "kind",
@@ -1132,6 +1134,17 @@ class AdpStateAuditTests(unittest.TestCase):
             for group in canonical_groups:
                 for finding in audit[group]:
                     self.assertTrue(required_finding_fields.issubset(finding), (group, finding))
+            warning_ids = [finding["finding_id"] for finding in audit["warning_findings"]]
+            self.assertEqual(len(warning_ids), audit["counts"]["warning_findings"])
+            self.assertEqual(len(warning_ids), len(set(warning_ids)))
+            self.assertEqual(
+                warning_ids,
+                [
+                    finding["finding_id"]
+                    for group in ["warnings", "duplicate_candidates", "overlap_claims", "stale_items"]
+                    for finding in audit[group]
+                ],
+            )
             markdown = Path(result["outputs"]["markdown"]).read_text(encoding="utf-8")
 
             def table_row_count(title: str) -> int:
@@ -1158,6 +1171,14 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertIn("adp-status-sync", result["recommended_workflows"])
             self.assertEqual(Path(result["outputs"]["json"]).parent.resolve(), (memory_root / "audits").resolve())
             self.assertTrue(audit["input_audit_id"].startswith("input-audit-"))
+
+            duplicated = json.loads(json.dumps(audit))
+            duplicated["warning_findings"].append(duplicated["warning_findings"][0])
+            duplicated["counts"]["warning_findings"] += 1
+            self.assertIn(
+                "warning_findings finding_id values must be unique",
+                VALIDATE_INPUT_AUDIT_INTEGRITY(duplicated),
+            )
 
     def test_terminal_business_decision_statuses_are_closed(self) -> None:
         terminal_statuses = ["accepted", "closed", "done", "cancelled", "rejected", "superseded"]
@@ -1244,6 +1265,7 @@ class AdpStateAuditTests(unittest.TestCase):
                 "control-actions.json": {"_control": {"execute_allowed": False}, "updates": [{"id": "l1-checkout"}]},
                 "control-dry-run.json": {"_control": {"mode": "dry-run"}, "updates": [{"id": "l1-checkout"}]},
                 "dry-run-actions.json": {"dry_run": True, "updates": [{"id": "l1-checkout"}]},
+                "superseded-actions.json": {"superseded": True, "updates": [{"id": "l1-checkout"}]},
             }
             for name, payload in non_executable.items():
                 (intake_root / name).write_text(json.dumps(payload) + "\n", encoding="utf-8")
@@ -1269,6 +1291,43 @@ class AdpStateAuditTests(unittest.TestCase):
                     "intake/status-sync/weekly-report.json",
                 },
             )
+
+    def test_noncanonical_cross_link_warning_keeps_wdr_path_and_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+            record.write_text(
+                record.read_text(encoding="utf-8").replace(
+                    "- l2-payments",
+                    "- l2-payments\n- Payment-owner confirmation gates checkout sequencing",
+                ),
+                encoding="utf-8",
+            )
+            expected_line = next(
+                line_number
+                for line_number, line in enumerate(record.read_text(encoding="utf-8").splitlines(), start=1)
+                if "Payment-owner confirmation" in line
+            )
+
+            completed = self.run_script(project_root, "--as-of", "2026-07-10")
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+            migration_warnings = [
+                item
+                for item in audit["warning_findings"]
+                if item["gap_type"] == "noncanonical_cross_link_entry"
+            ]
+
+            self.assertEqual(len(migration_warnings), 1)
+            self.assertEqual(migration_warnings[0]["source_path"], "workstreams/l1-checkout/delivery-record.md")
+            self.assertEqual(migration_warnings[0]["source_line"], expected_line)
+            self.assertEqual(
+                migration_warnings[0]["sources"],
+                [f"workstreams/l1-checkout/delivery-record.md:{expected_line}"],
+            )
+            markdown = Path(result["outputs"]["markdown"]).read_text(encoding="utf-8")
+            self.assertIn(f"workstreams/l1-checkout/delivery-record.md:{expected_line}", markdown)
 
     def test_status_sync_receipt_is_consumed_until_input_bytes_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1307,6 +1366,79 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertEqual(
                 [item["path"] for item in second_audit["findings"]["closure"]["unconsumed_intake_files"]],
                 ["intake/status-sync/live-actions.json"],
+            )
+
+    def test_verified_migration_receipt_consumes_intake_until_evidence_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            intake = memory_root / "intake/status-sync/pending-actions.json"
+            evidence = project_root / "historical-status-sync-report.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_path": str(intake.resolve()),
+                        "input_hash": f"sha256:{hashlib.sha256(intake.read_bytes()).hexdigest()}",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(STATUS_SYNC_SCRIPT),
+                "migrate-receipt",
+                str(project_root),
+                "--updates-file",
+                str(intake),
+                "--evidence-file",
+                str(evidence),
+                "--applied-at",
+                "2026-07-10T10:00:00+08:00",
+                "--attested-by",
+                "PMO-A",
+            ]
+            preview = subprocess.run(
+                [*command, "--dry-run"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            preview_result = json.loads(preview.stdout)
+            applied = subprocess.run(
+                [*command, "--verified-plan-token", preview_result["verified_plan_token"]],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            applied_result = json.loads(applied.stdout)
+
+            receipt_path = Path(applied_result["receipt_path"])
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertTrue(receipt_path.is_file())
+            self.assertEqual(receipt["input_path"], str(intake.resolve()))
+            self.assertEqual(
+                receipt["input_hash"],
+                f"sha256:{hashlib.sha256(intake.read_bytes()).hexdigest()}",
+            )
+            self.assertEqual(receipt["migration"]["verification_status"], "verified")
+
+            first = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
+            first_audit = json.loads(Path(first["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(first_audit["findings"]["closure"]["unconsumed_intake_files"], [])
+
+            evidence.write_text(evidence.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            second = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
+            second_audit = json.loads(Path(second["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["path"] for item in second_audit["findings"]["closure"]["unconsumed_intake_files"]],
+                ["intake/status-sync/pending-actions.json"],
             )
 
     def test_malformed_status_sync_intake_is_a_blocking_finding(self) -> None:

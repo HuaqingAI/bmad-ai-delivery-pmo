@@ -198,6 +198,11 @@ def parse_args() -> argparse.Namespace:
     migrate.add_argument("--evidence-file", required=True, help="Historical non-dry-run status-sync result JSON.")
     migrate.add_argument("--applied-at", required=True, help="Attested application time as timezone-aware ISO-8601.")
     migrate.add_argument("--attested-by", required=True, help="Person or authority attesting the evidence-to-input link.")
+    migrate.add_argument("--dry-run", action="store_true", help="Verify the exact evidence binding without writing a receipt.")
+    migrate.add_argument(
+        "--verified-plan-token",
+        help="Token returned by the verified dry-run; required before a durable migration receipt is written.",
+    )
     migrate.add_argument(
         "--memory-root",
         default="_bmad-output/adp/memory",
@@ -1691,30 +1696,60 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 def historical_evidence(payload: Any, evidence_path: Path, input_path: Path, input_hash: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("evidence-file root must be a JSON object")
-    if payload.get("dry_run") is True:
+    binding = payload.get("receipt") if isinstance(payload.get("receipt"), dict) else payload
+    if payload.get("dry_run") is not False or binding.get("dry_run") is True:
         raise ValueError("dry-run evidence cannot create a durable migration receipt")
-    status = str(payload.get("status") or payload.get("lifecycle_status") or "").strip().lower()
-    if payload.get("ok") is not True and status != "applied" and not payload.get("applied_at"):
+    status = str(binding.get("status") or payload.get("status") or payload.get("lifecycle_status") or "").strip().lower()
+    if payload.get("ok") is not True or (status and status != "applied"):
         raise ValueError("evidence-file does not record a successful status-sync execution")
     if str(payload.get("mode") or "update").strip().lower() != "update":
         raise ValueError("evidence-file mode must be update")
     updates = payload.get("updates")
     if not isinstance(updates, list) or not updates:
         raise ValueError("evidence-file must contain non-empty execution updates")
-    evidence_input_hash = str(payload.get("input_hash") or "").strip().lower()
-    if evidence_input_hash and evidence_input_hash.removeprefix("sha256:") != input_hash.removeprefix("sha256:"):
+    evidence_input_hash = str(binding.get("input_hash") or payload.get("input_hash") or "").strip().lower()
+    if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", evidence_input_hash):
+        raise ValueError("evidence-file must declare the exact updates-file input_hash")
+    if evidence_input_hash.removeprefix("sha256:") != input_hash.removeprefix("sha256:"):
         raise ValueError("evidence-file input_hash does not match updates-file raw bytes")
-    evidence_input_path = payload.get("input_path") or payload.get("updates_file")
-    if isinstance(evidence_input_path, str) and evidence_input_path.strip():
-        if Path(evidence_input_path).expanduser().resolve() != input_path:
-            raise ValueError("evidence-file input_path does not match the exact updates-file path")
+    evidence_input_path = binding.get("input_path") or payload.get("input_path") or payload.get("updates_file")
+    if not isinstance(evidence_input_path, str) or not evidence_input_path.strip():
+        raise ValueError("evidence-file must declare the exact updates-file input_path")
+    if Path(evidence_input_path).expanduser().resolve() != input_path:
+        raise ValueError("evidence-file input_path does not match the exact updates-file path")
     if evidence_path == input_path:
         raise ValueError("evidence-file must be distinct from updates-file")
     return {
         "evidence_path": str(evidence_path),
         "evidence_hash": sha256_bytes(evidence_path.read_bytes()),
         "evidence_mode": "update",
+        "evidence_input_path": str(input_path),
+        "evidence_input_hash": input_hash,
+        "verification_status": "verified",
     }
+
+
+def migration_plan_token(
+    input_path: Path,
+    input_hash: str,
+    evidence_path: Path,
+    evidence_hash: str,
+    applied_at: str,
+    attested_by: str,
+) -> str:
+    identity = {
+        "input_path": str(input_path),
+        "input_hash": input_hash,
+        "evidence_path": str(evidence_path),
+        "evidence_hash": evidence_hash,
+        "applied_at": applied_at,
+        "attested_by": attested_by,
+        "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"status-sync-migration-{digest}"
 
 
 def run_context(args: argparse.Namespace) -> int:
@@ -1881,32 +1916,69 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
         evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"evidence-file must contain valid JSON: {exc}") from exc
-    migration = historical_evidence(evidence_payload, evidence_path, input_path, input_hash)
-    migration["attested_by"] = " ".join(args.attested_by.split())
-    if not migration["attested_by"]:
+    attested_by = " ".join(args.attested_by.split())
+    if not attested_by:
         raise ValueError("attested-by must not be empty")
     applied_at = normalize_required_timestamp(args.applied_at, "applied-at")
+    try:
+        migration = historical_evidence(evidence_payload, evidence_path, input_path, input_hash)
+    except ValueError as exc:
+        if not args.dry_run:
+            raise
+        emit(
+            {
+                "ok": True,
+                "mode": "migrate-receipt",
+                "dry_run": True,
+                "verification_status": "unverified",
+                "reason": str(exc),
+                "project_root": str(project_root),
+                "memory_root": str(memory_root),
+                "input_path": str(input_path),
+                "input_hash": input_hash,
+                "evidence_path": str(evidence_path),
+                "receipt": None,
+                "receipt_path": None,
+            },
+            args.output,
+        )
+        return 0
+    migration["attested_by"] = attested_by
+    plan_token = migration_plan_token(
+        input_path,
+        input_hash,
+        evidence_path,
+        str(migration["evidence_hash"]),
+        applied_at,
+        attested_by,
+    )
+    if not args.dry_run and args.verified_plan_token != plan_token:
+        raise ValueError("durable migration requires the verified-plan-token from an unchanged dry-run")
     receipt = status_sync_receipt(
         receipt_type="migration",
         input_path=input_path,
         input_hash=input_hash,
         update_count=len(input_payload["updates"]),
-        applied_at=applied_at,
-        dry_run=False,
+        applied_at=None if args.dry_run else applied_at,
+        dry_run=args.dry_run,
         migration=migration,
     )
-    receipt_path = memory_root / receipt_relative_path(receipt)
-    write_json_atomic(receipt_path, receipt)
-    if args.verbose:
+    receipt_path = None if args.dry_run else memory_root / receipt_relative_path(receipt)
+    if receipt_path is not None:
+        write_json_atomic(receipt_path, receipt)
+    if args.verbose and receipt_path is not None:
         print(f"Wrote migration receipt: {receipt_path}", file=sys.stderr)
     emit(
         {
             "ok": True,
             "mode": "migrate-receipt",
+            "dry_run": args.dry_run,
+            "verification_status": "verified",
+            "verified_plan_token": plan_token,
             "project_root": str(project_root),
             "memory_root": str(memory_root),
             "receipt": receipt,
-            "receipt_path": str(receipt_path),
+            "receipt_path": str(receipt_path) if receipt_path is not None else None,
         },
         args.output,
     )

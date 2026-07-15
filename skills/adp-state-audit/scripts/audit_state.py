@@ -1035,6 +1035,7 @@ def build_artifact_validation(
         canonical.append(finding)
     blocking = [item for item in canonical if item["severity"] == "blocking"]
     warnings = [item for item in canonical if item["severity"] != "blocking"]
+    warning_findings = require_unique_finding_ids(warnings, "warning_findings")
     if any(item["execution_disposition"] == "blocked" for item in canonical):
         disposition = "blocked"
     elif canonical:
@@ -1069,11 +1070,16 @@ def build_artifact_validation(
         "artifacts": artifacts,
         "blocking_gaps": blocking,
         "warnings": warnings,
+        "warning_findings": warning_findings,
         "duplicate_candidates": [],
         "overlap_claims": [],
         "conflicts": [],
         "stale_items": [item for item in warnings if item.get("code") in {"artifact.stale_snapshot", "artifact.source_fingerprint_mismatch"}],
-        "counts": {"artifacts": len(artifacts), "blocking_findings": len(blocking), "warning_findings": len(warnings)},
+        "counts": {
+            "artifacts": len(artifacts),
+            "blocking_findings": len(blocking),
+            "warning_findings": len(warning_findings),
+        },
         "recommended_workflows": recommended,
     }
     validation["artifact_validation_id"] = stable_artifact_validation_id(validation)
@@ -1424,11 +1430,11 @@ def build_audit(
     for finding in canonicalize_vnext_findings(vnext["findings"]):
         group = "blocking_gaps" if finding["severity"] == "blocking" else "warnings"
         contract_findings[group].append(finding)
+    for group in ["blocking_gaps", "warnings"]:
+        contract_findings[group] = dedupe_canonical_findings(contract_findings[group])
+    warning_findings = warning_findings_from_groups(contract_findings)
     blocking_count = len(contract_findings["blocking_gaps"]) + len(contract_findings["conflicts"])
-    warning_count = sum(
-        len(contract_findings[group])
-        for group in ["warnings", "duplicate_candidates", "overlap_claims", "stale_items"]
-    )
+    warning_count = len(warning_findings)
     audit_status = "blocked" if blocking_count else ("warning" if warning_count else "pass")
     all_findings = [item for group in contract_findings.values() for item in group]
     if any(item.get("execution_disposition") == "blocked" for item in all_findings):
@@ -1477,6 +1483,7 @@ def build_audit(
         "locale_fallback": vnext["locale_fallback"],
         "effective_config": vnext["effective_config"],
         **contract_findings,
+        "warning_findings": warning_findings,
         "merge_review_evidence": {
             "shared_references": merge_quality["shared_reference_evidence"],
             "readiness_gap_pairs": merge_quality["readiness_gap_evidence"],
@@ -1962,6 +1969,8 @@ def canonical_finding_identity(finding: dict[str, Any]) -> str:
             "category",
             "gap_type",
             "recommended_workflow",
+            "source_path",
+            "source_line",
         ]
     }
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2011,6 +2020,19 @@ def validate_input_audit_integrity(audit: dict[str, Any]) -> list[str]:
         errors.append("locale_fallback must be boolean")
     if audit.get("execution_disposition") not in {"ready", "degraded", "blocked"}:
         errors.append("execution_disposition is invalid")
+    warning_findings = audit.get("warning_findings")
+    if warning_findings is not None:
+        if not isinstance(warning_findings, list):
+            errors.append("warning_findings must be an array")
+        else:
+            finding_ids = [item.get("finding_id") for item in warning_findings if isinstance(item, dict)]
+            if len(finding_ids) != len(warning_findings) or any(not isinstance(value, str) or not value for value in finding_ids):
+                errors.append("warning_findings entries require finding_id")
+            elif len(finding_ids) != len(set(finding_ids)):
+                errors.append("warning_findings finding_id values must be unique")
+            counts = audit.get("counts") if isinstance(audit.get("counts"), dict) else {}
+            if counts.get("warning_findings") != len(warning_findings):
+                errors.append("counts.warning_findings must equal warning_findings length")
     if not errors and stable_input_audit_id(audit) != audit.get("input_audit_id"):
         errors.append("input_audit_id does not match canonical audit content")
     if not errors and audit_content_hash(audit) != audit.get("audit_content_hash"):
@@ -2308,6 +2330,8 @@ def is_canonical_status_sync_intake(payload: dict[str, Any]) -> bool:
     control = payload.get("_control") if isinstance(payload.get("_control"), dict) else {}
     if control.get("execute_allowed") is False or payload.get("execute_allowed") is False:
         return False
+    if payload.get("superseded") is True:
+        return False
     if payload.get("dry_run") is True:
         return False
     if isinstance(payload.get("ok"), bool) and str(payload.get("mode", "")).lower() in {"update", "stale"}:
@@ -2401,14 +2425,29 @@ def valid_migration_receipt(receipt: dict[str, Any]) -> bool:
     evidence_path = migration.get("evidence_path")
     evidence_hash = str(migration.get("evidence_hash") or "").strip().lower()
     attested_by = str(migration.get("attested_by") or "").strip()
-    if not isinstance(evidence_path, str) or not evidence_path.strip() or not attested_by:
+    if (
+        not isinstance(evidence_path, str)
+        or not evidence_path.strip()
+        or not attested_by
+        or migration.get("verification_status") != "verified"
+    ):
         return False
     if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", evidence_hash):
         return False
     path = Path(evidence_path).expanduser().resolve()
     if not path.is_file():
         return False
-    return evidence_hash.removeprefix("sha256:") == hashlib.sha256(path.read_bytes()).hexdigest()
+    if evidence_hash.removeprefix("sha256:") != hashlib.sha256(path.read_bytes()).hexdigest():
+        return False
+    evidence_input_path = migration.get("evidence_input_path")
+    evidence_input_hash = str(migration.get("evidence_input_hash") or "").strip().lower()
+    receipt_input_path = receipt.get("input_path")
+    receipt_input_hash = str(receipt.get("input_hash") or "").strip().lower()
+    if not isinstance(evidence_input_path, str) or not isinstance(receipt_input_path, str):
+        return False
+    if Path(evidence_input_path).expanduser().resolve() != Path(receipt_input_path).expanduser().resolve():
+        return False
+    return fingerprints_equal(evidence_input_hash, receipt_input_hash)
 
 
 def audit_merge_quality(prepass: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -2645,7 +2684,7 @@ def prepass_gaps(prepass: dict[str, Any], category: str | None = None) -> list[d
 
 
 def prepass_gap_finding(gap: dict[str, Any], category: str) -> dict[str, Any]:
-    return {
+    finding = {
         "workstream": gap.get("workstream", ""),
         "source": gap.get("source", ""),
         "gap": gap.get("gap", ""),
@@ -2655,6 +2694,11 @@ def prepass_gap_finding(gap: dict[str, Any], category: str) -> dict[str, Any]:
         "blocking": bool(gap.get("blocking")),
         "recommended_workflow": gap.get("recommended_workflow", ""),
     }
+    if isinstance(gap.get("source_path"), str) and gap["source_path"].strip():
+        finding["source_path"] = gap["source_path"].strip()
+    if isinstance(gap.get("source_line"), int) and gap["source_line"] > 0:
+        finding["source_line"] = gap["source_line"]
+    return finding
 
 
 def canonical_source_inventory(sources: list[dict[str, Any]], missing_sources: Any) -> list[dict[str, Any]]:
@@ -2729,6 +2773,26 @@ def canonical_findings(
     return {name: dedupe_canonical_findings(items) for name, items in groups.items()}
 
 
+def warning_findings_from_groups(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return require_unique_finding_ids(
+        [
+            item
+            for group in ["warnings", "duplicate_candidates", "overlap_claims", "stale_items"]
+            for item in groups.get(group, [])
+        ],
+        "warning_findings",
+    )
+
+
+def require_unique_finding_ids(items: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
+    finding_ids = [str(item.get("finding_id") or "") for item in items]
+    if any(not finding_id for finding_id in finding_ids):
+        raise ValueError(f"{label} entries require finding_id")
+    if len(finding_ids) != len(set(finding_ids)):
+        raise ValueError(f"{label} finding_id values must be unique")
+    return list(items)
+
+
 def dedupe_canonical_findings(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -2762,8 +2826,10 @@ def canonical_finding(item: dict[str, Any], severity: str, kind: str) -> dict[st
         sort_keys=True,
         separators=(",", ":"),
     )
+    finding_id = f"adp-{kind}-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}"
     finding = {
-        "id": f"adp-{kind}-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}",
+        "id": finding_id,
+        "finding_id": finding_id,
         "severity": severity,
         "kind": kind,
         "source_type": finding_source_type(item, kind, sources),
@@ -2781,6 +2847,10 @@ def canonical_finding(item: dict[str, Any], severity: str, kind: str) -> dict[st
             "status": item.get("status", ""),
             "gaps": item.get("gaps", []),
         }
+    if isinstance(item.get("source_path"), str) and item["source_path"].strip():
+        finding["source_path"] = item["source_path"].strip()
+    if isinstance(item.get("source_line"), int) and item["source_line"] > 0:
+        finding["source_line"] = item["source_line"]
     return finding
 
 
@@ -3014,12 +3084,14 @@ def render_markdown(
     no_findings = text("audit.value.no_findings")
     review_item = text("audit.value.review_item")
     blocking_findings = [*audit["blocking_gaps"], *audit["conflicts"]]
-    warning_findings = [
-        *audit["warnings"],
-        *audit["duplicate_candidates"],
-        *audit["overlap_claims"],
-        *audit["stale_items"],
-    ]
+    warning_findings = audit.get("warning_findings")
+    if warning_findings is None:
+        warning_findings = [
+            *audit["warnings"],
+            *audit["duplicate_candidates"],
+            *audit["overlap_claims"],
+            *audit["stale_items"],
+        ]
     lines = [
         f"# {text('audit.title.state')}",
         "",
@@ -3111,7 +3183,8 @@ def render_artifact_validation_markdown(
         lines.append(f"- {text('audit.value.no_readable_artifacts')}")
     lines.append("")
     add_table(lines, text("audit.section.blocking_gaps"), finding_headers, flatten_findings(validation["blocking_gaps"], review_item), finding_header_labels, no_findings)
-    add_table(lines, text("audit.metric.warnings"), finding_headers, flatten_findings(validation["warnings"], review_item), finding_header_labels, no_findings)
+    warning_findings = validation.get("warning_findings", validation["warnings"])
+    add_table(lines, text("audit.metric.warnings"), finding_headers, flatten_findings(warning_findings, review_item), finding_header_labels, no_findings)
     lines.extend([f"## {text('audit.section.recommended_workflows')}", ""])
     if validation["recommended_workflows"]:
         lines.extend(f"- `{workflow}`" for workflow in validation["recommended_workflows"])

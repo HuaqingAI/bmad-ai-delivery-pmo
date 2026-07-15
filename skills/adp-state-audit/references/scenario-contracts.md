@@ -4,7 +4,7 @@ Load only the branch that matches the current audit. `audit_state.py` and `panel
 
 ## Status-Sync Intake
 
-When an input audit encounters `intake/status-sync`, executable state comes only from parsed control fields. Malformed JSON fails closed. A non-empty executable updates payload remains blocked until a versioned receipt in `receipts/status-sync/` binds the exact input path and raw bytes; structured dry-run, disabled, proposal, preview, candidate, or superseded payloads are non-executable.
+When an input audit encounters `intake/status-sync`, executable state comes only from parsed control fields. Malformed JSON fails closed. A non-empty executable updates payload remains blocked until a versioned receipt in `receipts/status-sync/` binds the exact input path and raw bytes; migration receipts additionally require verified evidence path/hash bindings. Structured dry-run, disabled, proposal, preview, candidate, or superseded payloads, including `superseded: true`, are non-executable.
 
 ## Flow-Graph Artifact
 

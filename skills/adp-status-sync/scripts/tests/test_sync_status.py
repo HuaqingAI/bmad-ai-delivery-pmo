@@ -364,26 +364,61 @@ class SyncStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
             evidence_file = project_root / "historical-report.json"
+            input_hash = f"sha256:{hashlib.sha256(updates_file.read_bytes()).hexdigest()}"
             evidence_file.write_text(
-                json.dumps({"ok": True, "mode": "update", "dry_run": False, "updates": [{"ok": True}]}) + "\n",
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_path": str(updates_file.resolve()),
+                        "input_hash": input_hash,
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
 
+            command = [
+                sys.executable,
+                str(SCRIPT),
+                "migrate-receipt",
+                str(project_root),
+                "--updates-file",
+                str(updates_file),
+                "--evidence-file",
+                str(evidence_file),
+                "--applied-at",
+                "2026-07-10T10:00:00+08:00",
+                "--attested-by",
+                "PMO-A",
+            ]
+            preview = subprocess.run(
+                [*command, "--dry-run"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            preview_result = json.loads(preview.stdout)
+            self.assertEqual(preview_result["verification_status"], "verified")
+            self.assertTrue(preview_result["dry_run"])
+            self.assertIsNone(preview_result["receipt_path"])
+            self.assertFalse((project_root / "_bmad-output/adp/memory/receipts/status-sync").exists())
+
+            missing_token = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertNotEqual(missing_token.returncode, 0)
+            self.assertIn("verified-plan-token", json.loads(missing_token.stdout)["error"])
+
             completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT),
-                    "migrate-receipt",
-                    str(project_root),
-                    "--updates-file",
-                    str(updates_file),
-                    "--evidence-file",
-                    str(evidence_file),
-                    "--applied-at",
-                    "2026-07-10T10:00:00+08:00",
-                    "--attested-by",
-                    "PMO-A",
-                ],
+                [*command, "--verified-plan-token", preview_result["verified_plan_token"]],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -392,40 +427,46 @@ class SyncStatusTests(unittest.TestCase):
             result = json.loads(completed.stdout)
             receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
 
+            self.assertEqual(result["verification_status"], "verified")
             self.assertEqual(receipt["receipt_type"], "migration")
             self.assertEqual(receipt["migration"]["attested_by"], "PMO-A")
+            self.assertEqual(receipt["migration"]["verification_status"], "verified")
+            self.assertEqual(receipt["migration"]["evidence_input_path"], str(updates_file.resolve()))
+            self.assertEqual(receipt["migration"]["evidence_input_hash"], input_hash)
             self.assertEqual(receipt["migration"]["evidence_path"], str(evidence_file.resolve()))
             self.assertEqual(
                 receipt["migration"]["evidence_hash"],
                 f"sha256:{hashlib.sha256(evidence_file.read_bytes()).hexdigest()}",
             )
 
+            same_name_elsewhere = project_root / "elsewhere" / updates_file.name
+            same_name_elsewhere.parent.mkdir()
+            same_name_elsewhere.write_bytes(updates_file.read_bytes())
             evidence_file.write_text(
-                json.dumps({"ok": True, "mode": "update", "dry_run": True, "updates": [{"ok": True}]}) + "\n",
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_path": str(same_name_elsewhere.resolve()),
+                        "input_hash": input_hash,
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
-            rejected = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT),
-                    "migrate-receipt",
-                    str(project_root),
-                    "--updates-file",
-                    str(updates_file),
-                    "--evidence-file",
-                    str(evidence_file),
-                    "--applied-at",
-                    "2026-07-10T10:00:00Z",
-                    "--attested-by",
-                    "PMO-A",
-                ],
-                check=False,
+            unverified = subprocess.run(
+                [*command, "--dry-run"],
+                check=True,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
             )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("dry-run evidence", json.loads(rejected.stdout)["error"])
+            unverified_result = json.loads(unverified.stdout)
+            self.assertEqual(unverified_result["verification_status"], "unverified")
+            self.assertIn("exact updates-file path", unverified_result["reason"])
+            self.assertIsNone(unverified_result["receipt"])
 
     def test_unsupported_action_status_is_rejected_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

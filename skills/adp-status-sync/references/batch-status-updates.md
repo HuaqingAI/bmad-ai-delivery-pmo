@@ -26,10 +26,16 @@ The writer preflights the full batch and publishes WDR, daily log, action ledger
 
 ## Historical Receipt Migration
 
-Migrate one historical input only when an existing successful non-dry-run report and an explicit attestation bind that exact file:
+Verify one historical input against a successful non-dry-run report before writing anything. The report must declare both the exact resolved input path and its raw-byte SHA-256; basename similarity is never evidence:
 
 ```bash
-uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --updates-file <path> --evidence-file <report.json> --applied-at <iso-time> --attested-by "<authority>"
+uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --updates-file <path> --evidence-file <report.json> --applied-at <iso-time> --attested-by "<authority>" --dry-run
 ```
 
-Never migrate in bulk or infer the evidence-to-input relation from filenames.
+An unverified result writes no receipt and remains blocked. Apply a verified result only with the unchanged dry-run token:
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --updates-file <path> --evidence-file <report.json> --applied-at <iso-time> --attested-by "<authority>" --verified-plan-token <token>
+```
+
+Process historical inputs one at a time. A set with a different number of reports and intakes must be paired from declared path/hash bindings, never filenames; only `verification_status: verified` entries receive versioned receipts.

@@ -174,11 +174,25 @@ class AdpStatePrepassTests(unittest.TestCase):
             migrations = [
                 item
                 for item in result["cross_reference_gaps"]
-                if item["gap_type"] == "descriptive_cross_workstream_entry"
+                if item["gap_type"] == "noncanonical_cross_link_entry"
             ]
             self.assertEqual([item["target"] for item in missing], ["missing-line"])
             self.assertEqual(len(migrations), 2)
             self.assertTrue(all(not item["blocking"] for item in migrations))
+            self.assertEqual(
+                [(item["source_path"], item["source_line"]) for item in migrations],
+                [
+                    ("workstreams/l1-checkout/delivery-record.md", 27),
+                    ("workstreams/l1-checkout/delivery-record.md", 32),
+                ],
+            )
+            self.assertEqual(
+                [item["source"] for item in migrations],
+                [
+                    "workstreams/l1-checkout/delivery-record.md:27",
+                    "workstreams/l1-checkout/delivery-record.md:32",
+                ],
+            )
             self.assertNotIn(
                 "l2-payments",
                 {item["target"] for item in result["cross_reference_gaps"]},
