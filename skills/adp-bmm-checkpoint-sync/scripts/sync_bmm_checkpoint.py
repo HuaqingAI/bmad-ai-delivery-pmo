@@ -371,6 +371,30 @@ def normalize_workstream_items(value: Any) -> list[str]:
     return normalized
 
 
+def split_cross_workstream_entries(items: list[str]) -> tuple[list[str], list[str]]:
+    workstream_ids: list[str] = []
+    facts: list[str] = []
+    for raw in compact_list(items):
+        if re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", raw) and not is_missing_value(raw):
+            workstream_id = raw.lower()
+            if workstream_id not in workstream_ids:
+                workstream_ids.append(workstream_id)
+        elif not is_missing_value(raw) and raw not in facts:
+            facts.append(raw)
+    return workstream_ids, facts
+
+
+def cross_workstream_link_audit(args: argparse.Namespace) -> dict[str, list[str]]:
+    depends_on, dependency_facts = split_cross_workstream_entries(args.dependency)
+    impacts, impact_facts = split_cross_workstream_entries(args.impact)
+    return {
+        "depends_on_ids": depends_on,
+        "impact_ids": impacts,
+        "dependency_facts": dependency_facts,
+        "impact_facts": impact_facts,
+    }
+
+
 def normalize_handoff_action(raw: dict[str, Any], default_workstream: str, default_source: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("handoff action must be a JSON object")
@@ -917,6 +941,9 @@ def checkpoint_log_section(record_text: str, args: argparse.Namespace, artifacts
         lines.append("- Artifacts: " + "; ".join(f"{item.label}={item.path}" for item in artifacts))
     if args.change_note:
         lines.append("- Change notes: " + "; ".join(compact_list(args.change_note)))
+    _, impact_facts = split_cross_workstream_entries(args.impact)
+    if impact_facts:
+        lines.append("- Cross-workstream impact facts: " + "; ".join(impact_facts))
     if gaps:
         lines.append("- Visible gaps: " + "; ".join(row[0] for row in gaps))
     if args.next_action:
@@ -966,8 +993,10 @@ def update_record(record_text: str, args: argparse.Namespace, artifacts: list[Ar
 
     links = get_section(record_text, "Cross-Workstream Links")
     if links:
-        links = append_bullets_under_label(links, "Depends on", args.dependency)
-        links = append_bullets_under_label(links, "Impacts", args.impact)
+        depends_on_ids, _ = split_cross_workstream_entries(args.dependency)
+        impact_ids, _ = split_cross_workstream_entries(args.impact)
+        links = append_bullets_under_label(links, "Depends on", depends_on_ids)
+        links = append_bullets_under_label(links, "Impacts", impact_ids)
         links = append_bullets_under_label(links, "L0 references", args.l0_reference)
         record_text = replace_section(record_text, "Cross-Workstream Links", links)
 
@@ -1317,6 +1346,7 @@ def run_legacy_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "ready_validation_failures": [],
         "daily_log": str(daily_path),
         "warnings": warnings,
+        "cross_workstream_link_audit": cross_workstream_link_audit(args),
         "next_actions": next_actions_for(args, generated_gaps),
     }
     if args.dry_run:
@@ -1502,6 +1532,12 @@ def run_candidate_sync(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 "handoff_gaps": [],
                 "fanout_suppressed": 0,
                 "no_op": True,
+            },
+            "cross_workstream_link_audit": {
+                "depends_on_ids": [],
+                "impact_ids": [],
+                "dependency_facts": [],
+                "impact_facts": [],
             },
         }
     if candidate.get("status") != "confirmed":

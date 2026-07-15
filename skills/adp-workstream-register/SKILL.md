@@ -71,6 +71,8 @@ Add optional flags only for reliable facts:
 
 If the script cannot run, create `delivery-record.md`, `evidence.md`, `decisions.md`, and `readiness.md` from `assets/workstream-templates/` manually. Preserve existing files.
 
+`Depends on` and `Impacts` are ID-only lists. Normalize valid IDs to lowercase; reject `TBD`, empty values, and explanatory text rather than writing them. Put descriptive dependency or impact facts in Project Status or the patch plan, not in these lists; an empty list has no placeholder bullet.
+
 ## Normalize Existing Lines
 
 When the user brings an existing workstream, do not rewrite BMM artifacts or overwrite the WDR. Index supplied paths and project-level facts into a patch plan the user can apply after review, and mark missing owners, scope boundaries, acceptance criteria, dependencies, evidence, or confirmations as gaps.

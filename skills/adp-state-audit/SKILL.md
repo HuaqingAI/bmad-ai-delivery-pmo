@@ -39,43 +39,39 @@ Run the deterministic audit:
 uv run "{skill-root}/scripts/audit_state.py" "{project-root}" --scenario global --output-dir "{workflow.audit_output_path}" --execution-mode uv
 ```
 
-This remains the default `--phase input`. It validates the typed prepass plus the approved baseline, baseline-to-WDR milestone mapping, applicable actual dates, and shared effective locale. It emits a stable `input_audit_id`; repeated identical inputs reuse the same immutable audit rather than overwriting history.
+This remains the default `--phase input`. It emits a stable `input_audit_id`; repeated identical inputs reuse the same immutable audit rather than overwriting history.
 
 The audit is read-only: create audit artifacts and recommend owning workflows, but never edit ADP state. If the `uv` executable is unavailable, use an available Python 3.10+ interpreter with the same script and arguments, replacing `--execution-mode uv` with `--execution-mode python-fallback`. A blocked or failed audit is authoritative and must not be manually completed.
 
 Use optional flags only when the user gives the scope:
 
-- `--scenario global|fde-morning|business-biweekly|weekly-report|project-lead|roadmap|management-panel` to tune the prepass capability and output name; management-panel routes to the dedicated panel gates below.
+- `--scenario global|fde-morning|business-biweekly|weekly-report|project-lead|roadmap|management-panel` to tune the prepass capability and output name; management-panel routes to its scenario contract below.
 - `--workstream <id>` to limit the WDR scan; repeat as needed.
 - `--memory-root <path>` when ADP memory is not at the default path.
 - `--prepass-json <path>` to audit an already captured prepass result.
 - `--as-of YYYY-MM-DD` and `--max-age-days <n>` for reproducible freshness checks.
 - `--output-dir <path>` for audit artifacts; default is `{workflow.audit_output_path}`.
 - `--run-folder-pattern <pattern>` when `{workflow.run_folder_pattern}` is non-empty.
-- `--headless` for a non-interactive run that records effective parameters and fallback decisions in the returned memlog.
+- `--headless` for a non-interactive caller; it does not change the JSON contract or create runtime state.
 
 ## Artifact Validation
 
 After a generator writes an artifact, validate the exact files against their sealed input audit:
 
 ```bash
-uv run "{skill-root}/scripts/audit_state.py" "{project-root}" --phase artifact --input-audit-json <input-audit.json> --artifact <generated-file>
+uv run "{skill-root}/scripts/audit_state.py" "{project-root}" --phase artifact --input-audit-json <input-audit.json> --artifact <generated-file> --output-dir "{workflow.audit_output_path}"
 ```
 
-Repeat `--artifact` for every file in the same generation transaction. Treat the immutable validation result as authoritative and never modify snapshots or views.
+Repeat `--artifact` for every file in the same generation transaction. When `{workflow.run_folder_pattern}` is non-empty, append `--run-folder-pattern "{workflow.run_folder_pattern}"`. Treat the immutable validation result as authoritative and never modify snapshots or views.
 
-For `views/flow-graph.json`, artifact validation uses the graph contract rather than view locale metadata. It recomputes topology/state/overlay/flow identities, verifies node/edge/state/count references and baseline revision, and requires the current graph, `snapshots/flow-graph/latest.json`, and immutable snapshot to be identical.
+## Scenario Contracts
 
-## Management Panel Gates
-
-For `adp-management-panel`, run `--scenario management-panel --panel-input-bundle <canonical-inputs.json>` before render. This read-only gate seals exact input and source-file hashes and validates freshness, locale fallback, source/audit lineage, progress and flow identities, meeting readiness/lifecycle/scope, and the pinned ELK version/license/hash. A blocking disposition forbids compose and publication; degraded evidence must remain visible in the panel recovery state.
-
-After render, run the artifact phase with `--panel-model <panel-id.json> --input-audit-json <panel-input-audit.json> --artifact <panel.html>` and, when available, the same `--panel-input-bundle`. It validates the model and manifest schemas, deterministic source projection, safe embedded JSON, exact ELK/runtime bytes, SVG/HTML allowlists, semantic fallback, distribution redaction, and immutable filename/collision rules. The validator writes only its own immutable audit record and never repairs or rewrites a panel bundle, current HTML, or archive.
+Load `references/scenario-contracts.md` only when the audit encounters `intake/status-sync`, validates `views/flow-graph.json`, or gates `adp-management-panel`. It owns those branch contracts and the panel command forms.
 
 ## Findings
 
-Treat `audit_state.py` output as the canonical finding set. Report severity and `execution_disposition` independently: only disposition `blocked` prevents generation or publication; `degraded` requires lower confidence and a visibly risk-bearing readout. Baseline missing/invalid and unmapped actuals block; overdue missing actuals, stale artifacts, and explicit locale fallback degrade. Do not infer gaps from prose similarity.
+Treat `audit_state.py` output as the canonical finding set. JSON counts and Markdown blocking/warning tables come only from the top-level canonical finding groups; raw category projections remain compatibility detail and must not be re-counted or re-rendered. Report severity and `execution_disposition` independently: only disposition `blocked` prevents generation or publication; `degraded` requires lower confidence and a visibly risk-bearing readout. Baseline missing/invalid and unmapped actuals block; overdue missing actuals, stale artifacts, and explicit locale fallback degrade. Do not infer gaps from prose similarity.
 
 ## Output Contract
 
-Interactive use reports phase, audit status, execution disposition, output paths, findings, confidence, language fallbacks, config warnings, and recovery workflows in the resolved communication language. Headless use passes `--headless` and returns the script result JSON unchanged. Never invent output or memlog paths on blocked/error results. Keep artifact validation separate from generated artifacts, and route follow-up only from returned recommendations.
+Interactive use reports phase, audit status, execution disposition, output paths, findings, confidence, language fallbacks, config warnings, and recovery workflows in the resolved communication language. Headless use passes `--headless` and returns the script result JSON unchanged. Never invent output paths on blocked/error results. Keep artifact validation separate from generated artifacts, and route follow-up only from returned recommendations.

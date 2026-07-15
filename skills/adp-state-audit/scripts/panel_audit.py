@@ -227,10 +227,12 @@ def _resource_validation(
     if not license_path.is_file():
         errors.append("ELK license is missing")
     else:
-        license_text = license_path.read_text(encoding="utf-8")
-        evidence["elk_license_sha256"] = bytes_hash(license_text.encode("utf-8"))
-        if "Eclipse Public License" not in license_text or "2.0" not in license_text:
-            errors.append("ELK license does not identify EPL-2.0")
+        actual_license = bytes_hash(license_path.read_bytes())
+        evidence["elk_license_sha256"] = actual_license
+        if actual_license != resource.get("license_sha256"):
+            errors.append("ELK license checksum does not match resource metadata")
+    if resource.get("engine_license") != "EPL-2.0":
+        errors.append("ELK resource engine_license must be EPL-2.0")
     layout = request.get("layout") if isinstance(request, dict) else None
     expected_layout = {
         "layout_contract_version": resource.get("layout_contract_version"),

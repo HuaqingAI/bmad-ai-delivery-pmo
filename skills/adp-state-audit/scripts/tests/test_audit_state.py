@@ -22,6 +22,7 @@ SUCCESSFUL_RECEIPT_PAYLOAD = SCRIPT_GLOBALS["successful_receipt_payload"]
 VALIDATE_FLOW_GRAPH_CONTRACT = SCRIPT_GLOBALS["validate_flow_graph_contract"]
 FINGERPRINTS_EQUAL = SCRIPT_GLOBALS["fingerprints_equal"]
 PREPASS_SCRIPT = SCRIPT.parents[2] / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
+STATUS_SYNC_SCRIPT = SCRIPT.parents[2] / "adp-status-sync" / "scripts" / "sync_status.py"
 LOCALE_CATALOG_PATH = SCRIPT.parents[2] / "adp-plan-baseline" / "assets" / "locale-catalog.json"
 LOCALE_CATALOG = json.loads(LOCALE_CATALOG_PATH.read_text(encoding="utf-8"))
 LOCALE_CATALOG_FINGERPRINT = hashlib.sha256(LOCALE_CATALOG_PATH.read_bytes()).hexdigest()
@@ -65,6 +66,24 @@ L0 references:
 
 
 class AdpStateAuditTests(unittest.TestCase):
+    def test_documented_commands_route_customized_audit_outputs(self) -> None:
+        skill_root = SCRIPT.parents[1]
+        command_docs = [skill_root / "SKILL.md", skill_root / "references/scenario-contracts.md"]
+        commands = [
+            line
+            for path in command_docs
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith('uv run "{skill-root}/scripts/audit_state.py"')
+        ]
+
+        self.assertGreaterEqual(len(commands), 5)
+        self.assertTrue(
+            all('--output-dir "{workflow.audit_output_path}"' in command for command in commands)
+        )
+        self.assertTrue(
+            all("run-folder-pattern" in path.read_text(encoding="utf-8") for path in command_docs)
+        )
+
     def test_fingerprint_comparison_accepts_only_equivalent_sha256_encodings(self) -> None:
         digest = "a" * 64
 
@@ -97,16 +116,14 @@ class AdpStateAuditTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def assert_failure_contract(self, result: dict, *, scenario: str = "global", headless: bool = False) -> None:
+    def assert_failure_contract(self, result: dict, *, scenario: str = "global") -> None:
         self.assertFalse(result["ok"])
         self.assertIn(result["status"], {"blocked", "error"})
         self.assertEqual(result["scenario"], scenario)
         self.assertEqual(result["outputs"], {})
         self.assertIsInstance(result["recommended_workflows"], list)
         self.assertTrue(result.get("error") or result.get("reason"))
-        if headless:
-            self.assertTrue(result["memlog"])
-            self.assertTrue(Path(result["memlog"]).exists())
+        self.assertNotIn("memlog", result)
 
     def test_scenario_capabilities_are_accepted_by_installed_prepass(self) -> None:
         project_root = SCRIPT.parents[3]
@@ -1115,6 +1132,29 @@ class AdpStateAuditTests(unittest.TestCase):
             for group in canonical_groups:
                 for finding in audit[group]:
                     self.assertTrue(required_finding_fields.issubset(finding), (group, finding))
+            markdown = Path(result["outputs"]["markdown"]).read_text(encoding="utf-8")
+
+            def table_row_count(title: str) -> int:
+                lines = markdown.splitlines()
+                start = lines.index(f"## {title}") + 1
+                end = next((index for index in range(start, len(lines)) if lines[index].startswith("## ")), len(lines))
+                table_lines = [line for line in lines[start:end] if line.startswith("|")]
+                return max(0, len(table_lines) - 2)
+
+            blocking_title = LOCALE_CATALOG["en"]["audit.section.blocking_gaps"]
+            warnings_title = LOCALE_CATALOG["en"]["audit.metric.warnings"]
+            self.assertEqual(table_row_count(blocking_title), audit["counts"]["blocking_findings"])
+            self.assertEqual(table_row_count(warnings_title), audit["counts"]["warning_findings"])
+            self.assertIn(
+                f"- {LOCALE_CATALOG['en']['audit.metric.blocking_gaps']}: {audit['counts']['blocking_findings']}",
+                markdown,
+            )
+            self.assertIn(
+                f"- {LOCALE_CATALOG['en']['audit.metric.warnings']}: {audit['counts']['warning_findings']}",
+                markdown,
+            )
+            freshness_summary = audit["stale_items"][0]["summary"]
+            self.assertEqual(markdown.count(freshness_summary), 1)
             self.assertIn("adp-status-sync", result["recommended_workflows"])
             self.assertEqual(Path(result["outputs"]["json"]).parent.resolve(), (memory_root / "audits").resolve())
             self.assertTrue(audit["input_audit_id"].startswith("input-audit-"))
@@ -1140,13 +1180,14 @@ class AdpStateAuditTests(unittest.TestCase):
                 ]
                 self.assertEqual(packet_gaps, [])
 
-    def test_applied_intake_and_reports_are_not_unconsumed(self) -> None:
+    def test_only_content_bound_receipts_consume_executable_intake(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             memory_root = self.scaffold(project_root)
             intake_root = memory_root / "intake" / "status-sync"
             (intake_root / "pending-actions.json").unlink()
-            (intake_root / "applied-actions.json").write_text(
+            applied_without_receipt = intake_root / "applied-actions.json"
+            applied_without_receipt.write_text(
                 json.dumps({"status": "applied", "updates": [{"id": "l1-checkout", "progress": "Done"}]}) + "\n",
                 encoding="utf-8",
             )
@@ -1174,51 +1215,105 @@ class AdpStateAuditTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            (intake_root / "receipt-actions-receipt.json").write_text(
+            receipt_root = memory_root / "receipts" / "status-sync"
+            receipt_root.mkdir(parents=True)
+            (receipt_root / "ssr-valid.json").write_text(
                 json.dumps(
                     {
-                        "status": "applied",
-                        "applied_at": "2026-07-10T10:00:00+08:00",
-                        "input_hash": f"sha256:{hashlib.sha256(receipt_intake.read_bytes()).hexdigest()}",
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            review_intake = intake_root / "2026-07-07-2026-07-07-review-actions.json"
-            review_intake.write_text(
-                json.dumps({"updates": [{"id": "l1-checkout", "progress": "Reviewed"}]}) + "\n",
-                encoding="utf-8",
-            )
-            (intake_root / "2026-07-07-review-actions-report.json").write_text(
-                json.dumps(
-                    {
+                        "receipt_schema_version": 1,
+                        "receipt_type": "execution",
+                        "execution_id": "ssr-valid",
                         "ok": True,
-                        "mode": "update",
+                        "status": "applied",
+                        "durable": True,
                         "dry_run": False,
-                        "updates": [{"ok": True}],
-                        "input_hash": f"sha256:{hashlib.sha256(review_intake.read_bytes()).hexdigest()}",
+                        "input_path": str(receipt_intake.resolve()),
+                        "input_hash": f"sha256:{hashlib.sha256(receipt_intake.read_bytes()).hexdigest()}",
+                        "applied_at": "2026-07-10T10:00:00+08:00",
+                        "mode": "update",
+                        "update_count": 1,
                     }
                 )
                 + "\n",
                 encoding="utf-8",
             )
-            (intake_root / "migration-dry-run-report.json").write_text(
-                json.dumps({"ok": True, "mode": "update", "dry_run": True, "updates": []}) + "\n",
-                encoding="utf-8",
-            )
+            non_executable = {
+                "preview-actions.json": {"kind": "preview", "updates": [{"id": "l1-checkout"}]},
+                "proposal-actions.json": {"status": "proposal", "updates": [{"id": "l1-checkout"}]},
+                "candidate-actions.json": {"artifact_type": "candidate", "updates": [{"id": "l1-checkout"}]},
+                "control-actions.json": {"_control": {"execute_allowed": False}, "updates": [{"id": "l1-checkout"}]},
+                "control-dry-run.json": {"_control": {"mode": "dry-run"}, "updates": [{"id": "l1-checkout"}]},
+                "dry-run-actions.json": {"dry_run": True, "updates": [{"id": "l1-checkout"}]},
+            }
+            for name, payload in non_executable.items():
+                (intake_root / name).write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            for name in ["release-plan.json", "weekly-report.json"]:
+                (intake_root / name).write_text(
+                    json.dumps({"updates": [{"id": "l1-checkout", "progress": name}]}) + "\n",
+                    encoding="utf-8",
+                )
 
             completed = self.run_script(project_root, "--as-of", "2026-07-10")
             result = json.loads(completed.stdout)
             audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
 
-            self.assertEqual(audit["findings"]["closure"]["unconsumed_intake_files"], [])
+            unconsumed = {
+                item["path"] for item in audit["findings"]["closure"]["unconsumed_intake_files"]
+            }
+            self.assertEqual(
+                unconsumed,
+                {
+                    "intake/status-sync/applied-actions.json",
+                    "intake/status-sync/legacy-actions.json",
+                    "intake/status-sync/release-plan.json",
+                    "intake/status-sync/weekly-report.json",
+                },
+            )
+
+    def test_status_sync_receipt_is_consumed_until_input_bytes_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            intake_root = memory_root / "intake/status-sync"
+            (intake_root / "pending-actions.json").unlink()
+            intake = intake_root / "live-actions.json"
+            payload = {"updates": [{"id": "l1-checkout", "progress": "Receipt integration applied"}]}
+            intake.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+            sync = subprocess.run(
+                [
+                    sys.executable,
+                    str(STATUS_SYNC_SCRIPT),
+                    "update",
+                    str(project_root),
+                    "--updates-file",
+                    str(intake),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            sync_result = json.loads(sync.stdout)
+            self.assertTrue(Path(sync_result["receipt_path"]).exists())
+
+            first = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
+            first_audit = json.loads(Path(first["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(first_audit["findings"]["closure"]["unconsumed_intake_files"], [])
+
+            intake.write_text(json.dumps({**payload, "tampered": True}, indent=2) + "\n", encoding="utf-8")
+            second = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
+            second_audit = json.loads(Path(second["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["path"] for item in second_audit["findings"]["closure"]["unconsumed_intake_files"]],
+                ["intake/status-sync/live-actions.json"],
+            )
 
     def test_malformed_status_sync_intake_is_a_blocking_finding(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             memory_root = self.scaffold(project_root)
-            malformed = memory_root / "intake/status-sync/malformed-actions.json"
+            malformed = memory_root / "intake/status-sync/malformed-report.json"
             malformed.write_text("{not-json", encoding="utf-8")
 
             completed = self.run_script(project_root, "--as-of", "2026-07-10")
@@ -1229,7 +1324,7 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertEqual(result["audit_status"], "blocked")
             self.assertTrue(
                 any(
-                    item["path"] == "intake/status-sync/malformed-actions.json"
+                    item["path"] == "intake/status-sync/malformed-report.json"
                     and "malformed" in item["reason"]
                     for item in unconsumed
                 )
@@ -1241,13 +1336,31 @@ class AdpStateAuditTests(unittest.TestCase):
             payload = {"status": "pending", "updates": [{"id": "l1-checkout"}]}
             intake.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
-            self.assertFalse(
-                SUCCESSFUL_RECEIPT_PAYLOAD(
-                    {"ok": True, "status": "applied", "applied_at": "2026-07-10T10:00:00Z"},
-                    intake,
-                    payload,
-                )
-            )
+            valid = {
+                "receipt_schema_version": 1,
+                "receipt_type": "execution",
+                "execution_id": "ssr-test",
+                "ok": True,
+                "status": "applied",
+                "durable": True,
+                "dry_run": False,
+                "input_path": str(intake.resolve()),
+                "input_hash": f"sha256:{hashlib.sha256(intake.read_bytes()).hexdigest()}",
+                "applied_at": "2026-07-10T10:00:00Z",
+                "mode": "update",
+                "update_count": 1,
+            }
+            self.assertTrue(SUCCESSFUL_RECEIPT_PAYLOAD(valid, intake, payload))
+
+            wrong_path = dict(valid, input_path=str(intake.with_name("same-name-elsewhere.json")))
+            self.assertFalse(SUCCESSFUL_RECEIPT_PAYLOAD(wrong_path, intake, payload))
+
+            missing_hash = dict(valid)
+            missing_hash.pop("input_hash")
+            self.assertFalse(SUCCESSFUL_RECEIPT_PAYLOAD(missing_hash, intake, payload))
+
+            intake.write_text(json.dumps({**payload, "tampered": True}) + "\n", encoding="utf-8")
+            self.assertFalse(SUCCESSFUL_RECEIPT_PAYLOAD(valid, intake, {**payload, "tampered": True}))
 
     def test_pending_canonical_intake_is_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1728,24 +1841,19 @@ class AdpStateAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             memory_root = self.scaffold(project_root)
-            memlog = project_root / "trail" / ".memlog.md"
 
             completed = self.run_script(
                 project_root,
                 "--run-folder-pattern",
                 "..",
                 "--headless",
-                "--memlog",
-                str(memlog),
                 check=False,
             )
             result = json.loads(completed.stdout)
-            trail = memlog.read_text(encoding="utf-8")
 
             self.assertEqual(completed.returncode, 2)
-            self.assert_failure_contract(result, headless=True)
+            self.assert_failure_contract(result)
             self.assertIn("run_folder_pattern must resolve inside", result["error"])
-            self.assertIn("run_folder_pattern must resolve inside", trail)
             self.assertFalse((memory_root / "audits").exists())
 
     def test_legacy_prose_only_prepass_blocks_without_artifact_paths(self) -> None:
@@ -1866,39 +1974,33 @@ class AdpStateAuditTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            memlog = project_root / "trail" / ".memlog.md"
             completed = self.run_script(
                 project_root,
                 "--prepass-json",
                 str(prepass_path),
                 "--headless",
-                "--memlog",
-                str(memlog),
                 check=False,
             )
             result = json.loads(completed.stdout)
 
             self.assertEqual(completed.returncode, 1)
-            self.assert_failure_contract(result, headless=True)
+            self.assert_failure_contract(result)
             self.assertIn("adp-project-kickoff", result["recommended_workflows"])
 
     def test_prepass_failure_has_complete_blocked_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            memlog = project_root / "trail" / ".memlog.md"
             completed = self.run_script(
                 project_root,
                 "--prepass-script",
                 str(project_root / "missing-prepass.py"),
                 "--headless",
-                "--memlog",
-                str(memlog),
                 check=False,
             )
             result = json.loads(completed.stdout)
 
             self.assertEqual(completed.returncode, 1)
-            self.assert_failure_contract(result, headless=True)
+            self.assert_failure_contract(result)
             self.assertIn("prepass script not found", result["error"])
 
     def test_contradictory_prepass_process_results_are_blocked(self) -> None:
@@ -1936,20 +2038,17 @@ class AdpStateAuditTests(unittest.TestCase):
             malformed.write_text("{not-json", encoding="utf-8")
             for prepass_path in [project_root / "missing.json", malformed]:
                 with self.subTest(prepass_path=prepass_path):
-                    memlog = project_root / f"{prepass_path.stem}-trail" / ".memlog.md"
                     completed = self.run_script(
                         project_root,
                         "--prepass-json",
                         str(prepass_path),
                         "--headless",
-                        "--memlog",
-                        str(memlog),
                         check=False,
                     )
                     result = json.loads(completed.stdout)
 
                     self.assertEqual(completed.returncode, 2)
-                    self.assert_failure_contract(result, headless=True)
+                    self.assert_failure_contract(result)
                     self.assertIn("adp-agent-program-lead", result["recommended_workflows"])
 
     def test_invalid_project_root_and_date_have_complete_headless_contracts(self) -> None:
@@ -1962,19 +2061,16 @@ class AdpStateAuditTests(unittest.TestCase):
             ]
             for project_root, extra_args, label in cases:
                 with self.subTest(label=label):
-                    memlog = root / label / ".memlog.md"
                     completed = self.run_script(
                         project_root,
                         *extra_args,
                         "--headless",
-                        "--memlog",
-                        str(memlog),
                         check=False,
                     )
                     result = json.loads(completed.stdout)
 
                     self.assertEqual(completed.returncode, 2)
-                    self.assert_failure_contract(result, headless=True)
+                    self.assert_failure_contract(result)
 
     def test_unwritable_output_target_has_complete_error_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1982,21 +2078,18 @@ class AdpStateAuditTests(unittest.TestCase):
             self.scaffold(project_root)
             output_file = project_root / "not-a-directory"
             output_file.write_text("occupied", encoding="utf-8")
-            memlog = project_root / "trail" / ".memlog.md"
 
             completed = self.run_script(
                 project_root,
                 "--output-dir",
                 str(output_file),
                 "--headless",
-                "--memlog",
-                str(memlog),
                 check=False,
             )
             result = json.loads(completed.stdout)
 
             self.assertEqual(completed.returncode, 2)
-            self.assert_failure_contract(result, headless=True)
+            self.assert_failure_contract(result)
             self.assertIn("cannot write audit outputs", result["error"])
 
     def test_argument_errors_use_the_stable_json_envelope(self) -> None:
@@ -2024,10 +2117,9 @@ class AdpStateAuditTests(unittest.TestCase):
                         scenario="invalid" if "invalid" in command else "global",
                     )
 
-    def test_headless_argument_error_returns_a_readable_memlog(self) -> None:
+    def test_headless_argument_error_returns_json_without_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            memlog = project_root / "trail" / ".memlog.md"
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -2035,8 +2127,6 @@ class AdpStateAuditTests(unittest.TestCase):
                     "--headless",
                     "--max-age-days",
                     "many",
-                    "--memlog",
-                    str(memlog),
                 ],
                 cwd=project_root,
                 check=False,
@@ -2045,77 +2135,49 @@ class AdpStateAuditTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = json.loads(completed.stdout)
-            trail = Path(result["memlog"]).read_text(encoding="utf-8")
 
             self.assertEqual(completed.returncode, 2)
-            self.assert_failure_contract(result, headless=True)
-            self.assertIn("(event) invalid arguments:", trail)
+            self.assert_failure_contract(result)
+            self.assertEqual(list(project_root.rglob(".memlog.md")), [])
 
-    def test_memlog_initialization_failures_return_existing_trails(self) -> None:
+    def test_removed_memlog_option_is_rejected_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            occupied = project_root / "not-a-directory"
-            occupied.write_text("occupied", encoding="utf-8")
-            invalid_memlog = occupied / ".memlog.md"
-
-            invalid_destination = self.run_script(
-                project_root,
-                "--headless",
-                "--memlog",
-                str(invalid_memlog),
-                check=False,
-            )
-            invalid_result = json.loads(invalid_destination.stdout)
-
-            self.assert_failure_contract(invalid_result, headless=True)
-            self.assertNotEqual(Path(invalid_result["memlog"]), invalid_memlog)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir)
-            helper = project_root / "_bmad" / "scripts" / "memlog.py"
-            helper.parent.mkdir(parents=True)
-            helper.write_text("raise SystemExit(2)\n", encoding="utf-8")
             memlog = project_root / "trail" / ".memlog.md"
-
-            helper_failure = self.run_script(
-                project_root,
-                "--headless",
-                "--memlog",
-                str(memlog),
-                check=False,
-            )
-            helper_result = json.loads(helper_failure.stdout)
-            trail = Path(helper_result["memlog"]).read_text(encoding="utf-8")
-
-            self.assert_failure_contract(helper_result, headless=True)
-            self.assertEqual(Path(helper_result["memlog"]).resolve(), memlog.resolve())
-            self.assertIn("Memlog helper initialization failed", trail)
-
-    def test_headless_success_returns_audit_trail_with_effective_parameters(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir)
-            self.scaffold(project_root)
-            memlog = project_root / "trail" / ".memlog.md"
-
             completed = self.run_script(
                 project_root,
                 "--headless",
                 "--memlog",
                 str(memlog),
+                check=False,
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assert_failure_contract(result)
+            self.assertIn("unrecognized arguments: --memlog", result["error"])
+            self.assertFalse(memlog.exists())
+
+    def test_headless_success_returns_canonical_execution_evidence_without_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.scaffold(project_root)
+
+            completed = self.run_script(
+                project_root,
+                "--headless",
                 "--execution-mode",
                 "python-fallback",
             )
             result = json.loads(completed.stdout)
-            trail = memlog.read_text(encoding="utf-8")
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
 
             self.assertTrue(result["ok"])
-            self.assertEqual(Path(result["memlog"]).resolve(), memlog.resolve())
-            self.assertIn("(assumption) Resolved headless scope and effective audit parameters", trail)
-            self.assertIn("(decision) Resolved headless execution and output routing", trail)
-            self.assertIn('"execution_mode": "python-fallback"', trail)
-            self.assertIn('"fallback_reason": "uv executable unavailable"', trail)
-            self.assertIn('"python_version":', trail)
-            self.assertIn('"executable":', trail)
+            self.assertNotIn("execution", audit)
+            self.assertEqual("python-fallback", result["execution"]["execution_mode"])
+            self.assertEqual("uv executable unavailable", result["execution"]["fallback_reason"])
+            self.assertEqual("global", result["execution"]["scope"]["scenario"])
+            self.assertEqual(list(project_root.rglob(".memlog.md")), [])
 
 
 if __name__ == "__main__":

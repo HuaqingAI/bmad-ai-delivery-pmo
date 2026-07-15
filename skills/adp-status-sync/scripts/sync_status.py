@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -39,6 +41,9 @@ ACTION_STATUSES = {"open", "in-progress", "blocked", "done", "cancelled"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 PROJECT_ACTION_IDS = {"program", "project", "adp-program"}
 MILESTONE_STATUSES = {"planned", "in-progress", "at-risk", "done", "blocked"}
+RECEIPT_SCHEMA_VERSION = 1
+STATUS_SYNC_RECEIPT_REL = Path("receipts") / "status-sync"
+DEFAULT_CONFIG_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/adp_effective_config.py"
 ROADMAP_FIELDS = [
     "Milestone ID",
     "Milestone",
@@ -121,6 +126,7 @@ class StatusUpdate:
     next_actions: list[str] = field(default_factory=list)
     actions: list[ActionUpdate] = field(default_factory=list)
     milestones: list[MilestoneUpdate] = field(default_factory=list)
+    reported_gaps: list[str] = field(default_factory=list)
     source: str = "status sync"
 
     def has_reliable_delta(self) -> bool:
@@ -143,6 +149,17 @@ class StatusUpdate:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    context = subparsers.add_parser("context", help="Resolve language, config source, and ADP memory state.")
+    context.add_argument("project_root", help="Target project root containing BMad configuration.")
+    context.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    context.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
+    context.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    context.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
 
     update = subparsers.add_parser("update", help="Apply one or more lightweight status updates.")
     update.add_argument("project_root", help="Project root containing ADP memory.")
@@ -171,6 +188,23 @@ def parse_args() -> argparse.Namespace:
     update.add_argument("--dry-run", action="store_true", help="Report planned writes without changing files.")
     update.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     update.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+
+    migrate = subparsers.add_parser(
+        "migrate-receipt",
+        help="Create one explicit compatibility receipt from historical successful execution evidence.",
+    )
+    migrate.add_argument("project_root", help="Project root containing ADP memory.")
+    migrate.add_argument("--updates-file", required=True, help="Exact historical updates file to attest.")
+    migrate.add_argument("--evidence-file", required=True, help="Historical non-dry-run status-sync result JSON.")
+    migrate.add_argument("--applied-at", required=True, help="Attested application time as timezone-aware ISO-8601.")
+    migrate.add_argument("--attested-by", required=True, help="Person or authority attesting the evidence-to-input link.")
+    migrate.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    migrate.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    migrate.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
 
     stale = subparsers.add_parser("stale", help="List workstream records whose status sync is stale or missing.")
     stale.add_argument("project_root", help="Project root containing ADP memory.")
@@ -207,6 +241,37 @@ def require_project_root(raw: str) -> Path:
     if not project_root.exists() or not project_root.is_dir():
         raise ValueError("project_root is not an existing directory")
     return project_root
+
+
+def require_file(raw: str, label: str) -> Path:
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"{label} is not an existing file: {path}")
+    return path
+
+
+def load_python_module(path: Path, name: str) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load required script: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def sha256_bytes(content: bytes) -> str:
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def normalize_required_timestamp(raw: str, label: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a timezone-aware ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
@@ -288,6 +353,7 @@ def update_from_mapping(item: dict[str, Any], default_source: str, default_revis
             item,
             default_revision=parse_optional_revision(item.get("baseline_revision"), "baseline_revision") or default_revision,
         ),
+        reported_gaps=clean_list(item.get("unresolved_gaps", item.get("gaps", []))),
         source=str(item.get("source") or default_source),
     )
 
@@ -400,6 +466,8 @@ def actions_from_mapping(
             raise ValueError("each action update must be a JSON object")
         action_id = clean_optional(raw_action.get("action_id") or raw_action.get("id"))
         status = normalize_action_status(raw_action.get("status"))
+        if status in {"done", "cancelled"} and not action_id:
+            raise ValueError(f"{status} action update requires action_id")
         action_text = clean_optional(raw_action.get("action") or raw_action.get("text") or raw_action.get("next_action")) or ""
         if not action_text and not action_id:
             raise ValueError("action update is missing action/text or action_id")
@@ -644,6 +712,8 @@ def upsert_actions(
     gaps: list[str] = []
 
     for action_update in action_updates:
+        if not action_update.action_id and find_registered_action(rows, action_update) is not None:
+            continue
         match = find_action_row(rows, action_update)
         if match is None:
             if action_update.status in {"done", "cancelled"}:
@@ -679,34 +749,24 @@ def upsert_actions(
 
 
 def find_action_row(rows: list[dict[str, str]], action_update: ActionUpdate) -> dict[str, str] | None:
-    if action_update.action_id:
-        for row in rows:
-            if row.get("Action ID") == action_update.action_id:
-                return row
-    strong_key = action_key(action_update.owner, action_update.workstream, action_update.action, action_update.source)
-    if action_update.action and action_update.source:
-        for row in rows:
-            if action_key(row.get("Owner", ""), row.get("Workstream", ""), row.get("Action", ""), row.get("Source", "")) == strong_key:
-                return row
-        for row in rows:
-            if row.get("Status", "").lower() not in ACTIVE_ACTION_STATUSES:
-                continue
-            if normalize_text_key(row.get("Action", "")) != normalize_text_key(action_update.action):
-                continue
-            if normalize_text_key(row.get("Source", "")) != normalize_text_key(action_update.source):
-                continue
-            if normalize_text_key(row.get("Owner", "")) != normalize_text_key(action_update.owner):
-                continue
-            if normalize_text_key(row.get("Due / Trigger", "")) != normalize_text_key(action_update.due_or_trigger):
-                continue
+    if not action_update.action_id:
+        return None
+    for row in rows:
+        if row.get("Action ID") == action_update.action_id:
             return row
-    weak_key = action_key(action_update.owner, action_update.workstream, action_update.action, "")
-    if action_update.action:
-        for row in rows:
-            if row.get("Status", "").lower() not in ACTIVE_ACTION_STATUSES:
-                continue
-            if action_key(row.get("Owner", ""), row.get("Workstream", ""), row.get("Action", ""), "") == weak_key:
-                return row
+    return None
+
+
+def find_registered_action(rows: list[dict[str, str]], action_update: ActionUpdate) -> dict[str, str] | None:
+    if not action_update.action or not action_update.source:
+        return None
+    registration_key = action_key(action_update.owner, action_update.workstream, action_update.action, action_update.source)
+    for row in rows:
+        row_key = action_key(
+            row.get("Owner", ""), row.get("Workstream", ""), row.get("Action", ""), row.get("Source", "")
+        )
+        if row_key == registration_key:
+            return row
     return None
 
 
@@ -888,14 +948,14 @@ def action_gaps(row: dict[str, str]) -> list[str]:
         return []
     action_id = row.get("Action ID", "(missing id)")
     gaps: list[str] = []
-    if is_generic_owner(row.get("Owner", "")):
-        gaps.append(f"{action_id}: Owner is missing or generic")
+    if is_missing_action_value(row.get("Owner", "")):
+        gaps.append(f"{action_id}: Owner is missing")
     if is_missing_workstream(row.get("Workstream", "")) and not parse_workstream_cell(row.get("Affected Workstreams", "")):
         gaps.append(f"{action_id}: Workstream is missing")
     if is_missing_action_value(row.get("Due / Trigger", "")):
         gaps.append(f"{action_id}: Due / Trigger is missing")
-    if is_generic_closure_criteria(row.get("Closure Criteria", "")):
-        gaps.append(f"{action_id}: Closure Criteria is missing or not verifiable")
+    if is_missing_action_value(row.get("Closure Criteria", "")):
+        gaps.append(f"{action_id}: Closure Criteria is missing")
     return gaps
 
 
@@ -907,43 +967,6 @@ def is_missing_action_value(value: str) -> bool:
 def is_missing_workstream(value: str) -> bool:
     text = str(value or "").strip()
     return not text or text.upper() == "TBD"
-
-
-def is_generic_owner(value: str) -> bool:
-    text = normalize_text_key(value)
-    if not text or text in {"tbd", "owner", "participants", "meeting participants", "all participants"}:
-        return True
-    generic_phrases = [
-        "each workstream",
-        "fde owner",
-        "workstream fde owner",
-        "all fdes",
-        "attendees",
-        "各条线",
-        "各线",
-        "参会人员",
-        "负责人",
-        "待定",
-    ]
-    return any(phrase in text for phrase in generic_phrases)
-
-
-def is_generic_closure_criteria(value: str) -> bool:
-    text = normalize_text_key(value)
-    if not text or text == "tbd":
-        return True
-    generic_phrases = [
-        "update completion status",
-        "updates completion status",
-        "wdr daily log or status sync",
-        "wdr daily log status sync",
-        "status sync update",
-        "更新完成状态",
-        "后续 status sync",
-        "对应 wdr",
-        "daily log",
-    ]
-    return any(phrase in text for phrase in generic_phrases)
 
 
 def split_next_actions(value: str) -> list[str]:
@@ -978,14 +1001,10 @@ def active_action_summaries(rows: list[dict[str, str]], workstream_id: str) -> l
         action = row.get("Action", "").strip()
         if not action:
             continue
-        owner = row.get("Owner", "").strip()
-        due = row.get("Due / Trigger", "").strip()
-        summary = action
-        if owner and owner.upper() != "TBD" and normalize_text_key(owner) not in normalize_text_key(summary):
-            summary = f"{owner}: {summary}"
-        if due and due.upper() != "TBD" and normalize_text_key(due) not in normalize_text_key(summary):
-            summary = f"{summary} (due: {due})"
-        summaries.append(summary)
+        owner = row.get("Owner", "").strip() or "TBD"
+        due = row.get("Due / Trigger", "").strip() or "TBD"
+        action_id = row.get("Action ID", "").strip() or "TBD"
+        summaries.append(f"[action_id:{action_id}] {owner}: {action} (due: {due})")
     return summaries
 
 
@@ -996,26 +1015,37 @@ def safe_normalize_id(value: str) -> str:
         return ""
 
 
-def remove_closed_action_summaries(existing_actions: list[str], action_updates: list[ActionUpdate]) -> list[str]:
-    closed_actions = [
-        action.action
+def remove_closed_action_summaries(
+    existing_actions: list[str], action_updates: list[ActionUpdate]
+) -> tuple[list[str], list[str]]:
+    closed_ids = {
+        action.action_id
         for action in action_updates
-        if action.status in {"done", "cancelled"} and action.action
-    ]
-    if not closed_actions:
-        return existing_actions
+        if action.status in {"done", "cancelled"} and action.action_id
+    }
+    if not closed_ids:
+        return existing_actions, []
     kept: list[str] = []
+    preserved_legacy = False
     for summary in existing_actions:
-        if any(action_summary_matches(action, summary) for action in closed_actions):
+        summary_id = action_summary_id(summary)
+        if summary_id in closed_ids:
             continue
+        if summary_id is None:
+            preserved_legacy = True
         kept.append(summary)
-    return kept
+    gaps = []
+    if preserved_legacy:
+        gaps.append(
+            "legacy Next actions entries without action_id were preserved while closing "
+            + ", ".join(sorted(closed_ids))
+        )
+    return kept, gaps
 
 
-def action_summary_matches(action: str, summary: str) -> bool:
-    action_key = normalize_text_key(action)
-    summary_key = normalize_text_key(summary)
-    return bool(action_key and (action_key in summary_key or summary_key in action_key))
+def action_summary_id(summary: str) -> str | None:
+    match = re.match(r"^\[action_id:([^\]]+)\]\s+", summary.strip())
+    return match.group(1).strip() if match else None
 
 
 def existing_field_value(markdown: str, section_title: str, label: str) -> str:
@@ -1273,9 +1303,10 @@ def apply_update(
 
     values = update_values(update, timestamp)
     active_summaries = active_action_summaries(ledger_actions, update.workstream_id)
+    summary_gaps: list[str] = []
     if update.next_actions or active_summaries or update.actions:
         existing_actions = split_next_actions(existing_field_value(original, "Project Status", "Next actions"))
-        existing_actions = remove_closed_action_summaries(existing_actions, update.actions)
+        existing_actions, summary_gaps = remove_closed_action_summaries(existing_actions, update.actions)
         merged_actions = merge_unique(existing_actions, [*update.next_actions, *active_summaries])
         values["next_actions"] = "; ".join(merged_actions) if merged_actions else "fill missing state"
     if values and "last_status_sync" not in values:
@@ -1314,7 +1345,7 @@ def apply_update(
         "actions_registered": [],
         "actions_updated": [],
         "actions_closed": [],
-        "unresolved_gaps": unresolved_gaps(update),
+        "unresolved_gaps": sorted(set([*unresolved_gaps(update), *summary_gaps])),
     }
 
 
@@ -1466,7 +1497,7 @@ def compact_values(values: list[str]) -> list[str]:
 
 
 def unresolved_gaps(update: StatusUpdate) -> list[str]:
-    gaps: list[str] = []
+    gaps = list(update.reported_gaps)
     if not any([update.status, update.progress, update.blockers, update.risks, update.dependencies, update.next_actions, update.actions, update.milestones]):
         gaps.append("status note contained no reliable volatile field update")
     if update.blockers and not update.next_actions:
@@ -1615,9 +1646,120 @@ def remap_staged_paths(value: Any, staged_root: Path, memory_root: Path) -> Any:
     return value
 
 
+def status_sync_receipt(
+    *,
+    receipt_type: str,
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+    applied_at: str | None,
+    dry_run: bool,
+    migration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    receipt = {
+        "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
+        "receipt_type": receipt_type,
+        "execution_id": f"ssr-{uuid.uuid4().hex}",
+        "ok": True,
+        "status": "preview" if dry_run else "applied",
+        "durable": not dry_run,
+        "dry_run": dry_run,
+        "input_path": str(input_path),
+        "input_hash": input_hash,
+        "applied_at": applied_at,
+        "mode": "update",
+        "update_count": update_count,
+    }
+    if migration is not None:
+        receipt["migration"] = migration
+    return receipt
+
+
+def receipt_relative_path(receipt: dict[str, Any]) -> Path:
+    return STATUS_SYNC_RECEIPT_REL / f"{receipt['execution_id']}.json"
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    content = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    temp_path = write_temp_bytes(path, content)
+    try:
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def historical_evidence(payload: Any, evidence_path: Path, input_path: Path, input_hash: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("evidence-file root must be a JSON object")
+    if payload.get("dry_run") is True:
+        raise ValueError("dry-run evidence cannot create a durable migration receipt")
+    status = str(payload.get("status") or payload.get("lifecycle_status") or "").strip().lower()
+    if payload.get("ok") is not True and status != "applied" and not payload.get("applied_at"):
+        raise ValueError("evidence-file does not record a successful status-sync execution")
+    if str(payload.get("mode") or "update").strip().lower() != "update":
+        raise ValueError("evidence-file mode must be update")
+    updates = payload.get("updates")
+    if not isinstance(updates, list) or not updates:
+        raise ValueError("evidence-file must contain non-empty execution updates")
+    evidence_input_hash = str(payload.get("input_hash") or "").strip().lower()
+    if evidence_input_hash and evidence_input_hash.removeprefix("sha256:") != input_hash.removeprefix("sha256:"):
+        raise ValueError("evidence-file input_hash does not match updates-file raw bytes")
+    evidence_input_path = payload.get("input_path") or payload.get("updates_file")
+    if isinstance(evidence_input_path, str) and evidence_input_path.strip():
+        if Path(evidence_input_path).expanduser().resolve() != input_path:
+            raise ValueError("evidence-file input_path does not match the exact updates-file path")
+    if evidence_path == input_path:
+        raise ValueError("evidence-file must be distinct from updates-file")
+    return {
+        "evidence_path": str(evidence_path),
+        "evidence_hash": sha256_bytes(evidence_path.read_bytes()),
+        "evidence_mode": "update",
+    }
+
+
+def run_context(args: argparse.Namespace) -> int:
+    project_root = require_project_root(args.project_root)
+    config_script = require_file(args.config_script, "config-script")
+    config_module = load_python_module(config_script, "adp_status_sync_effective_config")
+    code, config = config_module.resolve_effective_config(project_root)
+    if code != 0 or not config.get("ok"):
+        raise ValueError(str(config.get("error") or "ADP effective config could not be resolved"))
+
+    sources = config.get("sources_checked", [])
+    config_path = next((str(item.get("path")) for item in sources if item.get("exists")), None)
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    communication_locale = str(config.get("communication_locale") or "en")
+    document_locale = str(config.get("document_locale") or "en")
+    diagnostics = [str(item) for item in config.get("warnings", [])]
+    payload = {
+        "ok": True,
+        "mode": "context",
+        "project_root": str(project_root),
+        "config_path": config_path,
+        "communication_language": "Chinese" if communication_locale == "zh" else "English",
+        "document_output_language": "Chinese" if document_locale == "zh" else "English",
+        "language_sources": {
+            "communication_language": config.get("value_sources", {}).get("communication_language"),
+            "document_output_language": config.get("value_sources", {}).get("document_output_language"),
+        },
+        "memory_root": str(memory_root),
+        "memory_root_exists": memory_root.is_dir(),
+        "diagnostics": diagnostics,
+    }
+    if args.verbose:
+        for diagnostic in diagnostics:
+            print(diagnostic, file=sys.stderr)
+    emit(payload, args.output)
+    return 0
+
+
 def run_update(args: argparse.Namespace) -> int:
     project_root = require_project_root(args.project_root)
     memory_root = resolve_memory_root(project_root, args.memory_root)
+    input_path = require_file(args.updates_file, "updates-file") if args.updates_file else None
+    input_hash = sha256_bytes(input_path.read_bytes()) if input_path else None
+    if input_path:
+        args.updates_file = str(input_path)
     updates = updates_from_args(args)
     baseline_context = validate_milestone_updates(memory_root, updates)
     validate_update_targets(memory_root, updates)
@@ -1674,6 +1816,26 @@ def run_update(args: argparse.Namespace) -> int:
         errors = [item for item in results if not item.get("ok")]
         if errors:
             raise ValueError("; ".join(str(item.get("error") or "status update failed") for item in errors))
+        receipt = None
+        receipt_rel = None
+        if input_path and input_hash:
+            receipt = status_sync_receipt(
+                receipt_type="execution",
+                input_path=input_path,
+                input_hash=input_hash,
+                update_count=len(updates),
+                applied_at=None if args.dry_run else timestamp,
+                dry_run=args.dry_run,
+            )
+            if not args.dry_run:
+                receipt_rel = receipt_relative_path(receipt)
+                receipt_path = staged_root / receipt_rel
+                receipt_path.parent.mkdir(parents=True, exist_ok=True)
+                receipt_path.write_text(
+                    json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
         changed = changed_staged_files(memory_root, staged_root)
         if not args.dry_run:
             publish_staged_files(memory_root, staged_root, changed)
@@ -1695,8 +1857,59 @@ def run_update(args: argparse.Namespace) -> int:
         "actions_closed": ledger_result["actions_closed"],
         "unresolved_gaps": ledger_result["unresolved_gaps"],
         "updates": results,
+        "receipt": receipt,
+        "receipt_path": str(memory_root / receipt_rel) if receipt_rel else None,
     }
     emit(payload, args.output)
+    return 0
+
+
+def run_migrate_receipt(args: argparse.Namespace) -> int:
+    project_root = require_project_root(args.project_root)
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    input_path = require_file(args.updates_file, "updates-file")
+    evidence_path = require_file(args.evidence_file, "evidence-file")
+    input_bytes = input_path.read_bytes()
+    input_hash = sha256_bytes(input_bytes)
+    try:
+        input_payload = json.loads(input_bytes.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"updates-file must contain valid JSON: {exc}") from exc
+    if not isinstance(input_payload, dict) or not isinstance(input_payload.get("updates"), list) or not input_payload["updates"]:
+        raise ValueError("updates-file must contain a non-empty 'updates' list")
+    try:
+        evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"evidence-file must contain valid JSON: {exc}") from exc
+    migration = historical_evidence(evidence_payload, evidence_path, input_path, input_hash)
+    migration["attested_by"] = " ".join(args.attested_by.split())
+    if not migration["attested_by"]:
+        raise ValueError("attested-by must not be empty")
+    applied_at = normalize_required_timestamp(args.applied_at, "applied-at")
+    receipt = status_sync_receipt(
+        receipt_type="migration",
+        input_path=input_path,
+        input_hash=input_hash,
+        update_count=len(input_payload["updates"]),
+        applied_at=applied_at,
+        dry_run=False,
+        migration=migration,
+    )
+    receipt_path = memory_root / receipt_relative_path(receipt)
+    write_json_atomic(receipt_path, receipt)
+    if args.verbose:
+        print(f"Wrote migration receipt: {receipt_path}", file=sys.stderr)
+    emit(
+        {
+            "ok": True,
+            "mode": "migrate-receipt",
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "receipt": receipt,
+            "receipt_path": str(receipt_path),
+        },
+        args.output,
+    )
     return 0
 
 
@@ -1764,10 +1977,14 @@ def emit(payload: dict[str, Any], output: str | None) -> None:
 def main() -> int:
     args = parse_args()
     try:
+        if args.command == "context":
+            return run_context(args)
         if args.command == "update":
             return run_update(args)
         if args.command == "stale":
             return run_stale(args)
+        if args.command == "migrate-receipt":
+            return run_migrate_receipt(args)
         raise ValueError(f"unknown command: {args.command}")
     except Exception as exc:
         payload = {"ok": False, "error": str(exc)}

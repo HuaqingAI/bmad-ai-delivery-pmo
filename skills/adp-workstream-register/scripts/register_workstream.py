@@ -85,6 +85,23 @@ def normalize_id(raw: str) -> str:
     return value
 
 
+def canonical_cross_workstream_ids(items: list[str], label: str) -> list[str]:
+    normalized: list[str] = []
+    for raw in items:
+        value = str(raw).strip()
+        if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", value) or value.lower() in {
+            "tbd",
+            "todo",
+            "none",
+            "unknown",
+        }:
+            raise ValueError(f"{label} accepts canonical workstream IDs only: {raw!r}")
+        workstream_id = value.lower()
+        if workstream_id not in normalized:
+            normalized.append(workstream_id)
+    return normalized
+
+
 def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
     memory_root = Path(raw_memory_root)
     if not memory_root.is_absolute():
@@ -120,8 +137,10 @@ def render_template(text: str, values: dict[str, str]) -> str:
     return text
 
 
-def bullet_list(items: list[str]) -> str:
-    return "\n".join(f"- {item}" for item in items) if items else "- TBD"
+def bullet_list(items: list[str], *, placeholder: bool = True) -> str:
+    if items:
+        return "\n".join(f"- {item}" for item in items)
+    return "- TBD" if placeholder else ""
 
 
 def artifact_table(artifacts: dict[str, str]) -> str:
@@ -147,8 +166,8 @@ def patch_plan_name(workstream_root: Path) -> str:
 
 def patch_plan_content(args: argparse.Namespace, workstream_id: str, artifacts: dict[str, str], gaps: list[str], now: str, message) -> str:
     artifact_rows = artifact_table(artifacts)
-    depends_on = bullet_list(args.depends_on)
-    impacts = bullet_list(args.impacts)
+    depends_on = bullet_list(args.depends_on, placeholder=False)
+    impacts = bullet_list(args.impacts, placeholder=False)
     l0_references = bullet_list(args.l0_reference)
     gaps_list = bullet_list(gaps)
     return f"""# {message('workstream.patch.title')}
@@ -245,6 +264,8 @@ def main() -> int:
 
     try:
         workstream_id = normalize_id(args.id)
+        args.depends_on = canonical_cross_workstream_ids(args.depends_on, "--depends-on")
+        args.impacts = canonical_cross_workstream_ids(args.impacts, "--impacts")
     except ValueError as exc:
         emit({"ok": False, "error": str(exc), "raw_id": args.id}, args.output)
         return 2
@@ -277,8 +298,8 @@ def main() -> int:
         "ADP_STATUS": args.status,
         "SCOPE_SUMMARY": args.scope,
         "ARTIFACT_TABLE": artifact_table(artifacts),
-        "DEPENDS_ON": bullet_list(args.depends_on),
-        "IMPACTS": bullet_list(args.impacts),
+        "DEPENDS_ON": bullet_list(args.depends_on, placeholder=False),
+        "IMPACTS": bullet_list(args.impacts, placeholder=False),
         "L0_REFERENCES": bullet_list(args.l0_reference),
         "CREATED_AT": now,
     }

@@ -83,7 +83,8 @@ class PanelAuditTests(unittest.TestCase):
             license_path.parent.mkdir(parents=True, exist_ok=True)
             resource_path.write_text(json.dumps(source_resource), encoding="utf-8")
             bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
-            license_path.write_text(source_license.read_text(encoding="utf-8"), encoding="utf-8")
+            license_bytes = source_license.read_bytes()
+            license_path.write_bytes(license_bytes)
 
             _, errors, evidence = panel_audit._resource_validation(
                 inputs["request"], resource_path, panel_root
@@ -91,9 +92,29 @@ class PanelAuditTests(unittest.TestCase):
 
             self.assertEqual([], errors)
             self.assertEqual(source_resource["engine_sha256"], evidence["elk_bundle_sha256"])
+            self.assertEqual(source_resource["license_sha256"], evidence["elk_license_sha256"])
             bundle.write_bytes(bundle.read_bytes() + b"tampered")
             _, errors, _ = panel_audit._resource_validation(inputs["request"], resource_path, panel_root)
             self.assertIn("ELK bundle checksum does not match resource metadata", errors)
+
+            bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
+            for index in [0, len(license_bytes) // 2, len(license_bytes) - 1]:
+                with self.subTest(license_byte=index):
+                    tampered = bytearray(license_bytes)
+                    tampered[index] ^= 1
+                    license_path.write_bytes(tampered)
+                    _, errors, _ = panel_audit._resource_validation(
+                        inputs["request"], resource_path, panel_root
+                    )
+                    self.assertIn("ELK license checksum does not match resource metadata", errors)
+
+            license_path.write_bytes(license_bytes)
+            resource_path.write_text(
+                json.dumps({**source_resource, "engine_license": "EPL-2.0-modified"}),
+                encoding="utf-8",
+            )
+            _, errors, _ = panel_audit._resource_validation(inputs["request"], resource_path, panel_root)
+            self.assertIn("ELK resource engine_license must be EPL-2.0", errors)
 
     def test_pre_render_failure_and_recovery_matrix(self):
         cases = []

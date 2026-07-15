@@ -170,6 +170,8 @@ class AdpSetupScriptTests(unittest.TestCase):
         self.assertIn("--scopes <json>", row_by_skill["adp-flow-graph"][args_index])
         self.assertIn("internal-full|shareable-summary", row_by_skill["adp-management-panel"][args_index])
         self.assertIn("action-flow relation", row_by_skill["adp-status-sync"][outputs_index])
+        self.assertIn("migrate-receipt", row_by_skill["adp-status-sync"][args_index])
+        self.assertIn("durable status-sync receipt", row_by_skill["adp-status-sync"][outputs_index])
         self.assertIn("risk-flow relation", row_by_skill["adp-risk-dependency-change-review"][outputs_index])
         self.assertEqual(
             row_by_skill["adp-plan-baseline"][output_index],

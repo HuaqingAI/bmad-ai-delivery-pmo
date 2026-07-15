@@ -281,6 +281,9 @@ class ManagementPanelTests(unittest.TestCase):
         self.assertEqual(resource["engine_sha256"], actual)
         self.assertEqual("utf8-lf", resource["engine_sha256_mode"])
         self.assertEqual("EPL-2.0", resource["engine_license"])
+        license_path = panel_model.SKILL_ROOT / resource["license"]
+        license_hash = "sha256:" + hashlib.sha256(license_path.read_bytes()).hexdigest()
+        self.assertEqual(resource["license_sha256"], license_hash)
 
     def test_fixed_elk_accepts_windows_crlf_checkout_and_rejects_other_changes(self):
         source_resource = management_panel.load_json(management_panel.RESOURCE_PATH)
@@ -296,7 +299,8 @@ class ManagementPanelTests(unittest.TestCase):
             license_path.parent.mkdir(parents=True, exist_ok=True)
             resource_path.write_text(json.dumps(source_resource), encoding="utf-8")
             bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
-            license_path.write_text(source_license.read_text(encoding="utf-8"), encoding="utf-8")
+            license_bytes = source_license.read_bytes()
+            license_path.write_bytes(license_bytes)
 
             resource, elk_js = management_panel.verify_layout_resource(resource_path, skill_root)
 
@@ -304,6 +308,23 @@ class ManagementPanelTests(unittest.TestCase):
             self.assertNotIn("\r\n", elk_js)
             bundle.write_bytes(bundle.read_bytes() + b"tampered")
             with self.assertRaisesRegex(management_panel.PanelError, "checksum mismatch"):
+                management_panel.verify_layout_resource(resource_path, skill_root)
+
+            bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
+            for index in [0, len(license_bytes) // 2, len(license_bytes) - 1]:
+                with self.subTest(license_byte=index):
+                    tampered = bytearray(license_bytes)
+                    tampered[index] ^= 1
+                    license_path.write_bytes(tampered)
+                    with self.assertRaisesRegex(management_panel.PanelError, "license checksum mismatch"):
+                        management_panel.verify_layout_resource(resource_path, skill_root)
+
+            license_path.write_bytes(license_bytes)
+            resource_path.write_text(
+                json.dumps({**source_resource, "engine_license": "EPL-2.0-modified"}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(management_panel.PanelError, "engine_license must be EPL-2.0"):
                 management_panel.verify_layout_resource(resource_path, skill_root)
 
     def test_blocked_inputs_write_no_artifacts(self):

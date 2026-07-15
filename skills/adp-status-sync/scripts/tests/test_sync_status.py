@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -40,6 +41,35 @@ Keep details in BMM artifacts.
 
 
 class SyncStatusTests(unittest.TestCase):
+    def test_context_resolves_config_precedence_and_memory_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            primary = project_root / "_bmad/adp/config.yaml"
+            primary.parent.mkdir(parents=True)
+            primary.write_text("communication_language: Chinese\n", encoding="utf-8")
+            fallback = project_root / "_bmad/config.yaml"
+            fallback.write_text("document_output_language: English\n", encoding="utf-8")
+            memory_root = project_root / "_bmad-output/adp/memory"
+            memory_root.mkdir(parents=True)
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "context", str(project_root)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["config_path"], str(primary.resolve()))
+            self.assertEqual(result["communication_language"], "Chinese")
+            self.assertEqual(result["document_output_language"], "English")
+            self.assertEqual(result["language_sources"]["communication_language"], str(primary.resolve()))
+            self.assertEqual(result["language_sources"]["document_output_language"], str(fallback.resolve()))
+            self.assertEqual(result["memory_root"], str(memory_root.resolve()))
+            self.assertTrue(result["memory_root_exists"])
+
     def test_action_flow_contract_tracks_lifecycle_and_explicit_relations(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -268,12 +298,134 @@ class SyncStatusTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(len(result["updates"]), 2)
+            receipt_path = Path(result["receipt_path"])
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["receipt_schema_version"], 1)
+            self.assertEqual(receipt["receipt_type"], "execution")
+            self.assertEqual(receipt["status"], "applied")
+            self.assertFalse(receipt["dry_run"])
+            self.assertTrue(receipt["durable"])
+            self.assertEqual(receipt["input_path"], str(updates_file.resolve()))
+            self.assertEqual(receipt["input_hash"], f"sha256:{hashlib.sha256(updates_file.read_bytes()).hexdigest()}")
+            self.assertEqual(receipt["mode"], "update")
+            self.assertEqual(receipt["update_count"], 2)
+            self.assertTrue(receipt["applied_at"])
             self.assertIn(
                 "- Current ADP status: blocked",
                 (project_root / "_bmad-output" / "adp" / "memory" / "workstreams" / "l2-search" / "delivery-record.md").read_text(
                     encoding="utf-8"
                 ),
             )
+
+    def test_updates_file_dry_run_returns_only_preview_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            before = record.read_bytes()
+            updates_file = project_root / "preview-updates.json"
+            updates_file.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "progress": "Preview only"}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "update",
+                    str(project_root),
+                    "--updates-file",
+                    str(updates_file),
+                    "--dry-run",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(record.read_bytes(), before)
+            self.assertIsNone(result["receipt_path"])
+            self.assertEqual(result["receipt"]["status"], "preview")
+            self.assertTrue(result["receipt"]["dry_run"])
+            self.assertFalse(result["receipt"]["durable"])
+            self.assertIsNone(result["receipt"]["applied_at"])
+            receipt_root = project_root / "_bmad-output/adp/memory/receipts/status-sync"
+            self.assertFalse(receipt_root.exists())
+
+    def test_historical_success_requires_explicit_migration_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            updates_file = project_root / "historical-updates.json"
+            updates_file.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "progress": "Historically applied"}]}) + "\n",
+                encoding="utf-8",
+            )
+            evidence_file = project_root / "historical-report.json"
+            evidence_file.write_text(
+                json.dumps({"ok": True, "mode": "update", "dry_run": False, "updates": [{"ok": True}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "migrate-receipt",
+                    str(project_root),
+                    "--updates-file",
+                    str(updates_file),
+                    "--evidence-file",
+                    str(evidence_file),
+                    "--applied-at",
+                    "2026-07-10T10:00:00+08:00",
+                    "--attested-by",
+                    "PMO-A",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+            receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(receipt["receipt_type"], "migration")
+            self.assertEqual(receipt["migration"]["attested_by"], "PMO-A")
+            self.assertEqual(receipt["migration"]["evidence_path"], str(evidence_file.resolve()))
+            self.assertEqual(
+                receipt["migration"]["evidence_hash"],
+                f"sha256:{hashlib.sha256(evidence_file.read_bytes()).hexdigest()}",
+            )
+
+            evidence_file.write_text(
+                json.dumps({"ok": True, "mode": "update", "dry_run": True, "updates": [{"ok": True}]}) + "\n",
+                encoding="utf-8",
+            )
+            rejected = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "migrate-receipt",
+                    str(project_root),
+                    "--updates-file",
+                    str(updates_file),
+                    "--evidence-file",
+                    str(evidence_file),
+                    "--applied-at",
+                    "2026-07-10T10:00:00Z",
+                    "--attested-by",
+                    "PMO-A",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("dry-run evidence", json.loads(rejected.stdout)["error"])
 
     def test_unsupported_action_status_is_rejected_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -680,6 +832,8 @@ class SyncStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
             first_result = json.loads(first.stdout)
+            ledger = project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md"
+            ledger_after_first = ledger.read_bytes()
             second = subprocess.run(
                 [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
                 check=True,
@@ -688,18 +842,212 @@ class SyncStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
             second_result = json.loads(second.stdout)
+            changed_registration = json.loads(updates_file.read_text(encoding="utf-8"))
+            changed_registration["updates"][0]["actions"][0]["status"] = "blocked"
+            updates_file.write_text(json.dumps(changed_registration), encoding="utf-8")
+            third = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            third_result = json.loads(third.stdout)
 
             self.assertTrue(first_result["ok"])
             self.assertEqual(len(first_result["actions_registered"]), 1)
             self.assertEqual(second_result["actions_registered"], [])
-            self.assertEqual(len(second_result["actions_updated"]), 1)
-            ledger = project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md"
+            self.assertEqual(second_result["actions_updated"], [])
+            self.assertEqual(third_result["actions_updated"], [])
+            self.assertEqual(ledger.read_bytes(), ledger_after_first)
             ledger_text = ledger.read_text(encoding="utf-8")
             self.assertEqual(ledger_text.count("Add checkout validation evidence"), 1)
+            self.assertIn(f"| {first_result['actions_registered'][0]} | open |", ledger_text)
             updated = record.read_text(encoding="utf-8")
             self.assertIn("FDE-A send summary", updated)
             self.assertIn("Add checkout validation evidence", updated)
             self.assertIn("due: Friday", updated)
+
+    def test_action_summary_always_renders_structured_owner_and_due(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            updates_file = project_root / "summary.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "owner": "Ann",
+                                        "action": "Planning review Friday",
+                                        "source": "meeting#summary",
+                                        "due": "Friday",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+            action_id = result["actions_registered"][0]
+
+            self.assertIn(
+                f"[action_id:{action_id}] Ann: Planning review Friday (due: Friday)",
+                record.read_text(encoding="utf-8"),
+            )
+
+    def test_mistyped_action_id_does_not_fall_back_to_matching_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            registration_file = project_root / "register.json"
+            action = {
+                "owner": "FDE-A",
+                "workstream": "l1-checkout",
+                "action": "Publish checkout evidence",
+                "source": "meeting#identity",
+                "due": "Friday",
+            }
+            registration_file.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "actions": [action]}]}),
+                encoding="utf-8",
+            )
+            registered = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(registration_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            action_id = json.loads(registered.stdout)["actions_registered"][0]
+            close_file = project_root / "close-wrong-id.json"
+            close_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [{**action, "action_id": "ACT-WRONG", "status": "done"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(close_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+            ledger = project_root / "_bmad-output/adp/memory/actions/action-ledger.md"
+            record = project_root / "_bmad-output/adp/memory/workstreams/l1-checkout/delivery-record.md"
+
+            self.assertEqual(result["actions_closed"], [])
+            self.assertIn(f"| {action_id} | open |", ledger.read_text(encoding="utf-8"))
+            self.assertNotIn("| ACT-WRONG |", ledger.read_text(encoding="utf-8"))
+            self.assertIn(f"[action_id:{action_id}]", record.read_text(encoding="utf-8"))
+            self.assertTrue(any("ACT-WRONG: close/update action was not found" in gap for gap in result["unresolved_gaps"]))
+
+    def test_terminal_action_update_requires_action_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            original = record.read_bytes()
+            updates_file = project_root / "close-without-id.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "status": "cancelled",
+                                        "action": "Publish checkout evidence",
+                                        "source": "meeting#identity",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("cancelled action update requires action_id", json.loads(completed.stdout)["error"])
+            self.assertEqual(record.read_bytes(), original)
+            self.assertFalse((project_root / "_bmad-output/adp/memory/actions/action-ledger.md").exists())
+
+    def test_action_quality_gaps_come_from_prompt_not_phrase_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            updates_file = project_root / "interpreted-actions.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "unresolved_gaps": [
+                                    "Owner is a role label; confirm an accountable person",
+                                    "Closure criteria needs a verifiable artifact",
+                                ],
+                                "actions": [
+                                    {
+                                        "owner": "FDE owner",
+                                        "action": "Publish checkout status",
+                                        "source": "meeting#1",
+                                        "due": "Friday",
+                                        "closure_criteria": "daily log",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            gaps = json.loads(completed.stdout)["updates"][0]["unresolved_gaps"]
+
+            self.assertIn("Owner is a role label; confirm an accountable person", gaps)
+            self.assertIn("Closure criteria needs a verifiable artifact", gaps)
+            self.assertNotIn("Owner is missing", "\n".join(gaps))
+            self.assertNotIn("Closure Criteria is missing", "\n".join(gaps))
 
     def test_program_action_registers_without_workstream_record_fanout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -753,10 +1101,17 @@ class SyncStatusTests(unittest.TestCase):
             self.assertIn("Affected Workstreams", ledger_text)
             self.assertIn("l1-checkout; l2-search", ledger_text)
 
-    def test_done_action_is_removed_from_wdr_summary_but_kept_in_ledger(self) -> None:
+    def test_done_action_removes_only_stable_id_summary_and_preserves_legacy_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            record = self.create_record(project_root, text=RECORD.replace("- Next actions: fill missing state", "- Next actions: FDE-A: Add checkout validation evidence (due: Friday)"))
+            record = self.create_record(
+                project_root,
+                text=RECORD.replace(
+                    "- Next actions: fill missing state",
+                    "- Next actions: [action_id:ACT-20260701-001] FDE-A: Add checkout validation evidence (due: Friday); "
+                    "FDE-B: Add checkout validation evidence for production (due: Monday)",
+                ),
+            )
             memory_root = project_root / "_bmad-output" / "adp" / "memory"
             ledger = memory_root / "actions" / "action-ledger.md"
             ledger.parent.mkdir(parents=True)
@@ -809,8 +1164,11 @@ class SyncStatusTests(unittest.TestCase):
             self.assertEqual(result["actions_closed"], ["ACT-20260701-001"])
             self.assertIn("| ACT-20260701-001 | done |", ledger.read_text(encoding="utf-8"))
             updated = record.read_text(encoding="utf-8")
-            self.assertIn("- Next actions: fill missing state", updated)
-            self.assertNotIn("FDE-A: Add checkout validation evidence (due: Friday)", updated)
+            self.assertNotIn("[action_id:ACT-20260701-001]", updated)
+            self.assertIn("FDE-B: Add checkout validation evidence for production (due: Monday)", updated)
+            self.assertTrue(
+                any("legacy Next actions entries without action_id were preserved" in gap for gap in result["updates"][0]["unresolved_gaps"])
+            )
 
 
 if __name__ == "__main__":

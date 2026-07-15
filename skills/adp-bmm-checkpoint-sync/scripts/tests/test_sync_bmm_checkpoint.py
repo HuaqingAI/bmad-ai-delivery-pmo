@@ -205,6 +205,41 @@ class SyncBmmCheckpointTests(unittest.TestCase):
             self.assertIn("Business or customer confirmation status needs confirmation", readiness_text)
             self.assertIn("| Validation evidence | reports/checkout-validation.md | linked |", record_text)
 
+    def test_checkpoint_sync_keeps_descriptive_facts_out_of_cross_workstream_id_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            setup = self.register_workstream(project_root)
+
+            result = self.run_script(
+                project_root,
+                "--workstream-id",
+                "l1-checkout",
+                "--checkpoint",
+                "architecture",
+                "--summary",
+                "Cross-line architecture reviewed",
+                "--dependency",
+                "l2-payments",
+                "--dependency",
+                "Payment cutover remains gated by business confirmation",
+                "--impact",
+                "L3-Settlement",
+                "--impact",
+                "L8B taxonomy readiness follows the catalog freeze",
+            )
+            record = Path(setup["workstream_root"]) / "delivery-record.md"
+            text = record.read_text(encoding="utf-8")
+            links = text.split("## Cross-Workstream Links", 1)[1].split("## ", 1)[0]
+
+            self.assertIn("- l2-payments", links)
+            self.assertIn("- l3-settlement", links)
+            self.assertNotIn("Payment cutover remains", links)
+            self.assertNotIn("L8B taxonomy readiness", links)
+            self.assertIn("Payment cutover remains gated by business confirmation", text)
+            self.assertIn("Cross-workstream impact facts: L8B taxonomy readiness follows the catalog freeze", text)
+            self.assertEqual(result["cross_workstream_link_audit"]["depends_on_ids"], ["l2-payments"])
+            self.assertEqual(result["cross_workstream_link_audit"]["impact_ids"], ["l3-settlement"])
+
     def test_missing_record_fails_with_registration_hint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             completed = subprocess.run(

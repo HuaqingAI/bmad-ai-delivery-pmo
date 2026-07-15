@@ -91,6 +91,28 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             self.assertFalse((memory / "views" / "dependency-map.md").exists())
             self.assertFalse((memory / "views" / "risk-flow.json").exists())
 
+    def test_descriptive_cross_link_entries_remain_facts_not_workstream_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            record = memory / "workstreams/alpha/delivery-record.md"
+            record.write_text(
+                record.read_text(encoding="utf-8")
+                .replace("- beta", "- beta\n- L3 cutover remains gated by payment confirmation")
+                .replace("- gamma", "- gamma\n- L8B taxonomy readiness follows catalog freeze"),
+                encoding="utf-8",
+            )
+
+            run_script(project)
+            dependency_text = (memory / "views/dependency-map.md").read_text(encoding="utf-8")
+
+            self.assertIn("| alpha | depends on | beta |", dependency_text)
+            self.assertIn("| alpha | dependency fact | L3 cutover remains gated by payment confirmation |", dependency_text)
+            self.assertIn("| alpha | impact fact | L8B taxonomy readiness follows catalog freeze |", dependency_text)
+            self.assertNotIn("| alpha | depends on | L3 cutover", dependency_text)
+            self.assertNotIn("| alpha | impacts | L8B taxonomy", dependency_text)
+
     def test_creates_business_decision_packet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

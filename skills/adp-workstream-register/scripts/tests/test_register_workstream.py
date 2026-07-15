@@ -91,6 +91,52 @@ class RegisterWorkstreamTests(unittest.TestCase):
             self.assertTrue(patch_plan.exists())
             self.assertIn("docs/prd.md", patch_plan.read_text(encoding="utf-8"))
 
+    def test_cross_workstream_lists_write_only_canonical_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.seed_memory(project_root)
+            result = self.run_script(
+                project_root,
+                "--id",
+                "L1 Checkout",
+                "--name",
+                "Checkout Migration",
+                "--owner",
+                "FDE-A",
+                "--depends-on",
+                "L2-Payments",
+                "--impacts",
+                "L3-Settlement",
+            )
+            record = (Path(result["workstream_root"]) / "delivery-record.md").read_text(encoding="utf-8")
+
+            self.assertIn("Depends on:\n\n- l2-payments", record)
+            self.assertIn("Impacts:\n\n- l3-settlement", record)
+            self.assertNotIn("Depends on:\n\n- TBD", record)
+            self.assertNotIn("Impacts:\n\n- TBD", record)
+
+            rejected = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--id",
+                    "L4",
+                    "--name",
+                    "Line 4",
+                    "--owner",
+                    "FDE-D",
+                    "--depends-on",
+                    "L8B taxonomy readiness follows the catalog freeze",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("canonical workstream IDs only", json.loads(rejected.stdout)["error"])
+
     def test_requires_kickoff_memory_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             completed = subprocess.run(

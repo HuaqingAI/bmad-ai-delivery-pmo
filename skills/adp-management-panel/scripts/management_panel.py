@@ -104,9 +104,13 @@ def verify_layout_resource(
     actual = sha256_bytes(canonical_bundle)
     if actual != resource["engine_sha256"]:
         raise PanelError(f"fixed ELK bundle checksum mismatch: expected {resource['engine_sha256']}, got {actual}")
-    license_text = license_path.read_text(encoding="utf-8")
-    if "Eclipse Public License" not in license_text or "2.0" not in license_text:
-        raise PanelError("fixed ELK license does not identify EPL-2.0")
+    if resource.get("engine_license") != "EPL-2.0":
+        raise PanelError("fixed ELK resource engine_license must be EPL-2.0")
+    actual_license = sha256_bytes(license_path.read_bytes())
+    if actual_license != resource.get("license_sha256"):
+        raise PanelError(
+            f"fixed ELK license checksum mismatch: expected {resource.get('license_sha256')}, got {actual_license}"
+        )
     return resource, canonical_bundle.decode("utf-8")
 
 

@@ -103,6 +103,8 @@ class Workstream:
     last_status_sync: str = "TBD"
     depends_on: list[str] = field(default_factory=list)
     impacts: list[str] = field(default_factory=list)
+    dependency_facts: list[str] = field(default_factory=list)
+    impact_facts: list[str] = field(default_factory=list)
     l0_references: list[str] = field(default_factory=list)
     files: dict[str, str] = field(default_factory=dict)
     missing_files: list[str] = field(default_factory=list)
@@ -147,6 +149,25 @@ def normalize_id(raw: str) -> str:
     value = raw.strip().lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
     return value.strip("-")
+
+
+def canonical_cross_workstream_id(raw: str) -> str | None:
+    value = str(raw).strip()
+    if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", value):
+        return None
+    return value.lower()
+
+
+def split_cross_workstream_entries(items: list[str]) -> tuple[list[str], list[str]]:
+    ids: list[str] = []
+    facts: list[str] = []
+    for item in items:
+        workstream_id = canonical_cross_workstream_id(item)
+        target = ids if workstream_id else facts
+        value = workstream_id or item
+        if value not in target:
+            target.append(value)
+    return ids, facts
 
 
 def resolve_memory_root(project_root: Path, raw_memory_root: str) -> Path:
@@ -470,6 +491,8 @@ def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_
     identity = parse_key_bullets(section(lines, "Identity"))
     status = parse_key_bullets(section(lines, "Project Status"))
     cross = section(lines, "Cross-Workstream Links")
+    depends_on, dependency_facts = split_cross_workstream_entries(parse_list_after_label(cross, "Depends on"))
+    impacts, impact_facts = split_cross_workstream_entries(parse_list_after_label(cross, "Impacts"))
     workstream_id = normalize_id(identity.get("workstream id") or record_path.parent.name) or record_path.parent.name
     ws = Workstream(
         workstream_id=workstream_id,
@@ -486,8 +509,10 @@ def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_
         change_notes=status.get("scope or change notes", "TBD"),
         next_actions=status.get("next actions", "TBD"),
         last_status_sync=status.get("last status sync", "TBD"),
-        depends_on=parse_list_after_label(cross, "Depends on"),
-        impacts=parse_list_after_label(cross, "Impacts"),
+        depends_on=depends_on,
+        impacts=impacts,
+        dependency_facts=dependency_facts,
+        impact_facts=impact_facts,
         l0_references=parse_list_after_label(cross, "L0 references"),
     )
     scan_workstream_sidecars(ws, memory_root)
@@ -764,14 +789,20 @@ def add_optional_file(path: Path, memory_root: Path, sources: list[dict[str, Any
         missing.append(rel_to_memory(memory_root, path))
 
 
-def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, Any]]:
-    known = {ws.workstream_id for ws in workstreams}
+def registered_workstream_ids(memory_root: Path) -> set[str]:
+    return {
+        normalized
+        for path in (memory_root / "workstreams").glob("*/delivery-record.md")
+        if (normalized := normalize_id(path.parent.name))
+    }
+
+
+def cross_reference_gaps(workstreams: list[Workstream], known: set[str]) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
     for ws in workstreams:
         for relationship, targets in [("depends_on", ws.depends_on), ("impacts", ws.impacts)]:
             for target in targets:
-                normalized = normalize_id(target)
-                if normalized and normalized not in known:
+                if target not in known:
                     gaps.append(
                         {
                             "workstream": ws.workstream_id,
@@ -786,6 +817,22 @@ def cross_reference_gaps(workstreams: list[Workstream]) -> list[dict[str, Any]]:
                             "recommended_workflow": "adp-status-sync",
                         }
                     )
+        for relationship, facts in [("depends_on", ws.dependency_facts), ("impacts", ws.impact_facts)]:
+            for fact in facts:
+                gaps.append(
+                    {
+                        "workstream": ws.workstream_id,
+                        "relationship": relationship,
+                        "target": fact,
+                        "gap": "descriptive cross-workstream fact should migrate out of the ID-only link list",
+                        "category": "consistency",
+                        "gap_type": "descriptive_cross_workstream_entry",
+                        "blocking": False,
+                        "field": relationship,
+                        "policy_rule_id": "wdr-cross-workstream-links-id-only",
+                        "recommended_workflow": "adp-workstream-register",
+                    }
+                )
     return gaps
 
 
@@ -918,6 +965,8 @@ def workstream_payload(ws: Workstream, memory_root: Path) -> dict[str, Any]:
         "links": {
             "depends_on": ws.depends_on,
             "impacts": ws.impacts,
+            "dependency_facts": ws.dependency_facts,
+            "impact_facts": ws.impact_facts,
             "l0_references": ws.l0_references,
         },
         "files": ws.files,
@@ -1007,7 +1056,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         }
         for item in missing_workstreams
     )
-    xref_gaps = cross_reference_gaps(workstreams)
+    xref_gaps = cross_reference_gaps(workstreams, registered_workstream_ids(memory_root))
     action_xref_evidence = action_cross_check_evidence(memory_root, workstreams, ledger_actions) if ledger_actions else []
 
     payload = {

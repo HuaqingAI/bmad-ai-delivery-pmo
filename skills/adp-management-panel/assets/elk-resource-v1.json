@@ -5,6 +5,7 @@
   "engine_license": "EPL-2.0",
   "engine_sha256": "sha256:b0745abd7f23cd91690a1587e377edbe19fd7233c783300290936720546216d4",
   "engine_sha256_mode": "utf8-lf",
+  "license_sha256": "sha256:89591d4578fb1ebd91501312a3d25f021bd865a2e436641c1cf7b1bc7e3c1617",
   "bundle": "assets/vendor/elk.bundled-0.9.3.js",
   "license": "assets/vendor/ELK-LICENSE-EPL-2.0.md",
   "layout_contract_version": "1.0.0",

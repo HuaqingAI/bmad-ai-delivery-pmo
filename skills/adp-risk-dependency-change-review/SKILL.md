@@ -67,6 +67,8 @@ Keep the categories distinct because each one needs a different closure path:
 
 Every surfaced risk, dependency, blocker, or change must have an owner, affected line or lines, impact, and next action or explicit acceptance. If any field is missing, keep the item visible as a gap instead of filling it with a guess.
 
+In legacy Cross-Workstream Links, treat only ID-shaped entries as `depends on` or `impacts` workstream targets. Preserve explanatory entries as `dependency fact` or `impact fact` rows in the dependency map; never normalize prose into a workstream ID.
+
 ## Versioned Risk Flow Relations
 
 `references/risk-flow-relation-contract-v1.md` and `assets/risk-flow-relation-v1.schema.json` own stable risk IDs, independent lifecycle/relation state, explicit plan-item/flow-edge relations, and unmapped migration behavior for canonical graph overlays. The generator publishes `views/risk-flow.json`; explicit inline relation fields are preserved, while absent relations stay empty for `adp-flow-graph` to expose as unmapped. No graph consumer may guess relations from prose.

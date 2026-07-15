@@ -124,6 +124,66 @@ class AdpStatePrepassTests(unittest.TestCase):
 
             self.assertEqual(result["actions"][0]["due_or_trigger"], "2026-07-05")
 
+    def test_cross_workstream_ids_and_descriptive_facts_are_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record.write_text(
+                RECORD.replace(
+                    "- l2-payments",
+                    "- L2-Payments\n- L3 checkout sequencing remains gated by payment-owner confirmation",
+                ).replace(
+                    "- l3-settlement",
+                    "- missing-line\n- L8B taxonomy readiness follows the catalog freeze",
+                ),
+                encoding="utf-8",
+            )
+            registered = memory_root / "workstreams" / "l2-payments" / "delivery-record.md"
+            registered.parent.mkdir(parents=True)
+            registered.write_text(
+                RECORD.replace("l1-checkout", "l2-payments")
+                .replace("- l2-payments", "- TBD")
+                .replace("- l3-settlement", "- TBD"),
+                encoding="utf-8",
+            )
+
+            completed = self.run_script(
+                project_root,
+                "--workstream",
+                "l1-checkout",
+                "--as-of",
+                "2026-07-02",
+            )
+            result = json.loads(completed.stdout)
+            links = result["workstreams"][0]["links"]
+
+            self.assertEqual(links["depends_on"], ["l2-payments"])
+            self.assertEqual(links["impacts"], ["missing-line"])
+            self.assertEqual(
+                links["dependency_facts"],
+                ["L3 checkout sequencing remains gated by payment-owner confirmation"],
+            )
+            self.assertEqual(
+                links["impact_facts"],
+                ["L8B taxonomy readiness follows the catalog freeze"],
+            )
+            missing = [
+                item for item in result["cross_reference_gaps"] if item["gap_type"] == "missing_reference"
+            ]
+            migrations = [
+                item
+                for item in result["cross_reference_gaps"]
+                if item["gap_type"] == "descriptive_cross_workstream_entry"
+            ]
+            self.assertEqual([item["target"] for item in missing], ["missing-line"])
+            self.assertEqual(len(migrations), 2)
+            self.assertTrue(all(not item["blocking"] for item in migrations))
+            self.assertNotIn(
+                "l2-payments",
+                {item["target"] for item in result["cross_reference_gaps"]},
+            )
+
     def test_missing_memory_root_returns_kickoff_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             completed = self.run_script(Path(temp_dir), check=False)

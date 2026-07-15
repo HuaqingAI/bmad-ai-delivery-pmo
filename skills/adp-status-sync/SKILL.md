@@ -1,6 +1,6 @@
 ---
 name: adp-status-sync
-description: Refreshes ADP workstream status. Use when the user says "adp-status-sync" or "sync workstream status".
+description: Refreshes AI Delivery PMO workstream status. Use when the user says "adp-status-sync" or "sync workstream status".
 ---
 
 # adp-status-sync
@@ -18,36 +18,27 @@ The consumer is the FDE owner, project lead, and later ADP reports. They need to
 - `{skill-name}` -> the skill directory's basename.
 - When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
 
-## Configuration and Language
-
-Resolve the target `{project-root}` before any user-facing output. This is the project where ADP is installed or being run, not the module build repository.
-
-Load BMad configuration from the target project in this order:
-
-1. `{project-root}/_bmad/adp/config.yaml` (primary ADP install-time config)
-2. `{project-root}/_bmad/config.user.yaml` and `{project-root}/_bmad/config.yaml` when present
-3. `{project-root}/_bmad/core/config.yaml`
-4. `{project-root}/_bmad/bmm/config.yaml` or `{project-root}/_bmad/bmb/config.yaml` as compatibility fallbacks
-
-Use `communication_language` for all conversation and status output. Use `document_output_language` for generated project documents and report text. If no config file exists, say that explicitly and fall back to English.
-
 ## On Activation
 
-Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root. If it is missing, tell the user to run `adp-project-kickoff`; still allow status sync when the user provides `--memory-root`.
+Resolve the target project, language, and ADP memory state before user-facing output:
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" context "{project-root}"
+```
+
+Consume its resolved language values, memory path/existence, config source, and diagnostics. If the memory root is missing, route to `adp-project-kickoff`; an explicit `--memory-root` may select an existing non-default root.
 
 Read only the records needed for the requested sync. Do not scan every PRD, architecture, story, code branch, or validation artifact to answer a lightweight status question.
 
 ## Sync
 
-Accept concise owner notes, batch updates, or outputs from `adp-meeting-sync`. If the input is natural language, first identify only the facts the user actually supplied: workstream id, current ADP status, progress, blockers, risks, dependency changes, scope/change notes, next actions, milestone id/status/forecast/actual/evidence, owner, due date, and source. Ask for a missing stable milestone or workstream id when it cannot be inferred safely.
+Accept concise owner notes, batch updates, or outputs from `adp-meeting-sync`. Map only explicitly supplied facts to the writer arguments below; ask for a stable workstream or milestone ID when it cannot be inferred safely. For structured actions, judge whether the owner is accountable and closure criteria are verifiable, and pass any semantic deficiencies as explicit `unresolved_gaps`; the writer checks only structural absence or `TBD`.
 
 Run the deterministic writer after the status delta is clear:
 
 ```bash
 uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --id <workstream-id>
 ```
-
-If `uv` or Python execution is unavailable, manually edit only the targeted WDR volatile fields and append `daily/YYYY-MM-DD.md`, preserving all other content.
 
 Add only fields that are reliable:
 
@@ -67,56 +58,17 @@ Add only fields that are reliable:
 - `--memory-root <path>` for non-default ADP memory
 - `--dry-run` to preview without writing
 
-For multiple workstreams or workflow-produced action intake, prefer a JSON updates file and run:
+For multiple workstreams, workflow-produced actions, updates-file execution, or receipt migration, load `references/batch-status-updates.md`; it owns the payload contract, preview acceptance, atomic apply, durable receipts, and historical migration.
 
-```bash
-uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --updates-file <path>
-```
-
-The updates file may include baseline-mapped `milestones` and structured `actions` alongside legacy `next_actions`:
-
-```json
-{
-  "updates": [
-    {
-      "id": "l1-checkout",
-      "next_actions": ["FDE-A add checkout validation evidence"],
-      "milestones": [
-        {
-          "milestone_id": "MS-CHECKOUT-COMPLETE",
-          "status": "at-risk",
-          "forecast": "2026-10-20",
-          "evidence": ["workstreams/l1-checkout/evidence.md#forecast-20261020"]
-        }
-      ],
-      "actions": [
-        {
-          "owner": "FDE-A",
-          "workstream": "l1-checkout",
-          "affected_workstreams": ["l1-checkout"],
-          "action": "Add checkout validation evidence",
-          "source": "meetings/sync-notes-20260701.md#M-001",
-          "reason": "Meeting action",
-          "due": "Friday",
-          "status": "open",
-          "closure_criteria": "Evidence is linked in evidence.md",
-          "owning_workflow": "adp-meeting-sync"
-        }
-      ]
-    }
-  ]
-}
-```
+If `uv` or Python is unavailable, manual fallback is valid only for one named workstream's volatile WDR fields plus one daily-log append. Batch files, milestones, structured actions, receipt-required intake, and any atomic multi-file update are blocked; preserve their input unchanged for retry.
 
 For milestone updates, the script reads `plans/program-baseline.md` and validates the current revision, exact case-sensitive milestone ID, and owning workstream before any write. Unknown milestones never become implicit plan entries. It writes forecast, actual, status, evidence, and baseline lineage to the targeted WDR `Roadmap` row; planned date, name, owner, and dependencies continue to come from the baseline. Every milestone update requires traceable evidence. The baseline itself is never modified.
 
-For one Source + Action that affects many workstreams, send one canonical action with `workstream: "program"` and `affected_workstreams`; do not repeat the same action under every workstream unless owner, due trigger, or deliverable differs. `program` actions update the ledger and daily log without requiring a `workstreams/program/delivery-record.md`.
-
-The script updates `workstreams/{id}/delivery-record.md`, appends `daily/YYYY-MM-DD.md`, upserts `actions/action-ledger.md`, and returns JSON with changed fields, milestone IDs, baseline revision/path, action results, unresolved gaps, and action candidates. Any milestone mapping failure blocks the whole command before WDR, daily-log, or action-ledger writes. Legacy `next_actions` remain supported; structured `actions` are the durable source for the FDE action list.
+The writer preflights every target, stages coupled files atomically, and returns changed fields, milestone lineage, action IDs, and unresolved gaps. Any milestone mapping failure blocks the command before publication.
 
 ## Versioned Action Flow Relations
 
-`references/action-flow-relation-contract-v1.md` and `assets/action-flow-relation-v1.schema.json` own stable action identity, timestamps, explicit related plan-item/flow-edge IDs, half-open processed windows, and unmapped migration behavior for canonical graph overlays. Structured actions may supply `created_at`, `started_at`, `done_at`, `cancelled_at`, `baseline_revision`, `related_plan_item_ids`, and `related_flow_edge_ids`. The writer preserves those fields in the ledger and publishes `views/action-flow.json`; terminal actions cannot silently reopen. Legacy rows remain readable but are omitted from the canonical relation file until migrated, never inferred.
+When handling structured action-relation fields, canonical graph overlays, or legacy migration, load `references/action-flow-relation-contract-v1.md` and `assets/action-flow-relation-v1.schema.json`. Missing stable identity, timestamps, or explicit relation IDs remains unmapped and is never inferred.
 
 ## Staleness
 
@@ -140,17 +92,11 @@ Stay out of deeper workflows unless the update exposes their trigger:
 
 ## Output Contract
 
-After a sync, report:
+Return a result the FDE owner, project lead, and later ADP reports can use directly: applied changes or an explicit no-op/stale result; milestone/action evidence and baseline lineage; a durable receipt when applicable; and gaps that blocked updates with the heavier workflow they require. A status refresh is not readiness and must never be reported as such.
 
-- workstreams updated or found stale
-- fields changed and fields intentionally left untouched
-- milestones updated with the baseline revision and evidence lineage
-- action ledger path and actions registered, updated, or closed
-- action candidates grouped by owner when available
-- unresolved questions that block a reliable update
-- heavier ADP workflows that should run next, if any
+## Headless
 
-Do not call a workstream ready because its status field was refreshed. Readiness requires the readiness workflow and evidence closure.
+With `--headless`, require `{project-root}` plus either one unambiguous workstream ID and delta or an updates file. Never infer missing facts or ask questions. Return `{"status":"blocked","reason":"<one line>"}` when requirements are incomplete; otherwise return `{"status":"complete","result":<writer JSON>}`. Mutating an interpreted batch requires explicit apply authorization; without it, return the dry-run result as blocked pending acceptance.
 
 ## Guardrails
 
@@ -159,4 +105,5 @@ Do not call a workstream ready because its status field was refreshed. Readiness
 - BMM artifacts remain the source of truth; status sync stores links and short management-level deltas only.
 - `actions/action-ledger.md` is the ADP action source of truth. `views/fde-actions.md` is a derived view, and WDR `Next actions` is a merged active-action summary.
 - Preserve existing user content outside the targeted WDR fields and daily-log append.
+- Never treat a dry-run result or an unbound historical report as proof that an intake was applied.
 - Make no-op explicit when a status note contains no reliable change.

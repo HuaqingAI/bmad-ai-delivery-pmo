@@ -58,6 +58,8 @@ class Workstream:
     last_status_sync: str = "TBD"
     depends_on: list[str] = field(default_factory=list)
     impacts: list[str] = field(default_factory=list)
+    dependency_facts: list[str] = field(default_factory=list)
+    impact_facts: list[str] = field(default_factory=list)
     l0_references: list[str] = field(default_factory=list)
     decision_rows: list[dict[str, str]] = field(default_factory=list)
 
@@ -100,6 +102,20 @@ def normalize_id(raw: str) -> str:
     value = raw.strip().lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
     return value.strip("-")
+
+
+def split_cross_link_entries(items: list[str]) -> tuple[list[str], list[str]]:
+    ids: list[str] = []
+    facts: list[str] = []
+    for item in items:
+        value = item.strip()
+        if re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", value):
+            normalized = value.lower()
+            if normalized not in ids:
+                ids.append(normalized)
+        elif value not in facts:
+            facts.append(value)
+    return ids, facts
 
 
 def slugify(raw: str) -> str:
@@ -233,6 +249,8 @@ def parse_workstream(record_path: Path) -> Workstream:
     identity = parse_identity(section(lines, "Identity"))
     status = parse_key_bullets(section(lines, "Project Status"))
     cross = section(lines, "Cross-Workstream Links")
+    depends_on, dependency_facts = split_cross_link_entries(parse_cross_links(cross, "Depends on"))
+    impacts, impact_facts = split_cross_link_entries(parse_cross_links(cross, "Impacts"))
     workstream_id = identity.get("workstream id") or record_path.parent.name
     workstream = Workstream(
         path=record_path,
@@ -248,8 +266,10 @@ def parse_workstream(record_path: Path) -> Workstream:
         change_notes=status.get("scope or change notes", "TBD"),
         next_actions=status.get("next actions", "TBD"),
         last_status_sync=status.get("last status sync", "TBD"),
-        depends_on=parse_cross_links(cross, "Depends on"),
-        impacts=parse_cross_links(cross, "Impacts"),
+        depends_on=depends_on,
+        impacts=impacts,
+        dependency_facts=dependency_facts,
+        impact_facts=impact_facts,
         l0_references=parse_cross_links(cross, "L0 references"),
     )
     decision_file = record_path.parent / "decisions.md"
@@ -506,6 +526,10 @@ def dependency_entries(workstreams: list[Workstream]) -> list[dict[str, str]]:
             entries.append(make_dependency(ws, "depends on", target))
         for target in ws.impacts:
             entries.append(make_dependency(ws, "impacts", target))
+        for fact in ws.dependency_facts:
+            entries.append(make_dependency(ws, "dependency fact", fact))
+        for fact in ws.impact_facts:
+            entries.append(make_dependency(ws, "impact fact", fact))
         for target in ws.l0_references:
             entries.append(make_dependency(ws, "l0 reference", target))
     return entries

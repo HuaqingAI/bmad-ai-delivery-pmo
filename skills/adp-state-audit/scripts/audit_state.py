@@ -12,7 +12,6 @@ import importlib.util
 import json
 import locale
 import os
-import platform
 import re
 import subprocess
 import sys
@@ -33,11 +32,21 @@ DEFAULT_FLOW_GRAPH_SCRIPT = SKILLS_ROOT / "adp-flow-graph" / "scripts" / "flow_g
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_AUDIT_OUTPUT_PATH = "audits"
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
-GENERATOR_VERSION = "2.1.0"
+GENERATOR_VERSION = "2.2.0"
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 TERMINAL_DECISION_STATUSES = {"accepted", "closed", "done", "cancelled", "rejected", "superseded"}
-TERMINAL_INTAKE_STATUSES = {"applied", "superseded"}
-PENDING_INTAKE_STATUSES = {"", "pending"}
+NON_EXECUTABLE_INTAKE_STATES = {
+    "candidate",
+    "cancelled",
+    "dismissed",
+    "dry-run",
+    "preview",
+    "proposal",
+    "rejected",
+    "superseded",
+}
+STATUS_SYNC_RECEIPT_SCHEMA_VERSION = 1
+STATUS_SYNC_RECEIPT_REL = Path("receipts") / "status-sync"
 PLACEHOLDERS = {"", "-", "tbd", "todo", "none", "n/a", "na", "unknown"}
 REQUIRED_PREPASS_GAP_FIELDS = {"gap", "category", "gap_type", "blocking", "field", "recommended_workflow"}
 REQUIRED_PREPASS_COLLECTIONS = {
@@ -168,18 +177,11 @@ class ContractArgumentParser(argparse.ArgumentParser):
         arguments = sys.argv[1:]
         scenario = cli_option_value(arguments, "--scenario") or "global"
         error = f"invalid arguments: {message}"
-        memlog = None
-        if "--headless" in arguments:
-            startup_args = headless_startup_args(arguments)
-            requested_memlog = resolve_headless_memlog(startup_args)
-            memlog = initialize_headless_memlog(startup_args, requested_memlog)
-            memlog = append_headless_memlog(startup_args, memlog, "event", error)
         emit(
             failure_envelope(
                 status="error",
                 scenario=scenario,
                 error=error,
-                memlog=memlog,
             ),
             None,
         )
@@ -225,13 +227,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--as-of", help="Audit date, YYYY-MM-DD. Default: today.")
     parser.add_argument("--output-dir", help="Audit output directory. Default: <memory-root>/audits.")
     parser.add_argument("--run-folder-pattern", default="", help="Optional output subfolder pattern. Supports {date} and {scenario}.")
-    parser.add_argument("--headless", action="store_true", help="Persist effective parameters and decisions in a memlog.")
-    parser.add_argument("--memlog", help="Headless memlog path. Relative paths resolve from the project root.")
+    parser.add_argument("--headless", action="store_true", help="Mark a non-interactive invocation; output is unchanged.")
     parser.add_argument(
         "--execution-mode",
         choices=["direct-python", "python-fallback", "uv"],
         default="direct-python",
-        help="Runtime used for the audit; recorded in the headless decision trail.",
+        help="Runtime used for the audit; recorded in the structured result envelope.",
     )
     parser.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     parser.add_argument("-o", "--output", help="Write run result JSON to this file instead of stdout.")
@@ -253,23 +254,6 @@ def cli_option_value(arguments: list[str], option: str) -> str:
     return ""
 
 
-def headless_startup_args(arguments: list[str]) -> argparse.Namespace:
-    project_root = Path.cwd().resolve()
-    for argument in arguments:
-        if argument.startswith("-"):
-            continue
-        candidate = Path(argument).expanduser()
-        if candidate.exists() and candidate.is_dir():
-            project_root = candidate.resolve()
-            break
-    return argparse.Namespace(
-        project_root=str(project_root),
-        memlog=cli_option_value(arguments, "--memlog") or None,
-        as_of=cli_option_value(arguments, "--as-of") or None,
-        scenario=cli_option_value(arguments, "--scenario") or "global",
-    )
-
-
 def failure_envelope(
     *,
     status: str,
@@ -277,7 +261,6 @@ def failure_envelope(
     recommended_workflows: list[str] | None = None,
     error: str | None = None,
     reason: str | None = None,
-    memlog: Path | None = None,
     **details: Any,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
@@ -291,26 +274,19 @@ def failure_envelope(
         result["error"] = error
     if reason:
         result["reason"] = reason
-    if memlog is not None:
-        result["memlog"] = str(memlog)
     result.update(details)
     return result
 
 
 def main() -> int:
     args = parse_args()
-    memlog: Path | None = None
     try:
-        if args.headless:
-            requested_memlog = resolve_headless_memlog(args)
-            memlog = initialize_headless_memlog(args, requested_memlog)
-            memlog = record_headless_context(args, memlog)
-        result = run(args, memlog)
+        result = run(args)
     except Exception as exc:  # pragma: no cover - defensive CLI boundary
         result = (
-            artifact_failure_envelope(args.scenario, status="error", error=str(exc), memlog=memlog)
+            artifact_failure_envelope(args.scenario, status="error", error=str(exc))
             if args.phase == "artifact"
-            else failure_envelope(status="error", scenario=args.scenario, error=str(exc), memlog=memlog)
+            else failure_envelope(status="error", scenario=args.scenario, error=str(exc))
         )
         if args.verbose:
             print(f"audit failed: {exc}", file=sys.stderr)
@@ -321,7 +297,6 @@ def main() -> int:
             status="error",
             scenario=args.scenario,
             error=f"failed to write run result: {exc}",
-            memlog=memlog,
         )
         emit(result, None)
         return 2
@@ -330,14 +305,13 @@ def main() -> int:
     return 0
 
 
-def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
+def run(args: argparse.Namespace) -> dict[str, Any]:
     project_root = Path(args.project_root).resolve()
     if not project_root.exists() or not project_root.is_dir():
         return failure_envelope(
             status="error",
             scenario=args.scenario,
             error="project_root is not an existing directory",
-            memlog=memlog,
             project_root=str(project_root),
         )
 
@@ -348,14 +322,13 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             status="error",
             scenario=args.scenario,
             error="as_of must use YYYY-MM-DD",
-            memlog=memlog,
             project_root=str(project_root),
         )
     memory_root = resolve_memory_root(project_root, args.memory_root)
     if args.scenario == "management-panel":
-        return run_panel_validation(args, project_root, memory_root, as_of, memlog)
+        return run_panel_validation(args, project_root, memory_root, as_of)
     if args.phase == "artifact":
-        return run_artifact_validation(args, project_root, memory_root, as_of, memlog)
+        return run_artifact_validation(args, project_root, memory_root, as_of)
     if args.prepass_json:
         try:
             prepass = load_json(Path(args.prepass_json))
@@ -365,7 +338,6 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
                 scenario=args.scenario,
                 error=f"cannot read prepass JSON: {exc}",
                 recommended_workflows=["adp-agent-program-lead"],
-                memlog=memlog,
                 project_root=str(project_root),
                 memory_root=str(memory_root),
             )
@@ -375,7 +347,6 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
                 scenario=args.scenario,
                 error="prepass JSON must contain an object",
                 recommended_workflows=["adp-agent-program-lead"],
-                memlog=memlog,
                 project_root=str(project_root),
                 memory_root=str(memory_root),
             )
@@ -389,7 +360,6 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             scenario=args.scenario,
             error=prepass.get("error", "prepass failed"),
             recommended_workflows=[prepass.get("recommended_workflow") or "adp-project-kickoff"],
-            memlog=memlog,
             project_root=str(project_root),
             memory_root=str(memory_root),
         )
@@ -400,7 +370,6 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             scenario=args.scenario,
             error="ADP memory root is missing; run adp-project-kickoff or pass --memory-root",
             recommended_workflows=["adp-project-kickoff"],
-            memlog=memlog,
             project_root=str(project_root),
             memory_root=str(memory_root),
         )
@@ -412,7 +381,6 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             scenario=args.scenario,
             error="prepass JSON lacks the typed gap contract required by adp-state-audit",
             recommended_workflows=["adp-agent-program-lead"],
-            memlog=memlog,
             details=prepass_errors[:10],
             project_root=str(project_root),
             memory_root=str(memory_root),
@@ -429,6 +397,7 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
         Path(args.baseline_script).resolve(),
     )
     output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, args.scenario)
+    execution = execution_record(args, project_root, memory_root, as_of, args.scenario, output_dir)
     try:
         output_paths = write_audit_outputs(
             audit,
@@ -443,7 +412,6 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
             scenario=args.scenario,
             error=f"cannot write audit outputs: {exc}",
             recommended_workflows=audit["recommended_workflows"],
-            memlog=memlog,
             project_root=str(project_root),
             memory_root=str(memory_root),
         )
@@ -468,10 +436,9 @@ def run(args: argparse.Namespace, memlog: Path | None = None) -> dict[str, Any]:
         "scenario": args.scenario,
         "outputs": output_paths,
         "counts": audit["counts"],
+        "execution": execution,
         "recommended_workflows": audit["recommended_workflows"],
     }
-    if memlog is not None:
-        result["memlog"] = str(memlog)
     return result
 
 
@@ -490,7 +457,6 @@ def run_panel_validation(
     project_root: Path,
     memory_root: Path,
     as_of: date,
-    memlog: Path | None,
 ) -> dict[str, Any]:
     module = load_panel_audit_module()
     output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, args.scenario)
@@ -501,7 +467,6 @@ def run_panel_validation(
                 scenario=args.scenario,
                 error="management-panel input phase requires --panel-input-bundle",
                 recommended_workflows=["adp-management-panel"],
-                memlog=memlog,
             )
         source_path = resolve_project_path(project_root, args.panel_input_bundle)
         try:
@@ -512,9 +477,9 @@ def run_panel_validation(
                 scenario=args.scenario,
                 error=f"cannot read panel input bundle: {exc}",
                 recommended_workflows=["adp-management-panel"],
-                memlog=memlog,
             )
         audit = module.audit_panel_inputs(inputs, as_of=as_of, max_age_days=args.max_age_days)
+        execution = execution_record(args, project_root, memory_root, as_of, args.scenario, output_dir)
         path = module.write_audit_record(audit, output_dir)
         result = {
             "ok": True,
@@ -525,6 +490,7 @@ def run_panel_validation(
             "safe_to_render": audit["safe_to_render"],
             "scenario": args.scenario,
             "counts": audit["counts"],
+            "execution": execution,
             "recommended_workflows": audit["recommended_workflows"],
             "outputs": {"json": str(path)},
         }
@@ -535,7 +501,6 @@ def run_panel_validation(
                 status="error",
                 error="management-panel artifact phase requires --panel-model, --input-audit-json, and --artifact HTML",
                 recommended_workflows=["adp-management-panel"],
-                memlog=memlog,
             )
         model_path = resolve_project_path(project_root, args.panel_model)
         html_path = resolve_project_path(project_root, args.artifact[0])
@@ -561,7 +526,6 @@ def run_panel_validation(
                 status="error",
                 error=f"cannot read panel artifact inputs: {exc}",
                 recommended_workflows=["adp-management-panel"],
-                memlog=memlog,
             )
         audit = module.audit_panel_artifacts(
             model,
@@ -571,6 +535,7 @@ def run_panel_validation(
             source_inputs=source_inputs,
             publication_targets={"bundle": model_path, "html": html_path},
         )
+        execution = execution_record(args, project_root, memory_root, as_of, args.scenario, output_dir)
         path = module.write_audit_record(audit, output_dir)
         result = {
             "ok": True,
@@ -582,11 +547,10 @@ def run_panel_validation(
             "safe_to_publish": audit["safe_to_publish"],
             "scenario": args.scenario,
             "counts": audit["counts"],
+            "execution": execution,
             "recommended_workflows": audit["recommended_workflows"],
             "outputs": {"json": str(path)},
         }
-    if memlog is not None:
-        result["memlog"] = str(memlog)
     return result
 
 
@@ -595,7 +559,6 @@ def run_artifact_validation(
     project_root: Path,
     memory_root: Path,
     as_of: date,
-    memlog: Path | None,
 ) -> dict[str, Any]:
     if not args.input_audit_json:
         return artifact_failure_envelope(
@@ -603,7 +566,6 @@ def run_artifact_validation(
             status="error",
             error="artifact phase requires --input-audit-json",
             recommended_workflows=["adp-state-audit"],
-            memlog=memlog,
         )
     if not args.artifact:
         return artifact_failure_envelope(
@@ -611,7 +573,6 @@ def run_artifact_validation(
             status="error",
             error="artifact phase requires at least one --artifact",
             recommended_workflows=["owning artifact workflow"],
-            memlog=memlog,
         )
     input_audit_path = resolve_project_path(project_root, args.input_audit_json)
     try:
@@ -622,7 +583,6 @@ def run_artifact_validation(
             status="error",
             error=f"cannot read input audit JSON: {exc}",
             recommended_workflows=["adp-state-audit"],
-            memlog=memlog,
         )
     integrity_errors = validate_input_audit_integrity(input_audit)
     if integrity_errors:
@@ -631,7 +591,6 @@ def run_artifact_validation(
             status="blocked",
             reason="input audit integrity validation failed",
             recommended_workflows=["adp-state-audit"],
-            memlog=memlog,
             details=integrity_errors,
         )
     input_scenario = str(input_audit.get("scenario") or "global")
@@ -652,6 +611,9 @@ def run_artifact_validation(
         locale_catalog_path=Path(args.config_script).resolve().parent.parent / "assets" / "locale-catalog.json",
     )
     output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, effective_scenario)
+    execution = execution_record(
+        args, project_root, memory_root, as_of, effective_scenario, output_dir
+    )
     try:
         output_paths = write_audit_outputs(
             validation,
@@ -666,7 +628,6 @@ def run_artifact_validation(
             status="error",
             error=f"cannot write artifact validation outputs: {exc}",
             recommended_workflows=validation["recommended_workflows"],
-            memlog=memlog,
         )
     validation["outputs"] = output_paths
     result = {
@@ -685,10 +646,9 @@ def run_artifact_validation(
         "scenario": effective_scenario,
         "outputs": output_paths,
         "counts": validation["counts"],
+        "execution": execution,
         "recommended_workflows": validation["recommended_workflows"],
     }
-    if memlog is not None:
-        result["memlog"] = str(memlog)
     return result
 
 
@@ -699,7 +659,6 @@ def artifact_failure_envelope(
     recommended_workflows: list[str] | None = None,
     error: str | None = None,
     reason: str | None = None,
-    memlog: Path | None = None,
     **details: Any,
 ) -> dict[str, Any]:
     return failure_envelope(
@@ -708,7 +667,6 @@ def artifact_failure_envelope(
         recommended_workflows=recommended_workflows,
         error=error,
         reason=reason,
-        memlog=memlog,
         phase="artifact",
         audit_type="artifact",
         execution_disposition="blocked",
@@ -1356,202 +1314,49 @@ def resolve_fingerprint_source(project_root: Path, memory_root: Path, raw: str) 
             return None
 
 
-def resolve_headless_memlog(args: argparse.Namespace) -> Path:
-    project_root = Path(args.project_root).expanduser().resolve()
-    base = project_root if project_root.exists() and project_root.is_dir() else Path.cwd().resolve()
-    if args.memlog:
-        path = Path(args.memlog).expanduser()
-        return (path if path.is_absolute() else base / path).resolve()
-    try:
-        run_date = date.fromisoformat(args.as_of) if args.as_of else date.today()
-    except ValueError:
-        run_date = date.today()
-    run_folder = f"{run_date.isoformat()}-{slugify(args.scenario)}"
-    return (base / "_bmad-output" / "adp" / "audit-runs" / run_folder / ".memlog.md").resolve()
-
-
-def initialize_headless_memlog(args: argparse.Namespace, memlog: Path) -> Path:
-    project_root = Path(args.project_root).expanduser().resolve()
-    try:
-        helper = find_memlog_helper(project_root)
-        if not memlog.exists():
-            run_memlog_command(
-                helper,
-                "init",
-                "--path",
-                str(memlog),
-                "--field",
-                "topic=ADP state audit",
-                "--field",
-                "goal=Preserve headless audit assumptions and decisions",
-            )
-        if not memlog.is_file():
-            raise OSError(f"memlog is not a readable file: {memlog}")
-        return memlog
-    except Exception as exc:
-        return initialize_fallback_memlog(project_root, memlog, exc)
-
-
-def record_headless_context(args: argparse.Namespace, memlog: Path) -> Path:
-    project_root = Path(args.project_root).expanduser().resolve()
-
+def execution_record(
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+    as_of: date,
+    scenario: str,
+    output_dir: Path,
+) -> dict[str, Any]:
     provided = set(getattr(args, "provided_options", set()))
     defaults = [
         name
         for option, name in [
-            ("--phase", "phase=input"),
-            ("--scenario", "scenario=global"),
-            ("--as-of", f"as_of={date.today().isoformat()}"),
-            ("--max-age-days", "max_age_days=7"),
-            ("--memory-root", f"memory_root={DEFAULT_MEMORY_ROOT}"),
-            ("--output-dir", f"audit_output_path={DEFAULT_AUDIT_OUTPUT_PATH}"),
-            ("--run-folder-pattern", "run_folder_pattern=<empty>"),
+            ("--phase", f"phase={args.phase}"),
+            ("--scenario", f"scenario={scenario}"),
+            ("--as-of", f"as_of={as_of.isoformat()}"),
+            ("--max-age-days", f"max_age_days={args.max_age_days}"),
+            ("--memory-root", f"memory_root={memory_root}"),
+            ("--output-dir", f"audit_output_path={args.output_dir or DEFAULT_AUDIT_OUTPUT_PATH}"),
+            ("--run-folder-pattern", f"run_folder_pattern={args.run_folder_pattern or '<empty>'}"),
         ]
         if option not in provided
     ]
-    effective_as_of = args.as_of or date.today().isoformat()
-    effective_capability = args.capability or SCENARIO_CAPABILITIES[args.scenario]
-    effective_memory_root = resolve_memory_root(project_root, args.memory_root)
-    scope = {
-        "phase": args.phase,
-        "scenario": args.scenario,
-        "capability": effective_capability,
-        "workstreams": args.workstream or ["all"],
-        "memory_root": str(effective_memory_root),
-        "as_of": effective_as_of,
-        "max_age_days": args.max_age_days,
-        "artifacts": args.artifact or [],
-        "input_audit_json": args.input_audit_json or "",
-    }
-    memlog = append_headless_memlog(
-        args,
-        memlog,
-        "assumption",
-        f"Resolved headless scope and effective audit parameters: {json.dumps(scope, ensure_ascii=False, sort_keys=True)}; defaults applied: {', '.join(defaults) or 'none'}.",
-    )
-
-    try:
-        output_as_of = date.fromisoformat(effective_as_of)
-        output_dir = resolve_output_dir(
-            args.output_dir,
-            effective_memory_root,
-            args.run_folder_pattern,
-            output_as_of,
-            args.scenario,
-        )
-        output_route = str(output_dir)
-    except ValueError as exc:
-        output_route = f"unresolved: {exc}"
-    decision = {
+    return {
         "execution_mode": args.execution_mode,
-        "executable": sys.executable,
-        "python_version": platform.python_version(),
-        "fallback_reason": "uv executable unavailable" if args.execution_mode == "python-fallback" else "not applicable",
-        "output_route": output_route,
+        "fallback_reason": "uv executable unavailable" if args.execution_mode == "python-fallback" else None,
+        "scope": {
+            "phase": args.phase,
+            "scenario": scenario,
+            "capability": args.capability or SCENARIO_CAPABILITIES[scenario],
+            "workstreams": args.workstream or ["all"],
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "as_of": as_of.isoformat(),
+            "max_age_days": args.max_age_days,
+            "artifacts": args.artifact or [],
+            "input_audit_json": args.input_audit_json or None,
+        },
+        "defaults_applied": defaults,
+        "output_route": str(output_dir),
         "audit_output_path": args.output_dir or DEFAULT_AUDIT_OUTPUT_PATH,
         "run_folder_pattern": args.run_folder_pattern,
-        "prepass": str(Path(args.prepass_json).resolve()) if args.prepass_json else "generate with ADP prepass",
+        "prepass": str(Path(args.prepass_json).resolve()) if args.prepass_json else None,
     }
-    memlog = append_headless_memlog(
-        args,
-        memlog,
-        "decision",
-        f"Resolved headless execution and output routing: {json.dumps(decision, ensure_ascii=False, sort_keys=True)}.",
-    )
-    return memlog
-
-
-def append_headless_memlog(
-    args: argparse.Namespace,
-    memlog: Path,
-    entry_type: str,
-    text: str,
-) -> Path:
-    project_root = Path(args.project_root).expanduser().resolve()
-    try:
-        helper = find_memlog_helper(project_root)
-        run_memlog_command(
-            helper,
-            "append",
-            "--path",
-            str(memlog),
-            "--type",
-            entry_type,
-            "--text",
-            text,
-        )
-        if not memlog.is_file():
-            raise OSError(f"memlog update did not leave a readable file: {memlog}")
-        return memlog
-    except Exception as exc:
-        try:
-            append_fallback_memlog(memlog, entry_type, text)
-            return memlog
-        except OSError:
-            fallback = initialize_fallback_memlog(project_root, memlog, exc)
-            append_fallback_memlog(fallback, entry_type, text)
-            return fallback
-
-
-def initialize_fallback_memlog(project_root: Path, requested: Path, error: Exception) -> Path:
-    message = f"Memlog helper initialization failed; using fallback trail: {error}"
-    try:
-        append_fallback_memlog(requested, "event", message)
-        return requested
-    except OSError:
-        base = project_root if project_root.exists() and project_root.is_dir() else Path.cwd().resolve()
-        try:
-            fallback_dir = Path(tempfile.mkdtemp(prefix="adp-state-audit-", dir=base))
-        except OSError:
-            fallback_dir = Path(tempfile.mkdtemp(prefix="adp-state-audit-"))
-        fallback = fallback_dir / ".memlog.md"
-        append_fallback_memlog(fallback, "event", message)
-        return fallback
-
-
-def append_fallback_memlog(path: Path, entry_type: str, text: str) -> None:
-    exists = path.exists()
-    if exists and not path.is_file():
-        raise OSError(f"memlog path is not a file: {path}")
-    needs_newline = exists and not path.read_text(encoding="utf-8").endswith("\n")
-    if not exists:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "---\n"
-            "topic: ADP state audit\n"
-            "goal: Preserve headless audit assumptions and decisions\n"
-            f"updated: {datetime.now(timezone.utc).isoformat(timespec='minutes')}\n"
-            "---\n\n",
-            encoding="utf-8",
-        )
-    entry = " ".join(text.split())
-    with path.open("a", encoding="utf-8") as stream:
-        if needs_newline:
-            stream.write("\n")
-        stream.write(f"- ({entry_type}) {entry}\n")
-
-
-def find_memlog_helper(project_root: Path) -> Path:
-    candidates = [
-        project_root / "_bmad" / "scripts" / "memlog.py",
-        SCRIPT_ROOT.parents[1] / "_bmad" / "scripts" / "memlog.py",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-    raise FileNotFoundError("standard _bmad/scripts/memlog.py helper is unavailable")
-
-
-def run_memlog_command(helper: Path, *arguments: str) -> None:
-    completed = subprocess.run(
-        [sys.executable, str(helper), *arguments],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown memlog failure"
-        raise RuntimeError(f"headless memlog update failed: {detail}")
 
 
 def run_prepass(args: argparse.Namespace, project_root: Path, as_of: date) -> dict[str, Any]:
@@ -2455,7 +2260,7 @@ def audit_closure(prepass: dict[str, Any], memory_root: Path, as_of: date) -> di
 
 def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
     root = memory_root / "intake" / "status-sync"
-    payloads: dict[Path, dict[str, Any]] = {}
+    receipts = load_status_sync_receipts(memory_root)
     results: list[dict[str, Any]] = []
     for path in sorted(root.glob("*.json")):
         try:
@@ -2471,9 +2276,7 @@ def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
                 }
             )
             continue
-        if isinstance(payload, dict):
-            payloads[path] = payload
-        else:
+        if not isinstance(payload, dict):
             results.append(
                 {
                     "path": rel_to_memory(memory_root, path),
@@ -2483,16 +2286,11 @@ def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
                     "status": "malformed",
                 }
             )
-
-    for path, payload in payloads.items():
-        if not is_canonical_status_sync_intake(path, payload):
+            continue
+        if not is_canonical_status_sync_intake(payload):
             continue
         lifecycle_status = intake_lifecycle_status(payload)
-        if lifecycle_status in TERMINAL_INTAKE_STATUSES:
-            continue
-        if lifecycle_status not in PENDING_INTAKE_STATUSES:
-            continue
-        if has_successful_intake_receipt(path, payload, payloads):
+        if has_successful_intake_receipt(path, payload, receipts):
             continue
         results.append(
             {
@@ -2506,11 +2304,25 @@ def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
     return results
 
 
-def is_canonical_status_sync_intake(path: Path, payload: dict[str, Any]) -> bool:
-    name = path.stem.lower()
-    if re.search(r"(?:^|-)(?:dry-run-)?report$|(?:^|-)(?:plan|preview)$|migration-report$", name):
+def is_canonical_status_sync_intake(payload: dict[str, Any]) -> bool:
+    control = payload.get("_control") if isinstance(payload.get("_control"), dict) else {}
+    if control.get("execute_allowed") is False or payload.get("execute_allowed") is False:
+        return False
+    if payload.get("dry_run") is True:
         return False
     if isinstance(payload.get("ok"), bool) and str(payload.get("mode", "")).lower() in {"update", "stale"}:
+        return False
+    markers = [
+        payload.get("status"),
+        payload.get("kind"),
+        payload.get("artifact_type"),
+        payload.get("disposition"),
+        control.get("mode"),
+        control.get("disposition"),
+    ]
+    lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
+    markers.append(lifecycle.get("status"))
+    if any(normalize_status(value) in NON_EXECUTABLE_INTAKE_STATES for value in markers):
         return False
     updates = payload.get("updates")
     return isinstance(updates, list) and bool(updates)
@@ -2527,73 +2339,76 @@ def intake_lifecycle_status(payload: dict[str, Any]) -> str:
 def has_successful_intake_receipt(
     intake_path: Path,
     intake_payload: dict[str, Any],
-    payloads: dict[Path, dict[str, Any]],
+    receipts: dict[Path, dict[str, Any]],
 ) -> bool:
-    receipt = intake_payload.get("receipt") if isinstance(intake_payload.get("receipt"), dict) else {}
-    if successful_receipt_payload(receipt, intake_path, intake_payload):
-        return True
+    return any(successful_receipt_payload(receipt, intake_path, intake_payload) for receipt in receipts.values())
 
-    report_path = receipt.get("report_path") or intake_payload.get("report_path")
-    if isinstance(report_path, str) and report_path.strip():
-        raw_candidate = Path(report_path)
-        candidates = [raw_candidate] if raw_candidate.is_absolute() else [
-            intake_path.parent / raw_candidate,
-            intake_path.parent / raw_candidate.name,
-        ]
-        for candidate in candidates:
-            report_payload = payloads.get(candidate.resolve())
-            if report_payload is None and candidate.exists():
-                try:
-                    report_payload = load_json(candidate)
-                except (OSError, json.JSONDecodeError):
-                    report_payload = None
-            if isinstance(report_payload, dict) and successful_receipt_payload(
-                report_payload, intake_path, intake_payload
-            ):
-                return True
 
-    for suffix in ("-report.json", "-receipt.json"):
-        candidate = intake_path.with_name(f"{intake_path.stem}{suffix}")
-        report_payload = payloads.get(candidate)
-        if isinstance(report_payload, dict) and successful_receipt_payload(report_payload, intake_path, intake_payload):
-            return True
-    intake_key = legacy_receipt_key(intake_path)
-    for candidate, report_payload in payloads.items():
-        if candidate == intake_path or legacy_receipt_key(candidate) != intake_key:
+def load_status_sync_receipts(memory_root: Path) -> dict[Path, dict[str, Any]]:
+    root = memory_root / STATUS_SYNC_RECEIPT_REL
+    receipts: dict[Path, dict[str, Any]] = {}
+    for path in sorted(root.glob("*.json")):
+        try:
+            payload = load_json(path)
+        except (OSError, json.JSONDecodeError):
             continue
-        if successful_receipt_payload(report_payload, intake_path, intake_payload):
-            return True
-    return False
-
-
-def legacy_receipt_key(path: Path) -> str:
-    stem = re.sub(r"-(?:dry-run-)?(?:report|receipt)$", "", path.stem.lower())
-    duplicate_date = re.match(r"^(\d{4}-\d{2}-\d{2})-\1-(.+)$", stem)
-    return f"{duplicate_date.group(1)}-{duplicate_date.group(2)}" if duplicate_date else stem
+        if isinstance(payload, dict):
+            receipts[path.resolve()] = payload
+    return receipts
 
 
 def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intake_payload: dict[str, Any]) -> bool:
-    if not receipt or receipt.get("dry_run") is True:
+    if not receipt or receipt.get("receipt_schema_version") != STATUS_SYNC_RECEIPT_SCHEMA_VERSION:
+        return False
+    if receipt.get("receipt_type") not in {"execution", "migration"}:
+        return False
+    if receipt.get("dry_run") is not False or receipt.get("durable") is not True:
         return False
     status = normalize_status(receipt.get("status") or receipt.get("lifecycle_status"))
-    succeeded = receipt.get("ok") is True or status == "applied" or bool(receipt.get("applied_at"))
-    if not succeeded:
+    if receipt.get("ok") is not True or status != "applied" or str(receipt.get("mode", "")).lower() != "update":
+        return False
+    if not valid_receipt_timestamp(receipt.get("applied_at")):
         return False
     expected_hash = str(receipt.get("input_hash", "")).strip().lower()
-    if not expected_hash:
+    if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", expected_hash):
         return False
-    canonical_hash = hashlib.sha256(
-        json.dumps(intake_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
     raw_hash = hashlib.sha256(intake_path.read_bytes()).hexdigest()
-    if expected_hash.removeprefix("sha256:") not in {canonical_hash, raw_hash}:
+    if expected_hash.removeprefix("sha256:") != raw_hash:
         return False
     input_path = receipt.get("input_path") or receipt.get("updates_file")
-    if isinstance(input_path, str) and input_path.strip():
-        candidate = Path(input_path)
-        if candidate.name != intake_path.name and candidate.resolve() != intake_path.resolve():
-            return False
+    if not isinstance(input_path, str) or not input_path.strip():
+        return False
+    if Path(input_path).expanduser().resolve() != intake_path.resolve():
+        return False
+    updates = intake_payload.get("updates")
+    if not isinstance(updates, list) or receipt.get("update_count") != len(updates):
+        return False
+    if receipt.get("receipt_type") == "migration" and not valid_migration_receipt(receipt):
+        return False
     return True
+
+
+def valid_receipt_timestamp(value: Any) -> bool:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def valid_migration_receipt(receipt: dict[str, Any]) -> bool:
+    migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
+    evidence_path = migration.get("evidence_path")
+    evidence_hash = str(migration.get("evidence_hash") or "").strip().lower()
+    attested_by = str(migration.get("attested_by") or "").strip()
+    if not isinstance(evidence_path, str) or not evidence_path.strip() or not attested_by:
+        return False
+    if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", evidence_hash):
+        return False
+    path = Path(evidence_path).expanduser().resolve()
+    if not path.is_file():
+        return False
+    return evidence_hash.removeprefix("sha256:") == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def audit_merge_quality(prepass: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -2897,7 +2712,7 @@ def canonical_findings(
         "warning",
         "freshness",
     )
-    return {
+    groups = {
         "blocking_gaps": blocking,
         "warnings": warnings,
         "duplicate_candidates": canonicalize_items(
@@ -2911,6 +2726,14 @@ def canonical_findings(
         ),
         "stale_items": stale_items,
     }
+    return {name: dedupe_canonical_findings(items) for name, items in groups.items()}
+
+
+def dedupe_canonical_findings(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for item in items:
+        unique.setdefault(str(item.get("id") or canonical_finding_identity(item)), item)
+    return list(unique.values())
 
 
 def canonicalize_items(items: Any, severity: str, kind: str) -> list[dict[str, Any]]:
@@ -3180,16 +3003,23 @@ def render_markdown(
 
     def yes_no(value: Any) -> str:
         return text("value.yes") if value else text("value.no")
-    finding_headers = ["Source", "Workstream", "Gap", "Recommended workflow"]
+    finding_headers = ["Source", "Workstream", "Category", "Gap", "Recommended workflow"]
     finding_header_labels = [
         text("common.source"),
         text("common.workstream"),
+        text("common.type"),
         text("common.gap"),
         text("audit.label.recommended_workflow"),
     ]
     no_findings = text("audit.value.no_findings")
     review_item = text("audit.value.review_item")
-    findings = audit["findings"]
+    blocking_findings = [*audit["blocking_gaps"], *audit["conflicts"]]
+    warning_findings = [
+        *audit["warnings"],
+        *audit["duplicate_candidates"],
+        *audit["overlap_claims"],
+        *audit["stale_items"],
+    ]
     lines = [
         f"# {text('audit.title.state')}",
         "",
@@ -3209,9 +3039,8 @@ def render_markdown(
         "",
         f"## {text('audit.section.quality_gate')}",
         "",
-        f"- {text('audit.metric.blocking_gaps')}: {len(audit['blocking_gaps'])}",
-        f"- {text('audit.metric.conflicts')}: {len(audit['conflicts'])}",
-        f"- {text('audit.metric.warnings')}: {len(audit['warnings']) + len(audit['stale_items'])}",
+        f"- {text('audit.metric.blocking_gaps')}: {audit['counts']['blocking_findings']}",
+        f"- {text('audit.metric.warnings')}: {audit['counts']['warning_findings']}",
         "",
         f"## {text('audit.section.source_inventory')}",
         "",
@@ -3226,11 +3055,8 @@ def render_markdown(
         lines.extend(f"| {cell(item)} |" for item in audit["source_inventory"]["missing_sources"])
         lines.append("")
 
-    add_table(lines, text("audit.section.blocking_gaps"), finding_headers, flatten_findings(findings["completeness"]["blocking_gaps"], review_item), finding_header_labels, no_findings)
-    add_table(lines, text("audit.section.freshness"), finding_headers, flatten_findings([*findings["freshness"]["blocking_gaps"], *findings["freshness"]["stale_workstreams"], *findings["freshness"]["stale_actions"], *findings["freshness"]["views_requiring_refresh"]], review_item), finding_header_labels, no_findings)
-    add_table(lines, text("audit.section.consistency"), finding_headers, flatten_findings([*findings["consistency"]["consistency_warnings"], *findings["consistency"]["source_disagreements"], *findings["consistency"]["recommended_refreshes"]], review_item), finding_header_labels, no_findings)
-    add_table(lines, text("audit.section.closure"), finding_headers, flatten_findings([*findings["closure"]["blocking_gaps"], *findings["closure"]["non_blocking_gaps"], *findings["closure"]["unclosed_meeting_items"], *findings["closure"]["open_business_packets"], *findings["closure"]["unconsumed_intake_files"], *findings["closure"]["escalation_candidates"]], review_item), finding_header_labels, no_findings)
-    add_table(lines, text("audit.section.merge_quality"), finding_headers, flatten_findings([*findings["merge_quality"]["blocking_gaps"], *findings["merge_quality"]["non_blocking_gaps"], *findings["merge_quality"]["duplicate_candidates"], *findings["merge_quality"]["overlap_candidates"], *findings["merge_quality"]["conflict_candidates"]], review_item), finding_header_labels, no_findings)
+    add_table(lines, text("audit.section.blocking_gaps"), finding_headers, flatten_findings(blocking_findings, review_item), finding_header_labels, no_findings)
+    add_table(lines, text("audit.metric.warnings"), finding_headers, flatten_findings(warning_findings, review_item), finding_header_labels, no_findings)
 
     lines.extend([f"## {text('audit.section.recommended_workflows')}", ""])
     if audit["recommended_workflows"]:
@@ -3304,12 +3130,15 @@ def flatten_findings(items: list[dict[str, Any]], review_item: str = "review ite
             or item.get("reason")
             or (f"duplicate action candidates: {', '.join(action_ids)}" if action_ids else "")
             or item.get("normalized_claim")
+            or item.get("summary")
             or review_item
         )
+        raw_sources = item.get("sources") if isinstance(item.get("sources"), list) else []
         rows.append(
             {
-                "Source": str(item.get("source") or item.get("path") or item.get("action_id") or ""),
+                "Source": str(item.get("source") or item.get("path") or ", ".join(raw_sources) or item.get("action_id") or ""),
                 "Workstream": str(item.get("workstream") or ", ".join(item.get("workstreams", [])) if isinstance(item.get("workstreams"), list) else item.get("workstream", "")),
+                "Category": str(item.get("category") or item.get("kind") or ""),
                 "Gap": str(gap),
                 "Recommended workflow": str(item.get("recommended_workflow", "")),
             }
