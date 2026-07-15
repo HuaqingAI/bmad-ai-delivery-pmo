@@ -31,6 +31,8 @@ MARKER = "<!-- adp:program-baseline:v1 -->"
 APPROVED_STATES = {"confirmed", "approved"}
 ALL_STATES = {"candidate", *APPROVED_STATES}
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+WDR_WORKSTREAM_ID_PATTERN = re.compile(r"^-\s*Workstream ID:\s*(\S.*?)\s*$", re.MULTILINE)
+HARD_DEPENDENCY_TYPES = {"dependency", "aggregation"}
 ARCHIVE_NAME_PATTERN = re.compile(r"^program-baseline-r([1-9][0-9]*)\.md$")
 MEMORY_RELATIVE = Path("_bmad-output/adp/memory")
 BASELINE_RELATIVE = MEMORY_RELATIVE / "plans/program-baseline.md"
@@ -77,6 +79,26 @@ def parse_baseline(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("canonical baseline JSON must be an object")
     return value
+
+
+def current_wdr_registry(project_root: Path, baseline_path: Path | None = None) -> set[str]:
+    registry: set[str] = set()
+    memory_root = project_root / MEMORY_RELATIVE
+    if baseline_path is not None:
+        resolved = baseline_path.expanduser().resolve()
+        if resolved.parent.name == "plans":
+            memory_root = resolved.parent.parent
+        elif resolved.parent.name == "baseline-history" and resolved.parent.parent.name == "plans":
+            memory_root = resolved.parent.parent.parent
+    workstreams_root = memory_root / "workstreams"
+    for record in sorted(workstreams_root.glob("*/delivery-record.md")):
+        try:
+            match = WDR_WORKSTREAM_ID_PATTERN.search(record.read_text(encoding="utf-8-sig"))
+        except OSError:
+            continue
+        if match and ID_PATTERN.fullmatch(match.group(1)):
+            registry.add(match.group(1))
+    return registry
 
 
 def source_ref(source: Any) -> str:
@@ -259,7 +281,12 @@ def _illegal_flow_cycle(nodes: set[str], edges: list[dict[str, Any]]) -> bool:
     return False
 
 
-def validate_model(model: Any, execute: bool = False, stored: bool = True) -> dict[str, Any]:
+def validate_model(
+    model: Any,
+    execute: bool = False,
+    stored: bool = True,
+    registered_workstreams: set[str] | None = None,
+) -> dict[str, Any]:
     findings: list[dict[str, str]] = []
     if not isinstance(model, dict):
         return {"valid": False, "findings": [finding("model.invalid", "blocked", "$", "baseline must be an object")]}
@@ -327,6 +354,23 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
             item_id = _validate_item(row, path, kind, execute, stored, findings)
             if isinstance(row, dict):
                 all_items.append((path, row))
+                workstream_id = row.get("workstream_id")
+                if (
+                    kind == "milestone"
+                    and registered_workstreams is not None
+                    and isinstance(workstream_id, str)
+                    and workstream_id.strip()
+                    and workstream_id != "program"
+                    and workstream_id not in registered_workstreams
+                ):
+                    findings.append(
+                        finding(
+                            "workstream.unknown",
+                            "blocked",
+                            f"{path}.workstream_id",
+                            f"milestone workstream_id {workstream_id!r} is not present in the current WDR registry",
+                        )
+                    )
             if item_id:
                 folded = item_id.casefold()
                 if folded in ids:
@@ -351,6 +395,8 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
             else:
                 graph[item_id].append(dependency)
     flow_edges = normalized_dependencies(model)
+    node_by_id = {str(row.get("id")): row for _, row in all_items if isinstance(row.get("id"), str)}
+    hard_edge_pairs: set[tuple[str, str]] = set()
     edge_ids: dict[str, str] = {}
     for index, edge in enumerate(flow_edges):
         edge_path = f"flow_edges[{index}]"
@@ -364,6 +410,25 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
         relationship_type = edge.get("relationship_type")
         if relationship_type not in {"dependency", "aggregation", "conditional", "rework", "informational"}:
             findings.append(finding("flow.relationship.invalid", "blocked", f"{edge_path}.relationship_type", "relationship_type is not supported"))
+        if relationship_type in HARD_DEPENDENCY_TYPES:
+            predecessor = str(edge.get("predecessor") or "")
+            target = str(edge.get("target") or "")
+            hard_edge_pairs.add((predecessor, target))
+            predecessor_node = node_by_id.get(predecessor)
+            target_node = node_by_id.get(target)
+            if predecessor_node is not None and target_node is not None:
+                predecessor_date = predecessor_node.get("planned_date")
+                target_date = target_node.get("planned_date")
+                if _date_error(predecessor_date) is None and _date_error(target_date) is None:
+                    if date.fromisoformat(predecessor_date) > date.fromisoformat(target_date):
+                        findings.append(
+                            finding(
+                                "dependency.date_order",
+                                "blocked",
+                                edge_path,
+                                f"hard dependency {predecessor!r} is planned after target {target!r}",
+                            )
+                        )
         if relationship_type == "conditional":
             condition = edge.get("condition")
             if not isinstance(condition, dict):
@@ -379,7 +444,6 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
         _validate_source(edge.get("source"), f"{edge_path}.source", execute, findings)
         if stored and edge.get("baseline_revision") != revision:
             findings.append(finding("flow.reference.cross_revision", "blocked", f"{edge_path}.baseline_revision", f"edge revision does not match baseline revision {revision}"))
-    node_by_id = {str(row.get("id")): row for _, row in all_items if isinstance(row.get("id"), str)}
     for target in sorted({str(edge.get("target")) for edge in flow_edges if edge.get("relationship_type") == "aggregation"}):
         incoming = [edge for edge in flow_edges if edge.get("target") == target and edge.get("relationship_type") == "aggregation"]
         if len(incoming) < 2 or node_by_id.get(target, {}).get("predecessor_rule") != "all":
@@ -407,6 +471,16 @@ def validate_model(model: Any, execute: bool = False, stored: bool = True) -> di
         for index, item_id in enumerate(critical_path):
             if item_id not in canonical_ids:
                 findings.append(finding("critical_path.unknown", "blocked", f"critical_path[{index}]", f"unknown critical-path ID {item_id!r}"))
+        for index, (predecessor, target) in enumerate(zip(critical_path, critical_path[1:]), start=1):
+            if predecessor in canonical_ids and target in canonical_ids and (predecessor, target) not in hard_edge_pairs:
+                findings.append(
+                    finding(
+                        "critical_path.disconnected",
+                        "blocked",
+                        f"critical_path[{index}]",
+                        f"critical_path is an ordered hard-dependency chain, but {predecessor!r} -> {target!r} is not a hard dependency edge",
+                    )
+                )
 
     weighting = model.get("weighting")
     milestones = model.get("milestones") if isinstance(model.get("milestones"), list) else []
@@ -1040,7 +1114,12 @@ def command_lock_recover(args: argparse.Namespace, project_root: Path, config: d
 
 def command_propose(args: argparse.Namespace, project_root: Path, config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     model = read_json(Path(args.input))
-    validation = validate_model(model, execute=False, stored=False)
+    validation = validate_model(
+        model,
+        execute=False,
+        stored=False,
+        registered_workstreams=current_wdr_registry(project_root),
+    )
     baseline_path, _ = paths(project_root)
     result = base_result("propose", project_root, config)
     result.update({
@@ -1092,7 +1171,11 @@ def _command_create(args: argparse.Namespace, project_root: Path, config: dict[s
         return 1, result
     timestamp = now_iso(args.as_of)
     model = stamp_model(read_json(Path(args.input)), 1, timestamp)
-    validation = validate_model(model, execute=True)
+    validation = validate_model(
+        model,
+        execute=True,
+        registered_workstreams=current_wdr_registry(project_root, baseline_path),
+    )
     preview_token = fingerprint({"intent": "create", "baseline": fact_model(model)})
     result.update({"status": "ready" if validation["valid"] else "blocked", "dry_run": not args.execute, "can_apply": validation["valid"], "baseline_revision": 1, "baseline_fingerprint": fingerprint(model), "preview_token": preview_token, "findings": validation["findings"], "planned_files": [str(baseline_path)] if validation["valid"] else [], "recommended_next_step": "Review the plan, then repeat with --execute and --preview-token." if validation["valid"] and not args.execute else "Resolve blocked findings and rerun create."})
     if not validation["valid"]:
@@ -1161,7 +1244,11 @@ def _command_update(args: argparse.Namespace, project_root: Path, config: dict[s
         "baseline": fact_model(updated),
         "change_control": updated["change_control"],
     })
-    validation = validate_model(updated, execute=True)
+    validation = validate_model(
+        updated,
+        execute=True,
+        registered_workstreams=current_wdr_registry(project_root),
+    )
     findings.extend(validation["findings"])
     if not changes:
         findings.append(finding("change.empty", "blocked", "changes", "update does not change baseline facts"))
@@ -1204,7 +1291,11 @@ def command_validate(args: argparse.Namespace, project_root: Path, config: dict[
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         result.update({"status": "blocked", "valid": False, "baseline_path": str(baseline_path), "findings": [finding("baseline.parse_error", "blocked", str(baseline_path), str(exc))], "recovery_command": f'uv run scripts/baseline.py validate "{project_root}" --baseline "{baseline_path}"', "recommended_next_step": "Restore a valid archived revision or repair through an approved update, then rerun the recovery command."})
         return 1, result
-    validation = validate_model(model, execute=True)
+    validation = validate_model(
+        model,
+        execute=True,
+        registered_workstreams=current_wdr_registry(project_root, baseline_path),
+    )
     lineage = validate_lineage(project_root, model, baseline_path)
     findings = validation["findings"] + lineage["findings"]
     valid = not any(item["severity"] == "blocked" for item in findings)
@@ -1227,7 +1318,11 @@ def command_inspect(args: argparse.Namespace, project_root: Path, config: dict[s
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         result.update({"status": "blocked", "valid": False, "baseline_path": str(selected), "findings": [finding("baseline.parse_error", "blocked", str(selected), str(exc))], "recovery_command": f'uv run scripts/baseline.py validate "{project_root}" --baseline "{selected}"', "recommended_next_step": "Restore or repair the selected baseline, then rerun the recovery command."})
         return 1, result
-    validation = validate_model(model, execute=True)
+    validation = validate_model(
+        model,
+        execute=True,
+        registered_workstreams=current_wdr_registry(project_root, selected),
+    )
     lineage = validate_lineage(project_root, model if selected == baseline_path else None)
     findings = validation["findings"] + lineage["findings"]
     valid = not any(item["severity"] == "blocked" for item in findings)

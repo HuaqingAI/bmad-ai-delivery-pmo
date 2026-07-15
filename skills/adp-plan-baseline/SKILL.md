@@ -71,7 +71,7 @@ uv run "{skill-root}/scripts/baseline.py" update "{project-root}" --input <chang
 uv run "{skill-root}/scripts/baseline.py" update "{project-root}" --input <change.json> --expected-revision <n> --execute --preview-token <preview_token>
 ```
 
-`--execute` is the only write path. It recomputes the preview token under the write lock; changed input or a changed current baseline blocks the write. A revision mismatch, unapproved item, missing lineage, dependency cycle, duplicate ID, invalid ISO date, or unauditable weighting also blocks. Never edit `program-baseline.md` or `baseline-history/` manually to bypass a finding.
+`--execute` is the only write path. It recomputes the preview token under the write lock; changed input or a changed current baseline blocks the write. A revision mismatch, unapproved item, missing lineage, unknown WDR workstream, reversed hard-dependency date, disconnected critical-path chain, dependency cycle, duplicate ID, invalid ISO date, or unauditable weighting also blocks. Never edit `program-baseline.md` or `baseline-history/` manually to bypass a finding.
 
 ## Lock Inspection And Recovery
 
@@ -91,7 +91,7 @@ If receipt publication fails or the lock changes, retain the lock and return a d
 
 ## Validate And Inspect
 
-For flow-bearing vNext input, load `assets/program-baseline-flow-vnext.schema.json` and the **Flow dependency vNext contract** in `assets/program-baseline-schema.md`. Legacy string dependencies normalize by that contract before validation and topology identity; milestone/gate remains the only node boundary. Validation covers stable edge IDs, same-revision references, conditions, aggregation targets, and explicit rework cycles. Update previews expose `flow_diff` by node and edge identity.
+For flow-bearing vNext input, load `assets/program-baseline-flow-vnext.schema.json` and the **Flow dependency vNext contract** in `assets/program-baseline-schema.md`. Legacy string dependencies normalize by that contract before validation and topology identity; milestone/gate remains the only node boundary. Validation covers current WDR workstream IDs, hard-dependency date order, ordered critical-path connectivity, stable edge IDs, same-revision references, conditions, aggregation targets, and explicit rework cycles. Update previews expose `flow_diff` by node and edge identity.
 
 Run deterministic validation whenever another workflow questions baseline integrity:
 
@@ -117,6 +117,7 @@ Headless use never asks for confirmation. `propose`, `validate`, `inspect`, and 
 - `plans/program-baseline.md` and `plans/baseline-history/` are this workflow's only fact writes.
 - Preserve source wording and anchors; localized headings and labels must not alter fact values.
 - Every gate and milestone has a stable ID, owner, planned date, confirmation state, source, and stamped baseline revision.
+- `critical_path` is an ordered hard-dependency chain; keep attention-only nodes out of it.
 - Weighting is optional and disabled by default. When enabled, every weighted milestone needs auditable completion criteria and weights must total 100.
 - Baseline changes require a reason and approved decision source. Forecast and actual state belong to `adp-status-sync`, never here.
 - Lock recovery writes audit receipts only; it never changes baseline facts or revision history.

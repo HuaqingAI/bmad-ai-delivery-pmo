@@ -309,6 +309,17 @@ class AdpStateAuditTests(unittest.TestCase):
             + "\n```\n",
             encoding="utf-8",
         )
+        for milestone in milestones or []:
+            workstream_id = milestone.get("workstream_id")
+            if not isinstance(workstream_id, str) or workstream_id == "program":
+                continue
+            record = memory_root / "workstreams" / workstream_id / "delivery-record.md"
+            if not record.exists():
+                record.parent.mkdir(parents=True, exist_ok=True)
+                record.write_text(
+                    f"# WDR\n\n## Identity\n\n- Workstream ID: {workstream_id}\n",
+                    encoding="utf-8",
+                )
         return baseline
 
     @staticmethod
@@ -330,7 +341,7 @@ class AdpStateAuditTests(unittest.TestCase):
                 "confirmed_by": "PMO",
             },
             "dependencies": [],
-            "critical_path": True,
+            "critical_path": False,
             "baseline_revision": 1,
         }
 
@@ -474,9 +485,9 @@ class AdpStateAuditTests(unittest.TestCase):
                 [self.milestone("MS-DUE", "l1-checkout", "2026-07-01")],
             )
             record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
-            record.parent.mkdir(parents=True)
+            record.parent.mkdir(parents=True, exist_ok=True)
             record.write_text(
-                "# WDR\n\n## Roadmap\n\n"
+                "# WDR\n\n## Identity\n\n- Workstream ID: l1-checkout\n\n## Roadmap\n\n"
                 "| Milestone ID | Milestone | Status | Forecast | Actual | Source |\n"
                 "| --- | --- | --- | --- | --- | --- |\n"
                 "| MS-UNKNOWN | Unknown | done | 2026-07-02 | 2026-07-02 | evidence.md#done |\n",
@@ -503,9 +514,9 @@ class AdpStateAuditTests(unittest.TestCase):
                 [self.milestone("MS-DUE", "l1-checkout", "2026-07-01")],
             )
             record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
-            record.parent.mkdir(parents=True)
+            record.parent.mkdir(parents=True, exist_ok=True)
             record.write_text(
-                "# WDR\n\n## Roadmap\n\n"
+                "# WDR\n\n## Identity\n\n- Workstream ID: l1-checkout\n\n## Roadmap\n\n"
                 "| Milestone ID | Milestone | Status | Forecast | Actual | Source | Baseline Revision |\n"
                 "| --- | --- | --- | --- | --- | --- | --- |\n"
                 "| MS-DUE | Due | done | 2026-07-01 | 2026-07-01 | evidence.md#done | 1 |\n",
@@ -529,9 +540,9 @@ class AdpStateAuditTests(unittest.TestCase):
             memory_root.mkdir()
             self.write_valid_baseline(project_root, memory_root, [self.milestone("MS-DUE", "l1-checkout", "2026-07-01")])
             record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
-            record.parent.mkdir(parents=True)
+            record.parent.mkdir(parents=True, exist_ok=True)
             record.write_text(
-                "# WDR\n\n## Roadmap\n\n"
+                "# WDR\n\n## Identity\n\n- Workstream ID: l1-checkout\n\n## Roadmap\n\n"
                 "| Milestone ID | Status | Actual | Source | Baseline Revision |\n"
                 "| --- | --- | --- | --- | --- |\n"
                 "| MS-DUE | done | 2026-07-01 | evidence.md#done | 0 |\n",
@@ -1438,6 +1449,66 @@ class AdpStateAuditTests(unittest.TestCase):
             second_audit = json.loads(Path(second["outputs"]["json"]).read_text(encoding="utf-8"))
             self.assertEqual(
                 [item["path"] for item in second_audit["findings"]["closure"]["unconsumed_intake_files"]],
+                ["intake/status-sync/pending-actions.json"],
+            )
+
+    def test_wrapper_attestation_receipt_cannot_self_prove_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            intake = memory_root / "intake/status-sync/pending-actions.json"
+            input_hash = f"sha256:{hashlib.sha256(intake.read_bytes()).hexdigest()}"
+            original_report = {
+                "ok": True,
+                "mode": "update",
+                "dry_run": False,
+                "updates": [{"ok": True}],
+            }
+            wrapper = {
+                **original_report,
+                "input_path": str(intake.resolve()),
+                "input_hash": input_hash,
+                "attestation": {"attested_by": "PMO-A"},
+                "original_report": original_report,
+            }
+            evidence = project_root / "post-hoc-attestation.json"
+            evidence.write_text(json.dumps(wrapper) + "\n", encoding="utf-8")
+            receipt = {
+                "receipt_schema_version": 1,
+                "receipt_type": "migration",
+                "execution_id": "ssr-wrapper-attestation",
+                "ok": True,
+                "status": "applied",
+                "durable": True,
+                "dry_run": False,
+                "input_path": str(intake.resolve()),
+                "input_hash": input_hash,
+                "applied_at": "2026-07-10T10:00:00+08:00",
+                "mode": "update",
+                "update_count": 1,
+                "migration": {
+                    "evidence_path": str(evidence.resolve()),
+                    "evidence_hash": f"sha256:{hashlib.sha256(evidence.read_bytes()).hexdigest()}",
+                    "evidence_mode": "update",
+                    "evidence_input_path": str(intake.resolve()),
+                    "evidence_input_hash": input_hash,
+                    "verification_status": "verified",
+                    "attested_by": "PMO-A",
+                },
+            }
+            receipt_root = memory_root / "receipts/status-sync"
+            receipt_root.mkdir(parents=True)
+            (receipt_root / "ssr-wrapper-attestation.json").write_text(
+                json.dumps(receipt) + "\n",
+                encoding="utf-8",
+            )
+
+            completed = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
+            audit = json.loads(Path(completed["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(completed["audit_status"], "blocked")
+            self.assertEqual(
+                [item["path"] for item in audit["findings"]["closure"]["unconsumed_intake_files"]],
                 ["intake/status-sync/pending-actions.json"],
             )
 

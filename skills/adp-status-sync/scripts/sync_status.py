@@ -43,6 +43,14 @@ PROJECT_ACTION_IDS = {"program", "project", "adp-program"}
 MILESTONE_STATUSES = {"planned", "in-progress", "at-risk", "done", "blocked"}
 RECEIPT_SCHEMA_VERSION = 1
 STATUS_SYNC_RECEIPT_REL = Path("receipts") / "status-sync"
+ATTESTATION_WRAPPER_FIELDS = {
+    "attestation",
+    "attested_at",
+    "attested_by",
+    "execution_report",
+    "original_report",
+    "wrapper_attestation",
+}
 DEFAULT_CONFIG_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/adp_effective_config.py"
 ROADMAP_FIELDS = [
     "Milestone ID",
@@ -195,9 +203,17 @@ def parse_args() -> argparse.Namespace:
     )
     migrate.add_argument("project_root", help="Project root containing ADP memory.")
     migrate.add_argument("--updates-file", required=True, help="Exact historical updates file to attest.")
-    migrate.add_argument("--evidence-file", required=True, help="Historical non-dry-run status-sync result JSON.")
+    migrate.add_argument(
+        "--evidence-file",
+        required=True,
+        help="Original historical non-dry-run status-sync result JSON with direct input_path/input_hash fields.",
+    )
     migrate.add_argument("--applied-at", required=True, help="Attested application time as timezone-aware ISO-8601.")
-    migrate.add_argument("--attested-by", required=True, help="Person or authority attesting the evidence-to-input link.")
+    migrate.add_argument(
+        "--attested-by",
+        required=True,
+        help="Attribution signature stored on the migration receipt; not proof of execution or authorization.",
+    )
     migrate.add_argument("--dry-run", action="store_true", help="Verify the exact evidence binding without writing a receipt.")
     migrate.add_argument(
         "--verified-plan-token",
@@ -1693,28 +1709,41 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def historical_evidence(payload: Any, evidence_path: Path, input_path: Path, input_hash: str) -> dict[str, Any]:
+def historical_evidence(
+    payload: Any,
+    evidence_path: Path,
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("evidence-file root must be a JSON object")
-    binding = payload.get("receipt") if isinstance(payload.get("receipt"), dict) else payload
-    if payload.get("dry_run") is not False or binding.get("dry_run") is True:
+    wrapper_fields = sorted(ATTESTATION_WRAPPER_FIELDS.intersection(payload))
+    if wrapper_fields:
+        raise ValueError(
+            "evidence-file is an attestation wrapper, not the original execution report: "
+            + ", ".join(wrapper_fields)
+        )
+    if payload.get("dry_run") is not False:
         raise ValueError("dry-run evidence cannot create a durable migration receipt")
-    status = str(binding.get("status") or payload.get("status") or payload.get("lifecycle_status") or "").strip().lower()
+    status = str(payload.get("status") or payload.get("lifecycle_status") or "").strip().lower()
     if payload.get("ok") is not True or (status and status != "applied"):
         raise ValueError("evidence-file does not record a successful status-sync execution")
-    if str(payload.get("mode") or "update").strip().lower() != "update":
+    if str(payload.get("mode") or "").strip().lower() != "update":
         raise ValueError("evidence-file mode must be update")
     updates = payload.get("updates")
     if not isinstance(updates, list) or not updates:
         raise ValueError("evidence-file must contain non-empty execution updates")
-    evidence_input_hash = str(binding.get("input_hash") or payload.get("input_hash") or "").strip().lower()
+    if len(updates) != update_count:
+        raise ValueError("evidence-file execution update count does not match updates-file")
+    evidence_input_hash = str(payload.get("input_hash") or "").strip().lower()
     if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", evidence_input_hash):
-        raise ValueError("evidence-file must declare the exact updates-file input_hash")
+        raise ValueError("original evidence report must directly declare the exact updates-file input_hash")
     if evidence_input_hash.removeprefix("sha256:") != input_hash.removeprefix("sha256:"):
         raise ValueError("evidence-file input_hash does not match updates-file raw bytes")
-    evidence_input_path = binding.get("input_path") or payload.get("input_path") or payload.get("updates_file")
+    evidence_input_path = payload.get("input_path")
     if not isinstance(evidence_input_path, str) or not evidence_input_path.strip():
-        raise ValueError("evidence-file must declare the exact updates-file input_path")
+        raise ValueError("original evidence report must directly declare the exact updates-file input_path")
     if Path(evidence_input_path).expanduser().resolve() != input_path:
         raise ValueError("evidence-file input_path does not match the exact updates-file path")
     if evidence_path == input_path:
@@ -1881,6 +1910,8 @@ def run_update(args: argparse.Namespace) -> int:
         "ok": True,
         "mode": "update",
         "dry_run": args.dry_run,
+        "input_path": str(input_path) if input_path else None,
+        "input_hash": input_hash,
         "project_root": str(project_root),
         "memory_root": str(memory_root),
         "baseline_path": str(baseline_context["path"]) if baseline_context else None,
@@ -1921,7 +1952,13 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
         raise ValueError("attested-by must not be empty")
     applied_at = normalize_required_timestamp(args.applied_at, "applied-at")
     try:
-        migration = historical_evidence(evidence_payload, evidence_path, input_path, input_hash)
+        migration = historical_evidence(
+            evidence_payload,
+            evidence_path,
+            input_path,
+            input_hash,
+            len(input_payload["updates"]),
+        )
     except ValueError as exc:
         if not args.dry_run:
             raise

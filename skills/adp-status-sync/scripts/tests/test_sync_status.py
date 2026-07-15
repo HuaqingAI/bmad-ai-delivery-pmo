@@ -298,6 +298,11 @@ class SyncStatusTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(len(result["updates"]), 2)
+            self.assertEqual(result["input_path"], str(updates_file.resolve()))
+            self.assertEqual(
+                result["input_hash"],
+                f"sha256:{hashlib.sha256(updates_file.read_bytes()).hexdigest()}",
+            )
             receipt_path = Path(result["receipt_path"])
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertEqual(receipt["receipt_schema_version"], 1)
@@ -467,6 +472,60 @@ class SyncStatusTests(unittest.TestCase):
             self.assertEqual(unverified_result["verification_status"], "unverified")
             self.assertIn("exact updates-file path", unverified_result["reason"])
             self.assertIsNone(unverified_result["receipt"])
+
+    def test_wrapper_attestation_cannot_self_prove_historical_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            updates_file = project_root / "historical-updates.json"
+            updates_file.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "progress": "Historically applied"}]}) + "\n",
+                encoding="utf-8",
+            )
+            original_report = {
+                "ok": True,
+                "mode": "update",
+                "dry_run": False,
+                "updates": [{"ok": True}],
+            }
+            wrapper = {
+                **original_report,
+                "receipt": {
+                    "input_path": str(updates_file.resolve()),
+                    "input_hash": f"sha256:{hashlib.sha256(updates_file.read_bytes()).hexdigest()}",
+                    "attested_by": "PMO-A",
+                },
+            }
+            evidence_file = project_root / "post-hoc-attestation.json"
+            evidence_file.write_text(json.dumps(wrapper) + "\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "migrate-receipt",
+                    str(project_root),
+                    "--updates-file",
+                    str(updates_file),
+                    "--evidence-file",
+                    str(evidence_file),
+                    "--applied-at",
+                    "2026-07-10T10:00:00+08:00",
+                    "--attested-by",
+                    "PMO-A",
+                    "--dry-run",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(result["verification_status"], "unverified")
+            self.assertIn("directly declare", result["reason"])
+            self.assertIsNone(result["receipt"])
+            self.assertFalse((project_root / "_bmad-output/adp/memory/receipts/status-sync").exists())
 
     def test_unsupported_action_status_is_rejected_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

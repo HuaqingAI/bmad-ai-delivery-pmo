@@ -26,7 +26,7 @@ The writer preflights the full batch and publishes WDR, daily log, action ledger
 
 ## Historical Receipt Migration
 
-Verify one historical input against a successful non-dry-run report before writing anything. The report must declare both the exact resolved input path and its raw-byte SHA-256; basename similarity is never evidence:
+Verify one historical input against its original successful non-dry-run execution report before writing anything. That report's root object must directly declare both the exact resolved `input_path` and raw-byte `input_hash`; values added by a wrapper, nested receipt, or later attestation are not execution evidence, and basename similarity is never evidence:
 
 ```bash
 uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --updates-file <path> --evidence-file <report.json> --applied-at <iso-time> --attested-by "<authority>" --dry-run
@@ -38,4 +38,4 @@ An unverified result writes no receipt and remains blocked. Apply a verified res
 uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --updates-file <path> --evidence-file <report.json> --applied-at <iso-time> --attested-by "<authority>" --verified-plan-token <token>
 ```
 
-Process historical inputs one at a time. A set with a different number of reports and intakes must be paired from declared path/hash bindings, never filenames; only `verification_status: verified` entries receive versioned receipts.
+Process historical inputs one at a time. A set with a different number of reports and intakes must be paired from declared path/hash bindings, never filenames; only `verification_status: verified` entries receive versioned receipts. `attested_by` is receipt attribution only: it proves neither execution nor authorization and cannot repair a report missing either direct binding.

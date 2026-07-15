@@ -105,5 +105,5 @@ With `--headless`, require `{project-root}` plus either one unambiguous workstre
 - BMM artifacts remain the source of truth; status sync stores links and short management-level deltas only.
 - `actions/action-ledger.md` is the ADP action source of truth. `views/fde-actions.md` is a derived view, and WDR `Next actions` is a merged active-action summary.
 - Preserve existing user content outside the targeted WDR fields and daily-log append.
-- Never treat a dry-run result or an unbound historical report as proof that an intake was applied.
+- Never treat a dry-run, wrapper attestation, nested receipt binding, or unbound historical report as proof that an intake was applied.
 - Make no-op explicit when a status note contains no reliable change.

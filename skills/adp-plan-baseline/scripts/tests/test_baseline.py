@@ -206,6 +206,68 @@ class BaselineValidationTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertTrue(any(item["code"] == "confirmation.required" for item in result["findings"]))
 
+    def test_reported_revision_two_semantic_errors_are_blocked(self) -> None:
+        model = approved_model()
+        source = copy.deepcopy(model["gates"][0]["source"])
+        model["gates"][0].update(
+            {
+                "id": "GATE-PRD-ACCEPTED",
+                "name": "PRD accepted",
+                "planned_date": "2026-07-31",
+                "dependencies": [],
+            }
+        )
+        model["milestones"][0].update(
+            {
+                "id": "MS-ARCH-A",
+                "workstream_id": "l12-project-management",
+                "planned_date": "2026-07-17",
+                "dependencies": ["GATE-PRD-ACCEPTED"],
+            }
+        )
+        milestone_b = copy.deepcopy(model["milestones"][0])
+        milestone_b.update({"id": "MS-ARCH-B", "planned_date": "2026-07-18", "dependencies": []})
+        milestone_c = copy.deepcopy(model["milestones"][0])
+        milestone_c.update(
+            {
+                "id": "MS-ARCH-C",
+                "planned_date": "2026-07-24",
+                "dependencies": ["GATE-PRD-ACCEPTED"],
+            }
+        )
+        milestone_b["source"] = copy.deepcopy(source)
+        milestone_c["source"] = copy.deepcopy(source)
+        model["milestones"] = [model["milestones"][0], milestone_b, milestone_c]
+        model["critical_path"] = ["MS-ARCH-A", "MS-ARCH-B", "GATE-PRD-ACCEPTED", "MS-ARCH-C"]
+        stored = stamp_model(model, 2, "2026-07-15T00:00:00Z")
+
+        result = validate_model(
+            stored,
+            execute=True,
+            registered_workstreams={"l12-operations-control-plane"},
+        )
+        codes = {item["code"] for item in result["findings"]}
+        disconnected = {
+            item["path"]
+            for item in result["findings"]
+            if item["code"] == "critical_path.disconnected"
+        }
+
+        self.assertFalse(result["valid"])
+        self.assertTrue(
+            {"workstream.unknown", "dependency.date_order", "critical_path.disconnected"} <= codes
+        )
+        self.assertEqual(disconnected, {"critical_path[1]", "critical_path[2]"})
+
+    def test_program_milestone_is_exempt_from_wdr_registry(self) -> None:
+        model = stamp_model(approved_model(), 1, "2026-07-13T00:00:00Z")
+        model["milestones"][0]["workstream_id"] = "program"
+
+        result = validate_model(model, execute=True, registered_workstreams=set())
+
+        self.assertFalse(any(item["code"] == "workstream.unknown" for item in result["findings"]))
+        self.assertTrue(result["valid"], result["findings"])
+
 
 class BaselineCommandTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -220,6 +282,9 @@ class BaselineCommandTests(unittest.TestCase):
             encoding="utf-8",
         )
         _, self.config = resolve_effective_config(self.root)
+        record = self.root / "_bmad-output/adp/memory/workstreams/checkout/delivery-record.md"
+        record.parent.mkdir(parents=True)
+        record.write_text("# Workstream Delivery Record\n\n- Workstream ID: checkout\n", encoding="utf-8")
         self.input_path = self.root / "baseline-input.json"
         self.input_path.write_text(json.dumps(approved_model(), ensure_ascii=False), encoding="utf-8")
 
@@ -636,6 +701,12 @@ class BaselineCommandTests(unittest.TestCase):
     def test_validate_explicit_baseline_uses_its_sibling_lineage(self) -> None:
         custom_baseline = self.root / "custom-memory" / "plans" / "program-baseline.md"
         self.write_baseline(custom_baseline, stamp_model(approved_model(), 1, "2026-07-13T00:00:00Z"))
+        custom_record = self.root / "custom-memory" / "workstreams" / "checkout" / "delivery-record.md"
+        custom_record.parent.mkdir(parents=True)
+        custom_record.write_text(
+            "# Workstream Delivery Record\n\n- Workstream ID: checkout\n",
+            encoding="utf-8",
+        )
 
         code, result = command_validate(Namespace(baseline=str(custom_baseline)), self.root, self.config)
 

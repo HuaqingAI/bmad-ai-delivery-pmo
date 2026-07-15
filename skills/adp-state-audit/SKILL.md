@@ -70,7 +70,7 @@ Load `references/scenario-contracts.md` only when the audit encounters `intake/s
 
 ## Findings
 
-Treat `audit_state.py` output as the canonical finding set. `warning_findings` is the sole warning aggregation: its unique `finding_id` values drive `counts.warning_findings` and the Markdown warning table. The category groups remain compatibility projections and must not be re-counted or re-rendered. Report severity and `execution_disposition` independently: only disposition `blocked` prevents generation or publication; `degraded` requires lower confidence and a visibly risk-bearing readout. Baseline missing/invalid and unmapped actuals block; overdue missing actuals, stale artifacts, and explicit locale fallback degrade. Do not infer gaps from prose similarity.
+Treat `audit_state.py` output as the canonical finding set. `warning_findings` is the sole warning aggregation: its unique `finding_id` values drive `counts.warning_findings` and the Markdown warning table. The category groups remain compatibility projections and must not be re-counted or re-rendered. Report severity and `execution_disposition` independently: only disposition `blocked` prevents generation or publication; `degraded` requires lower confidence and a visibly risk-bearing readout. Baseline missing/invalid, unverified migration evidence, and unmapped actuals block; overdue missing actuals, stale artifacts, and explicit locale fallback degrade. Do not infer gaps from prose similarity.
 
 ## Output Contract
 

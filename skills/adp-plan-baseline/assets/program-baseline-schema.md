@@ -8,7 +8,7 @@ Every gate and milestone requires `id`, `name`, `planned_date`, `owner`, `confir
 
 Canonical confirmation values are `candidate`, `confirmed`, and `approved`. Executed baselines require the root and every plan item to be `confirmed` or `approved`.
 
-IDs are case-sensitive stable tokens matching `[A-Za-z0-9][A-Za-z0-9._-]*`. Dependencies and `critical_path` entries reference those IDs. Dates use ISO `YYYY-MM-DD`. Item tolerance overrides are integers from 0 through 90.
+IDs are case-sensitive stable tokens matching `[A-Za-z0-9][A-Za-z0-9._-]*`. A milestone `workstream_id` must equal a current WDR's canonical `Workstream ID`; `program` is the only registry-free value. Dependencies reference plan-item IDs. `critical_path` is an ordered hard-dependency chain, not a set of attention nodes: every adjacent pair must be a `dependency` or `aggregation` edge in predecessor-to-target order. Dates use ISO `YYYY-MM-DD`, and a hard dependency's predecessor cannot be planned after its target. Item tolerance overrides are integers from 0 through 90.
 
 Weighting is disabled by default. When enabled, `completion_measure` and `source` are required, every milestone needs a numeric `weight` and non-empty `completion_criteria`, and weights total exactly 100.
 
@@ -22,4 +22,4 @@ Canonical dependencies are objects on the target node. They require `edge_id`, `
 
 Legacy string dependencies remain accepted only as compatibility input. Normalize each string to a `dependency` object before validation or identity calculation. Its stable edge ID is `legacy-` plus the first 20 lowercase hex characters of SHA-256 over the UTF-8 string `baseline_id + "\n" + revision + "\n" + predecessor + "\n" + target`. The containing node supplies the target. A consumer never guesses an edge ID by another rule.
 
-Every node and dependency object carries the same positive `baseline_revision` as the root. Unknown nodes, duplicate node or edge IDs, cross-revision references, missing conditional facts, and cycles containing any non-`rework` relationship block canonical topology publication. A cycle made entirely of explicit `rework` relationships is valid and remains visible as a rework loop. Recovery codes and deterministic dispositions are owned by `adp-flow-graph/references/flow-graph-contract-v1.md`.
+Every node and dependency object carries the same positive `baseline_revision` as the root. Unknown nodes, duplicate node or edge IDs, cross-revision references, reversed hard-dependency dates, disconnected critical-path pairs, missing conditional facts, and cycles containing any non-`rework` relationship block canonical topology publication. A cycle made entirely of explicit `rework` relationships is valid and remains visible as a rework loop. Recovery codes and deterministic dispositions are owned by `adp-flow-graph/references/flow-graph-contract-v1.md`.

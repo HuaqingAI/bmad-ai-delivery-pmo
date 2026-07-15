@@ -47,6 +47,14 @@ NON_EXECUTABLE_INTAKE_STATES = {
 }
 STATUS_SYNC_RECEIPT_SCHEMA_VERSION = 1
 STATUS_SYNC_RECEIPT_REL = Path("receipts") / "status-sync"
+ATTESTATION_WRAPPER_FIELDS = {
+    "attestation",
+    "attested_at",
+    "attested_by",
+    "execution_report",
+    "original_report",
+    "wrapper_attestation",
+}
 PLACEHOLDERS = {"", "-", "tbd", "todo", "none", "n/a", "na", "unknown"}
 REQUIRED_PREPASS_GAP_FIELDS = {"gap", "category", "gap_type", "blocking", "field", "recommended_workflow"}
 REQUIRED_PREPASS_COLLECTIONS = {
@@ -2437,7 +2445,14 @@ def valid_migration_receipt(receipt: dict[str, Any]) -> bool:
     path = Path(evidence_path).expanduser().resolve()
     if not path.is_file():
         return False
-    if evidence_hash.removeprefix("sha256:") != hashlib.sha256(path.read_bytes()).hexdigest():
+    try:
+        evidence_bytes = path.read_bytes()
+        evidence_payload = json.loads(evidence_bytes.decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if evidence_hash.removeprefix("sha256:") != hashlib.sha256(evidence_bytes).hexdigest():
+        return False
+    if not valid_original_execution_report(evidence_payload, receipt):
         return False
     evidence_input_path = migration.get("evidence_input_path")
     evidence_input_hash = str(migration.get("evidence_input_hash") or "").strip().lower()
@@ -2448,6 +2463,28 @@ def valid_migration_receipt(receipt: dict[str, Any]) -> bool:
     if Path(evidence_input_path).expanduser().resolve() != Path(receipt_input_path).expanduser().resolve():
         return False
     return fingerprints_equal(evidence_input_hash, receipt_input_hash)
+
+
+def valid_original_execution_report(payload: Any, receipt: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict) or ATTESTATION_WRAPPER_FIELDS.intersection(payload):
+        return False
+    if payload.get("ok") is not True or payload.get("dry_run") is not False:
+        return False
+    if str(payload.get("mode") or "").strip().lower() != "update":
+        return False
+    status = normalize_status(payload.get("status") or payload.get("lifecycle_status"))
+    if status and status != "applied":
+        return False
+    updates = payload.get("updates")
+    if not isinstance(updates, list) or not updates or len(updates) != receipt.get("update_count"):
+        return False
+    declared_path = payload.get("input_path")
+    receipt_path = receipt.get("input_path")
+    if not isinstance(declared_path, str) or not isinstance(receipt_path, str):
+        return False
+    if Path(declared_path).expanduser().resolve() != Path(receipt_path).expanduser().resolve():
+        return False
+    return fingerprints_equal(payload.get("input_hash"), receipt.get("input_hash"))
 
 
 def audit_merge_quality(prepass: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
