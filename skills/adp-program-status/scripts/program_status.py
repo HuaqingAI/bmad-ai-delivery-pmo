@@ -1275,7 +1275,11 @@ def create_immutable(path: Path, text: str, model: dict[str, Any]) -> None:
     temp_path = Path(raw_temp)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            os.fchmod(handle.fileno(), 0o644)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(handle.fileno(), 0o644)
+            else:
+                os.chmod(temp_path, 0o644)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -1734,7 +1738,7 @@ def append_headless_context(args: argparse.Namespace, memlog: Path) -> None:
     )
 
 
-def run_artifact_audit(args: argparse.Namespace, operation: dict[str, Any], memlog: Path) -> dict[str, Any]:
+def run_artifact_audit(args: argparse.Namespace, operation: dict[str, Any]) -> dict[str, Any]:
     script = Path(args.artifact_audit_script).expanduser().resolve()
     if not script.is_file():
         error = DependencyError("adp-state-audit artifact validator", script, ["adp-setup", "adp-state-audit"])
@@ -1771,8 +1775,6 @@ def run_artifact_audit(args: argparse.Namespace, operation: dict[str, Any], meml
         "--as-of",
         str(operation.get("as_of") or args.as_of or date.today().isoformat()),
         "--headless",
-        "--memlog",
-        str(memlog),
     ]
     for artifact in artifacts:
         command.extend(["--artifact", str(artifact)])
@@ -1808,7 +1810,7 @@ def finalize_headless_result(args: argparse.Namespace, operation: dict[str, Any]
     if operation.get("ok") and args.dry_run:
         reason = "headless generation cannot complete artifact validation in dry-run mode"
     elif operation.get("ok"):
-        audit = run_artifact_audit(args, operation, memlog)
+        audit = run_artifact_audit(args, operation)
         if not audit.get("ok") or not audit.get("safe_to_publish"):
             reason = str(audit.get("reason") or audit.get("error") or "artifact validation did not approve publication")
         elif operation.get("publication_pending"):

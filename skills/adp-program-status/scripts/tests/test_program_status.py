@@ -165,6 +165,10 @@ class ProgramStatusTests(unittest.TestCase):
             lines = [
                 "# Workstream Delivery Record",
                 "",
+                "## Identity",
+                "",
+                f"- Workstream ID: {workstream_id}",
+                "",
                 "## Roadmap",
                 "",
                 "| Milestone ID | Milestone | Type | Status | Planned | Forecast | Actual | Owner | Confidence | Depends On | Source | Baseline Revision |",
@@ -329,13 +333,14 @@ class ProgramStatusTests(unittest.TestCase):
     def test_confirmed_off_plan_is_not_hidden_by_unknown_or_low_confidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            first = self.baseline()["milestones"][0]
+            first = {**self.baseline()["milestones"][0], "planned_date": "2026-06-30"}
             second = {
                 **first,
                 "id": "MS-TWO",
                 "name": "Milestone two",
                 "workstream_id": "ws-two",
                 "planned_date": "2026-07-01",
+                "dependencies": ["MS-ONE"],
             }
             baseline = self.baseline(milestones=[first, second])
             memory = self.scaffold(root, baseline, {"ws-one": [{"id": "MS-ONE", "forecast": "2026-07-30"}]})
@@ -351,8 +356,14 @@ class ProgramStatusTests(unittest.TestCase):
     def test_source_backed_at_risk_precedes_indeterminate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            first = self.baseline()["milestones"][0]
-            second = {**first, "id": "MS-TWO", "workstream_id": "ws-two", "planned_date": "2026-07-01"}
+            first = {**self.baseline()["milestones"][0], "planned_date": "2026-06-30"}
+            second = {
+                **first,
+                "id": "MS-TWO",
+                "workstream_id": "ws-two",
+                "planned_date": "2026-07-01",
+                "dependencies": ["MS-ONE"],
+            }
             baseline = self.baseline(milestones=[first, second])
             memory = self.scaffold(root, baseline, {"ws-one": [{"id": "MS-ONE", "status": "at-risk"}]})
             audit = self.write_audit(root, memory)
@@ -466,6 +477,25 @@ class ProgramStatusTests(unittest.TestCase):
 
             self.assertFalse(path.exists())
             self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
+
+    def test_immutable_snapshot_uses_path_chmod_when_fchmod_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "ps-windows.json"
+            model = {"snapshot_id": "ps-windows"}
+            real_chmod = program_status.os.chmod
+
+            with (
+                patch.object(program_status.os, "fchmod", None, create=True),
+                patch("program_status.os.chmod", wraps=real_chmod) as chmod,
+            ):
+                program_status.create_immutable(path, json.dumps(model), model)
+
+            chmod.assert_called_once()
+            chmod_path, chmod_mode = chmod.call_args.args
+            self.assertEqual(chmod_path.parent, path.parent)
+            self.assertTrue(chmod_path.name.startswith(f".{path.name}."))
+            self.assertEqual(chmod_mode, 0o644)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), model)
 
     def test_period_delta_reports_worsening(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
