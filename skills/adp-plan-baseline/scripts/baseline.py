@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import ctypes
 import hashlib
 import json
 import math
@@ -20,6 +21,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from ctypes import wintypes
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,10 @@ LOCK_RELATIVE = MEMORY_RELATIVE / "plans/.program-baseline.lock"
 LOCK_RECOVERY_RELATIVE = MEMORY_RELATIVE / "plans/lock-recovery"
 LOCK_RECOVERY_GUARD_RELATIVE = MEMORY_RELATIVE / "plans/.program-baseline.lock-recovering"
 LOCK_SCHEMA_VERSION = "1.0"
+WINDOWS_ERROR_ACCESS_DENIED = 5
+WINDOWS_ERROR_INVALID_PARAMETER = 87
+WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+WINDOWS_STILL_ACTIVE = 259
 
 
 class WriteLockUnavailable(RuntimeError):
@@ -630,15 +636,50 @@ def process_start_identity(pid: int) -> str | None:
     return f"ps-lstart:{value}" if completed.returncode == 0 and value else None
 
 
+def windows_process_is_live(pid: int) -> bool:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    get_exit_code = kernel32.GetExitCodeProcess
+    get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    get_exit_code.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == WINDOWS_ERROR_INVALID_PARAMETER:
+            return False
+        if error == WINDOWS_ERROR_ACCESS_DENIED:
+            return True
+        raise ctypes.WinError(error)
+    try:
+        exit_code = wintypes.DWORD()
+        if not get_exit_code(handle, ctypes.byref(exit_code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return exit_code.value == WINDOWS_STILL_ACTIVE
+    finally:
+        close_handle(handle)
+
+
 def process_is_live(pid: Any) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
+    if os.name == "nt":
+        return windows_process_is_live(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == WINDOWS_ERROR_INVALID_PARAMETER:
+            return False
+        raise
     return True
 
 
@@ -669,7 +710,11 @@ def create_exclusive_json(path: Path, value: dict[str, Any]) -> None:
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
-            os.fchmod(handle.fileno(), 0o600)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(handle.fileno(), 0o600)
+            else:
+                os.chmod(temp_path, 0o600)
             handle.write(canonical_json_bytes(value))
             handle.flush()
             os.fsync(handle.fileno())

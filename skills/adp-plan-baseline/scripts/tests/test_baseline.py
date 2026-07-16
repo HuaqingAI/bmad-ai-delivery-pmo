@@ -30,13 +30,16 @@ from baseline import (
     command_lock_recover,
     command_update,
     command_validate,
+    create_exclusive_json,
     parse_baseline,
     paths,
+    process_is_live,
     render_markdown,
     flow_structural_diff,
     normalized_dependencies,
     stamp_model,
     validate_model,
+    windows_process_is_live,
 )
 
 
@@ -384,6 +387,49 @@ class BaselineCommandTests(unittest.TestCase):
 
         self.assertEqual([code for code, _ in results].count(0), 1)
         self.assertEqual(parse_baseline(paths(self.root)[0])["revision"], 1)
+
+    def test_windows_invalid_parameter_pid_is_not_live(self) -> None:
+        invalid_pid = OSError("invalid parameter")
+        invalid_pid.winerror = 87
+
+        with (
+            patch.object(os, "name", "posix"),
+            patch("baseline.os.kill", side_effect=invalid_pid),
+        ):
+            self.assertFalse(process_is_live(99999999))
+
+    def test_windows_process_probe_never_calls_os_kill(self) -> None:
+        with (
+            patch.object(os, "name", "nt"),
+            patch("baseline.windows_process_is_live", return_value=True) as windows_probe,
+            patch("baseline.os.kill") as kill,
+        ):
+            self.assertTrue(process_is_live(1234))
+
+        windows_probe.assert_called_once_with(1234)
+        kill.assert_not_called()
+
+    def test_windows_process_probe_treats_error_87_as_missing(self) -> None:
+        with (
+            patch("baseline.ctypes.WinDLL", create=True) as win_dll,
+            patch("baseline.ctypes.get_last_error", create=True, return_value=87),
+        ):
+            win_dll.return_value.OpenProcess.return_value = 0
+            self.assertFalse(windows_process_is_live(99999999))
+
+    def test_exclusive_json_uses_path_chmod_when_fchmod_is_unavailable(self) -> None:
+        target = self.root / "exclusive.json"
+        real_chmod = os.chmod
+
+        with (
+            patch.object(os, "fchmod", None, create=True),
+            patch("baseline.os.chmod", wraps=real_chmod) as chmod,
+        ):
+            create_exclusive_json(target, {"owner": "test"})
+
+        chmod.assert_called_once()
+        self.assertEqual(chmod.call_args.args[1], 0o600)
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"owner": "test"})
 
     def test_lock_inspect_distinguishes_live_owner_and_blocks_recovery(self) -> None:
         args = Namespace(as_of="2026-07-14T00:00:00Z")
