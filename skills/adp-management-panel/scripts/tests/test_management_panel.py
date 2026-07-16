@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -111,9 +113,9 @@ class ManagementPanelTests(unittest.TestCase):
             "memory_root": str(root / "memory"),
             "fixture": True,
             "input_bundle": None,
+            "selection_policy": None,
             "locale": "zh-CN",
             "default_view": "project-lead",
-            "history_limit": 12,
             "max_age_days": 7,
             "distribution_profile": None,
             "expected_panel_id": None,
@@ -189,11 +191,293 @@ class ManagementPanelTests(unittest.TestCase):
             self.assertTrue(current.is_file())
             self.assertTrue(Path(first["panel_input_audit"]).is_file())
             self.assertTrue(Path(first["panel_artifact_audit"]).is_file())
+            self.assertEqual(
+                f"{panel_model.panel_artifact_basename(first['panel_id'])}.json",
+                bundle.name,
+            )
+            self.assertNotIn(":", bundle.name)
             second = management_panel.run(self.args(root, generated_at="2026-07-14T09:05:00Z"))
             self.assertEqual(first["panel_id"], second["panel_id"])
             self.assertEqual("reused", second["bundle_state"])
             inspected = management_panel.inspect_current(root / "memory", first["panel_id"])
             self.assertEqual(first["panel_id"], inspected["panel_id"])
+            self.assertEqual(bundle.resolve(), Path(inspected["immutable_bundle"]).resolve())
+            self.assertFalse(any(path.name == ".sha256" for path in (root / "memory").rglob("*")))
+
+    def test_panel_artifact_basename_validates_logical_identity(self):
+        panel_id = "sha256:" + "a" * 64
+        self.assertEqual("sha256-" + "a" * 64, panel_model.panel_artifact_basename(panel_id))
+        for invalid in ("sha256-" + "a" * 64, "sha256:ABC", "not-a-panel-id"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "panel_id must match"):
+                panel_model.panel_artifact_basename(invalid)
+
+    @unittest.skipIf(os.name == "nt", "legacy colon-named artifacts exist only on POSIX")
+    def test_inspect_reads_legacy_bundle_only_when_safe_bundle_is_absent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = management_panel.run(self.args(root))
+            safe = Path(first["immutable_bundle"])
+            legacy = safe.with_name(f"{first['panel_id']}.json")
+            legacy.write_bytes(safe.read_bytes())
+            safe.unlink()
+            before = legacy.read_bytes()
+
+            inspected = management_panel.inspect_current(root / "memory", first["panel_id"])
+
+            self.assertEqual(legacy.resolve(), Path(inspected["immutable_bundle"]).resolve())
+            self.assertEqual(before, legacy.read_bytes())
+            self.assertFalse(safe.exists())
+
+            safe.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(management_panel.PanelError, "collision between safe and legacy"):
+                management_panel.inspect_current(root / "memory", first["panel_id"])
+            self.assertEqual(before, legacy.read_bytes())
+
+    @unittest.skipIf(os.name == "nt", "legacy colon-named artifacts exist only on POSIX")
+    def test_legacy_only_refresh_reuses_exact_bundle_and_current_html(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = management_panel.run(self.args(root))
+            safe = Path(first["immutable_bundle"])
+            legacy = safe.with_name(f"{first['panel_id']}.json")
+            safe.replace(legacy)
+            legacy_before = legacy.read_bytes()
+            current = Path(first["current_html"])
+            current_before = current.read_bytes()
+
+            second = management_panel.run(self.args(root, generated_at="2026-07-14T09:05:00Z"))
+
+            safe_twin = Path(second["immutable_bundle"])
+            reused = json.loads(safe_twin.read_text(encoding="utf-8"))
+            self.assertEqual(first["panel_id"], second["panel_id"])
+            self.assertEqual(legacy_before, safe_twin.read_bytes())
+            self.assertEqual(legacy_before, legacy.read_bytes())
+            self.assertEqual(current_before, current.read_bytes())
+            self.assertEqual("2026-07-13T09:05:00Z", reused["manifest"]["generated_at"])
+
+    @unittest.skipIf(os.name == "nt", "legacy colon-named artifacts exist only on POSIX")
+    def test_legacy_only_archive_reuses_bundle_and_html(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = management_panel.run(
+                self.args(root, "archive", distribution_profile="internal-full")
+            )
+            safe = Path(first["immutable_bundle"])
+            legacy = safe.with_name(f"{first['panel_id']}.json")
+            safe.replace(legacy)
+            legacy_before = legacy.read_bytes()
+            archive = Path(first["archive_html"])
+            archive_before = archive.read_bytes()
+
+            second = management_panel.run(
+                self.args(
+                    root,
+                    "archive",
+                    distribution_profile="internal-full",
+                    generated_at="2026-07-14T09:05:00Z",
+                )
+            )
+
+            self.assertEqual(first["panel_id"], second["panel_id"])
+            self.assertEqual(legacy_before, Path(second["immutable_bundle"]).read_bytes())
+            self.assertEqual(legacy_before, legacy.read_bytes())
+            self.assertEqual("reused", second["archive_state"])
+            self.assertEqual(archive_before, archive.read_bytes())
+
+    @unittest.skipIf(os.name == "nt", "legacy colon-named artifacts exist only on POSIX")
+    def test_safe_legacy_collision_fails_without_panel_publication(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = management_panel.run(self.args(root))
+            safe = Path(first["immutable_bundle"])
+            legacy = safe.with_name(f"{first['panel_id']}.json")
+            legacy_model = json.loads(safe.read_text(encoding="utf-8"))
+            legacy_model["manifest"]["generated_at"] = "2026-07-14T09:05:00Z"
+            legacy.write_bytes(management_panel.canonical_json_bytes(legacy_model))
+            safe_before = safe.read_bytes()
+            legacy_before = legacy.read_bytes()
+            current = Path(first["current_html"])
+            current_before = current.read_bytes()
+
+            with self.assertRaisesRegex(management_panel.PanelError, "collision between safe and legacy"):
+                management_panel.run(self.args(root, generated_at="2026-07-15T09:05:00Z"))
+
+            self.assertEqual(safe_before, safe.read_bytes())
+            self.assertEqual(legacy_before, legacy.read_bytes())
+            self.assertEqual(current_before, current.read_bytes())
+
+    @unittest.skipIf(os.name == "nt", "legacy colon-named artifacts exist only on POSIX")
+    def test_legacy_identity_collision_does_not_create_safe_twin(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = management_panel.run(self.args(root))
+            safe = Path(first["immutable_bundle"])
+            legacy = safe.with_name(f"{first['panel_id']}.json")
+            safe.replace(legacy)
+            invalid = json.loads(legacy.read_text(encoding="utf-8"))
+            invalid["panel_model_id"] = "sha256:" + "f" * 64
+            legacy.write_bytes(management_panel.canonical_json_bytes(invalid))
+            legacy_before = legacy.read_bytes()
+            current = Path(first["current_html"])
+            current_before = current.read_bytes()
+
+            with self.assertRaisesRegex(management_panel.PanelError, "identity collision"):
+                management_panel.run(self.args(root, generated_at="2026-07-14T09:05:00Z"))
+
+            self.assertFalse(safe.exists())
+            self.assertEqual(legacy_before, legacy.read_bytes())
+            self.assertEqual(current_before, current.read_bytes())
+
+    def test_selection_policy_validates_scope_history_membership_and_order(self):
+        inputs = panel_model.load_source_fixture()
+        policy = {
+            "policy_version": "1.0.0",
+            "flow_graph_id": inputs["flow_graph"]["flow_graph_id"],
+            "history_snapshot_ids": ["ps-history-2026-06-29", "ps-history-2026-07-06"],
+            "project_lead": {
+                "scope_id": "ACTIVE-2026-07-13",
+                "node_ids": ["M-B", "M-A", "G-MERGE"],
+                "edge_ids": ["E-B-MERGE", "E-A-MERGE"],
+            },
+            "shareable": {
+                "visible_node_ids": ["G-MERGE", "M-A"],
+                "visible_edge_ids": ["E-A-MERGE"],
+            },
+        }
+        history_ids = {item["snapshot_id"] for item in inputs["history"]}
+
+        selected = management_panel.validate_selection_policy(inputs["flow_graph"], policy, history_ids)
+
+        self.assertEqual(policy["history_snapshot_ids"], selected["history_snapshot_ids"])
+        self.assertEqual("ACTIVE-2026-07-13", selected["project_lead_scope_id"])
+        self.assertEqual(["G-MERGE", "M-A", "M-B"], selected["project_lead_node_ids"])
+        self.assertEqual(["E-A-MERGE", "E-B-MERGE"], selected["project_lead_edge_ids"])
+        self.assertEqual(["G-MERGE", "M-A"], selected["shareable_policy"]["visible_node_ids"])
+        broken = json.loads(json.dumps(policy))
+        broken["shareable"]["visible_node_ids"] = ["M-A"]
+        with self.assertRaisesRegex(management_panel.PanelError, "not closed over selected nodes"):
+            management_panel.validate_selection_policy(inputs["flow_graph"], broken, history_ids)
+        broken = json.loads(json.dumps(policy))
+        broken["project_lead"]["node_ids"].append("UNKNOWN")
+        with self.assertRaisesRegex(management_panel.PanelError, "unknown IDs: UNKNOWN"):
+            management_panel.validate_selection_policy(inputs["flow_graph"], broken, history_ids)
+        broken = json.loads(json.dumps(policy))
+        broken["project_lead"]["scope_id"] = "UNKNOWN"
+        with self.assertRaisesRegex(management_panel.PanelError, "scope_id is unknown: UNKNOWN"):
+            management_panel.validate_selection_policy(inputs["flow_graph"], broken, history_ids)
+        broken = json.loads(json.dumps(policy))
+        broken["history_snapshot_ids"] = ["missing-history"]
+        with self.assertRaisesRegex(management_panel.PanelError, "history_snapshot_ids contains unknown IDs"):
+            management_panel.validate_selection_policy(inputs["flow_graph"], broken, history_ids)
+        broken["history_snapshot_ids"] = ["ps-history-2026-07-06"] * 2
+        with self.assertRaisesRegex(management_panel.PanelError, "history_snapshot_ids contains duplicate IDs"):
+            management_panel.validate_selection_policy(inputs["flow_graph"], broken, history_ids)
+
+    def test_history_snapshot_index_uses_embedded_identity_not_filename(self):
+        with tempfile.TemporaryDirectory() as folder:
+            memory_root = Path(folder)
+            history_root = memory_root / "snapshots/program-status"
+            history_root.mkdir(parents=True)
+            for filename, snapshot_id in (
+                ("z-looks-new.json", "history-older"),
+                ("a-looks-old.json", "history-newer"),
+            ):
+                (history_root / filename).write_text(
+                    json.dumps({"snapshot_id": snapshot_id, "as_of": "2026-07-01"}),
+                    encoding="utf-8",
+                )
+
+            indexed, paths = management_panel.history_snapshot_index(memory_root, "current")
+
+            requested = ["history-newer", "history-older"]
+            self.assertEqual(requested, [indexed[item]["snapshot_id"] for item in requested])
+            self.assertEqual("a-looks-old.json", paths["history-newer"].name)
+
+    def test_cross_platform_refresh_reuse_inspect_archive_journey(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            memory_root = root / "memory"
+
+            def invoke(operation: str, *arguments: str) -> dict:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(Path(management_panel.__file__).resolve()),
+                        str(root),
+                        operation,
+                        "--memory-root",
+                        str(memory_root),
+                        *arguments,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr or completed.stdout)
+                return json.loads(completed.stdout)
+
+            first = invoke("refresh", "--fixture", "--generated-at", "2026-07-13T09:05:00Z")
+            second = invoke("refresh", "--fixture", "--generated-at", "2026-07-14T09:05:00Z")
+            inspected = invoke("inspect", "--expected-panel-id", first["panel_id"])
+            archived = invoke(
+                "archive",
+                "--fixture",
+                "--distribution-profile",
+                "internal-full",
+                "--generated-at",
+                "2026-07-15T09:05:00Z",
+            )
+
+            self.assertEqual(first["panel_id"], second["panel_id"])
+            self.assertEqual(first["panel_id"], inspected["panel_id"])
+            self.assertEqual(first["panel_id"], archived["panel_id"])
+            self.assertEqual("reused", second["bundle_state"])
+            self.assertNotIn(":", Path(first["immutable_bundle"]).name)
+            self.assertNotIn(":", Path(archived["archive_html"]).name)
+            self.assertTrue((memory_root / "views/management-panel/index.html").is_file())
+            empty_digests = [
+                path
+                for path in memory_root.rglob("*.sha256")
+                if path.is_file() and path.stat().st_size == 0
+            ]
+            self.assertEqual([], empty_digests)
+
+    def test_meeting_pack_selection_uses_structured_identity_not_filename_or_mtime(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            scenario_root = root / "fde-morning"
+            scenario_root.mkdir()
+            older = scenario_root / "newest-fde-morning-copy.json"
+            newer = scenario_root / "opaque.json"
+            unrelated = scenario_root / "fde-morning-archive.json"
+            older.write_text(json.dumps({
+                "scenario": "fde-morning",
+                "meeting_pack_id": "mp-old",
+                "generated_at": "2026-07-13T10:00:00Z",
+                "lifecycle": "pre-meeting-snapshot",
+            }), encoding="utf-8")
+            newer.write_text(json.dumps({
+                "scenario": "fde-morning",
+                "meeting_pack_id": "mp-current",
+                "generated_at": "2026-07-13T11:00:00Z",
+                "lifecycle": "pre-meeting-snapshot",
+            }), encoding="utf-8")
+            unrelated.write_text(json.dumps({"scenario": "business-biweekly"}), encoding="utf-8")
+            older.touch()
+
+            path, pack = management_panel.resolve_current_meeting_pack(root, "fde-morning")
+
+            self.assertEqual(newer, path)
+            self.assertEqual("mp-current", pack["meeting_pack_id"])
+            duplicate = scenario_root / "another-opaque.json"
+            duplicate.write_text(json.dumps({
+                "scenario": "fde-morning",
+                "meeting_pack_id": "mp-ambiguous",
+                "generated_at": "2026-07-13T11:00:00Z",
+                "lifecycle": "pre-meeting-snapshot",
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(management_panel.PanelError, "identity is ambiguous"):
+                management_panel.resolve_current_meeting_pack(root, "fde-morning")
 
     def test_refresh_never_advances_or_repairs_meeting_cursor(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -268,6 +552,8 @@ class ManagementPanelTests(unittest.TestCase):
             result = management_panel.run(self.args(root, "archive", distribution_profile="shareable-summary"))
             self.assertEqual("shareable-summary", result["distribution_profile"])
             self.assertTrue(Path(result["archive_html"]).is_file())
+            self.assertNotIn(":", Path(result["archive_html"]).name)
+            self.assertNotIn(":", Path(result["immutable_bundle"]).name)
             self.assertFalse((root / "memory/views/management-panel/index.html").exists())
             model = json.loads(Path(result["immutable_bundle"]).read_text(encoding="utf-8"))
             self.assertGreater(model["manifest"]["redaction"]["hidden_nodes"], 0)

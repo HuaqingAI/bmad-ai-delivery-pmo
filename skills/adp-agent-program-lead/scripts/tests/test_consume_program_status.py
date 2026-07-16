@@ -288,10 +288,31 @@ class ConsumeProgramStatusTests(unittest.TestCase):
             journey = result["panel_journey"]
             self.assertEqual(journey["operation"], "open")
             self.assertEqual(journey["panel_id"], panel["panel_id"])
+            self.assertNotIn(":", Path(panel["immutable_bundle"]).name)
             self.assertEqual(journey["open_hash"], "#v=1&view=fde-morning&mode=quantitative-progress")
             self.assertEqual(journey["explanation"]["meeting_pack_id"], "2026-07-13-fde-morning")
             self.assertEqual(journey["explanation"]["meeting_window"]["status"], "confirmed")
             self.assertNotIn("forecast_summary", journey["explanation"])
+
+    def test_panel_open_reads_posix_legacy_bundle_when_safe_bundle_is_absent(self) -> None:
+        if sys.platform == "win32":
+            self.skipTest("legacy colon-named artifacts exist only on POSIX")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root, _ = self.scaffold(project_root)
+            panel = self.create_fixture_panel(project_root)
+            self.align_canonical_status_to_panel(memory_root, panel)
+            safe = Path(panel["immutable_bundle"])
+            legacy = safe.with_name(f"{panel['panel_id']}.json")
+            legacy.write_bytes(safe.read_bytes())
+            safe.unlink()
+
+            completed = self.run_script(project_root, "--intent", "panel-open")
+            journey = json.loads(completed.stdout)["panel_journey"]
+
+            self.assertEqual(panel["panel_id"], journey["panel_id"])
+            self.assertTrue(legacy.is_file())
+            self.assertFalse(safe.exists())
 
     def test_panel_archive_requires_profile_and_routes_official_association_to_meeting_sync(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

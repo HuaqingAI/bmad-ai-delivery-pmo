@@ -612,11 +612,20 @@ def compose_panel(inputs: dict[str, Any]) -> dict[str, Any]:
     graph = inputs["flow_graph"]
     packs = inputs["meeting_packs"]
     request = inputs["request"]
+    project_scope_id = request["project_lead_scope_id"]
+    scope_matches = [
+        item for item in graph["overlays"]["scopes"] if item["scope_id"] == project_scope_id
+    ]
+    if len(scope_matches) != 1:
+        raise ValueError(
+            f"project-lead scope must match exactly one canonical flow scope: {project_scope_id}"
+        )
 
     project_selection_id = canonical_hash(
         {
             "flow_graph_id": graph["flow_graph_id"],
             "scenario": "project-lead",
+            "scope_id": project_scope_id,
             "node_ids": sorted(request["project_lead_node_ids"]),
             "edge_ids": sorted(request["project_lead_edge_ids"]),
         }
@@ -627,7 +636,7 @@ def compose_panel(inputs: dict[str, Any]) -> dict[str, Any]:
             project_selection_id,
             request["project_lead_node_ids"],
             request["project_lead_edge_ids"],
-            "ACTIVE-2026-07-13",
+            project_scope_id,
             "project-lead",
         ),
         "fde-morning": copy.deepcopy(packs["fde-morning"]["flow_subgraph"]),

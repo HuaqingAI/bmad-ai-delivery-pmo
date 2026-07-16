@@ -1,6 +1,6 @@
 # ADP Management Panel Model and Artifact Contract v1
 
-`assets/adp-management-panel-v1.schema.json` is the machine contract. Fixtures under `assets/fixtures/panel-contract-v1/` freeze canonical mapping, identities, recovery, safe embedding, and distribution behavior. Phase 6 defines contracts only; HTML generation, ELK layout, publication, and browser behavior belong to Roadmap phase 7.
+`assets/adp-management-panel-v1.schema.json` is the machine contract. Fixtures under `assets/fixtures/panel-contract-v1/` freeze canonical mapping, identities, recovery, safe embedding, and distribution behavior. The production renderer publishes the validated model as immutable JSON and self-contained HTML.
 
 ## Ownership and allowed transformations
 
@@ -33,10 +33,12 @@ Every view declares both `quantitative-progress` and `flow-progress`. The modes 
 ## Selection contract
 
 - History selection is an ordered list of immutable `program_status_snapshot_id` values. Selection fails closed when a requested snapshot is absent; a missing optional predecessor may degrade period comparison but may not be represented as zero.
-- Future selection is an ordered list of canonical forecast `horizon_date` values already present in progress v2. Missing dates are not filled from planned dates.
+- Future selection is an ordered list of canonical forecast `horizon_date` values already present in the progress forecast series. Missing dates are not filled from planned dates.
 - Project-lead flow selection names canonical node and edge IDs from one `flow_graph_id`; edges survive only when both endpoints survive.
 - FDE and business selections copy the scenario distillate's `flow_selection_id`, scope, nodes, edges, state, and allocations. The panel may crop further by an explicit allowlist but may not widen the meeting-pack selection.
 - A selection records its parent canonical identity and stable selection identity. A changed history set, future set, meeting pack, flow graph, or flow scope must change the panel model identity.
+
+Canonical-memory compose requires one explicit selection-policy JSON chosen by the owning workflow or user. It contains `policy_version: 1.0.0`, the matching `flow_graph_id`, ordered `history_snapshot_ids`, `project_lead.scope_id`, `project_lead.node_ids`, `project_lead.edge_ids`, `shareable.visible_node_ids`, and `shareable.visible_edge_ids`. The input audit seals the policy file; runtime code validates identity, membership, uniqueness, edge closure, and history order but never chooses scope, reporting periods, or visibility.
 
 ## Identity layers
 
@@ -46,6 +48,8 @@ Identity input uses UTF-8 canonical JSON with lexicographically sorted object ke
 - `panel_model_id` owns selected canonical content and source identities: status snapshot, roadmap fingerprint, flow graph identity layers, meeting pack IDs, history snapshot IDs, future horizons, flow selections, locale, distribution profile, redaction manifest, and exact allowlisted model data. It excludes generated coordinates and artifact timestamps.
 - `panel_id` owns `panel_model_id`, `layout_id`, schema/generator version, source fingerprints, and audit IDs. A layout change therefore changes both `layout_id` and `panel_id` without changing canonical graph identities.
 
+`panel_id` is a logical identity and remains `sha256:<64 lowercase hex>` in the model and manifest. Its filesystem basename is the validated mapping `sha256-<64 lowercase hex>`. Every new bundle, HTML archive, audit target, and returned artifact path uses that safe basename.
+
 The same normalized inputs and explicit generation timestamp yield the same model and all IDs. A status, flow state/overlay, meeting pack, selected history/future horizon, distribution profile, or scope change cannot collide. A topology or flow-scope change also changes layout identity. Locale, node dimensions, ELK version/hash/config, and distribution layout inputs never alter canonical source identities.
 
 ## Manifest and artifact contract
@@ -54,11 +58,11 @@ The embedded manifest and immutable panel bundle repeat and agree on:
 
 `panel_schema_version`, `panel_model_id`, `panel_id`, `generated_at`, `as_of`, `reporting_period`, `baseline_revision`, `program_status_snapshot_id`, `roadmap_fingerprint`, `topology_id`, `state_snapshot_id`, `overlay_snapshot_id`, `flow_graph_id`, meeting pack IDs, history snapshot IDs, future horizons, flow selection IDs, source fingerprints, input/artifact audit IDs, locale/fallback metadata, generator version, `layout_id`, ELK/layout resource metadata, distribution profile, redaction manifest, and recovery status.
 
-Phase 7 publication must first create the immutable bundle JSON idempotently, then use one atomic replace of `views/management-panel/index.html` as the current-view commit point. Optional HTML archives use `panel_id`; same ID with different bytes is a collision. Those write mechanics are not implemented in phase 6.
+Publication validates the safe bundle and exact POSIX legacy `sha256:<64hex>.json` candidate before audit or write. A matching legacy-only bundle supplies the exact stored model, timestamp, and bytes for the new safe twin; conflicting bytes or identities fail closed. Publication then creates the safe immutable bundle idempotently and uses one atomic replace of `views/management-panel/index.html` as the current-view commit point. Optional HTML archives use the safe basename. Inspect prefers the safe bundle and may fall back to the legacy candidate only when the safe path is absent; legacy artifacts remain read-only.
 
 The fixed ELK resource declares `engine_sha256_mode: utf8-lf`. Resource verification and embedding decode UTF-8 and normalize checkout CRLF to LF before hashing; no other content transformation is accepted. This keeps layout and panel identities stable across Git checkout platforms without weakening the pinned-content check.
 
-Roadmap phase 8 adds an external, read-only `adp-state-audit` boundary: a sealed pre-render audit ID joins `input_audit_ids`, and a post-render audit validates the staged bundle and HTML before the phase 7 commit mechanics run. The post-render audit remains external to the manifest so artifact bytes do not depend circularly on their own audit hash.
+An external, read-only `adp-state-audit` boundary seals canonical inputs before compose and validates the staged bundle, HTML, and safe publication targets before publication. The post-render audit remains external to the manifest so artifact bytes do not depend circularly on their own audit hash.
 
 ## Localization
 
@@ -66,7 +70,7 @@ Roadmap phase 8 adds an external, read-only `adp-state-audit` boundary: a sealed
 
 ## Safe embedding
 
-The phase 7 renderer must serialize model JSON, then escape `<`, `>`, `&`, U+2028, and U+2029 before placing it in a non-executable JSON script element. This makes every case-insensitive `</script` sequence inert. Source text reaches HTML/SVG only through DOM `textContent`; SVG uses allowlisted elements and attributes and forbids `foreignObject`, event attributes, external `href`, and source-provided CSS. URL hash state is versioned and allowlisted and never stores source text or absolute paths.
+The renderer serializes model JSON, then escapes `<`, `>`, `&`, U+2028, and U+2029 before placing it in a non-executable JSON script element. This makes every case-insensitive `</script` sequence inert. Source text reaches HTML/SVG only through DOM `textContent`; SVG uses allowlisted elements and attributes and forbids `foreignObject`, event attributes, external `href`, and source-provided CSS. URL hash state is versioned and allowlisted and never stores source text or absolute paths.
 
 ## Distribution redaction
 

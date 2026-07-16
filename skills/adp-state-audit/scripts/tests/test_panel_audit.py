@@ -27,7 +27,6 @@ class PanelAuditTests(unittest.TestCase):
         args = Namespace(
             generated_at="2026-07-13T09:05:00Z",
             locale="zh-CN",
-            history_limit=12,
         )
         inputs["request"] = management_panel.build_request(inputs, resource, args, profile)
         return inputs
@@ -250,8 +249,8 @@ class PanelAuditTests(unittest.TestCase):
         input_audit, model, bundle, rendered = self.candidate(inputs)
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            bundle_path = root / f"{model['panel_id']}.json"
-            html_path = root / f"{model['panel_id']}.html"
+            bundle_path = panel_model.panel_artifact_path(root, model["panel_id"], ".json")
+            html_path = panel_model.panel_artifact_path(root, model["panel_id"], ".html")
             bundle_path.write_bytes(bundle)
             html_path.write_bytes(rendered)
             before = html_path.read_bytes()
@@ -339,8 +338,8 @@ class PanelAuditTests(unittest.TestCase):
             self.inject_input_audit(inputs, input_audit)
             model = panel_model.compose_panel(inputs)
             _, elk_js = management_panel.verify_layout_resource()
-            model_path = root / f"{model['panel_id']}.json"
-            html_path = root / f"{model['panel_id']}.html"
+            model_path = panel_model.panel_artifact_path(root, model["panel_id"], ".json")
+            html_path = panel_model.panel_artifact_path(root, model["panel_id"], ".html")
             model_path.write_bytes(management_panel.canonical_json_bytes(model))
             html_path.write_bytes(management_panel.render_html(model, elk_js, "project-lead"))
             post = subprocess.run(

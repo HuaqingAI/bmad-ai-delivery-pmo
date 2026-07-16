@@ -5,17 +5,17 @@
 # ///
 """Production panel-model composer for canonical ADP projections.
 
-The module deliberately preserves the phase 6 contract implementation.  It
-selects, orders, redacts, and binds canonical values; it never derives business
-status, progress, topology, overlay counts, or branch state.
+It selects, orders, redacts, and binds canonical values; it never derives
+business status, progress, topology, overlay counts, or branch state.
 """
 
 from __future__ import annotations
 
-import copy
 import argparse
+import copy
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -24,6 +24,7 @@ from typing import Any
 
 PANEL_SCHEMA_VERSION = "1.0.0"
 PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.3"
+PANEL_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SKILLS = SKILL_ROOT.parent
 FIXTURE_ROOT = SKILL_ROOT / "assets/fixtures/panel-contract-v1"
@@ -89,6 +90,31 @@ def load_json(path: Path) -> Any:
 def canonical_hash(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def panel_artifact_basename(panel_id: str) -> str:
+    if not isinstance(panel_id, str) or not PANEL_ID_RE.fullmatch(panel_id):
+        raise ValueError("panel_id must match sha256:<64 lowercase hex>")
+    return "sha256-" + panel_id.removeprefix("sha256:")
+
+
+def panel_artifact_path(root: Path, panel_id: str, suffix: str) -> Path:
+    if suffix not in {".json", ".html"}:
+        raise ValueError("panel artifact suffix must be .json or .html")
+    return root / f"{panel_artifact_basename(panel_id)}{suffix}"
+
+
+def panel_bundle_paths(root: Path, panel_id: str) -> tuple[Path, Path | None]:
+    safe_path = panel_artifact_path(root, panel_id, ".json")
+    legacy_path = None if os.name == "nt" else root / f"{panel_id}.json"
+    return safe_path, legacy_path
+
+
+def existing_panel_bundle_path(root: Path, panel_id: str) -> Path:
+    safe_path, legacy_path = panel_bundle_paths(root, panel_id)
+    if safe_path.exists() or legacy_path is None or not legacy_path.exists():
+        return safe_path
+    return legacy_path
 
 
 def safe_json_for_script(value: Any) -> str:
@@ -703,11 +729,20 @@ def compose_panel(inputs: dict[str, Any]) -> dict[str, Any]:
     graph = inputs["flow_graph"]
     packs = inputs["meeting_packs"]
     request = inputs["request"]
+    project_scope_id = request["project_lead_scope_id"]
+    scope_matches = [
+        item for item in graph["overlays"]["scopes"] if item["scope_id"] == project_scope_id
+    ]
+    if len(scope_matches) != 1:
+        raise ValueError(
+            f"project-lead scope must match exactly one canonical flow scope: {project_scope_id}"
+        )
 
     project_selection_id = canonical_hash(
         {
             "flow_graph_id": graph["flow_graph_id"],
             "scenario": "project-lead",
+            "scope_id": project_scope_id,
             "node_ids": sorted(request["project_lead_node_ids"]),
             "edge_ids": sorted(request["project_lead_edge_ids"]),
         }
@@ -718,7 +753,7 @@ def compose_panel(inputs: dict[str, Any]) -> dict[str, Any]:
             project_selection_id,
             request["project_lead_node_ids"],
             request["project_lead_edge_ids"],
-            "ACTIVE-2026-07-13",
+            project_scope_id,
             "project-lead",
         ),
         "fde-morning": copy.deepcopy(packs["fde-morning"]["flow_subgraph"]),
@@ -1011,7 +1046,7 @@ def binding_errors(model: dict[str, Any], inputs: dict[str, Any]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Compose and schema-validate a phase 6 ADP panel-model input bundle.")
+    parser = argparse.ArgumentParser(description="Compose and schema-validate an ADP panel-model input bundle.")
     parser.add_argument("input_bundle", help="Canonical panel input bundle including the resolved request.")
     parser.add_argument("--output", help="Write the composed model JSON instead of stdout.")
     args = parser.parse_args(argv)

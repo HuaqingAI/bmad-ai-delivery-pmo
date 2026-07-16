@@ -1,0 +1,48 @@
+name: ADP management panel
+
+on:
+  push:
+    paths:
+      - ".github/workflows/adp-management-panel.yml"
+      - "skills/adp-management-panel/**"
+      - "skills/adp-state-audit/**"
+      - "skills/adp-agent-program-lead/**"
+      - "skills/adp-flow-graph/**"
+      - "skills/adp-program-status/**"
+      - "skills/adp-roadmap-sync/**"
+      - "skills/adp-meeting-pack/**"
+      - "skills/adp-setup/**"
+  pull_request:
+    paths:
+      - ".github/workflows/adp-management-panel.yml"
+      - "skills/adp-management-panel/**"
+      - "skills/adp-state-audit/**"
+      - "skills/adp-agent-program-lead/**"
+      - "skills/adp-flow-graph/**"
+      - "skills/adp-program-status/**"
+      - "skills/adp-roadmap-sync/**"
+      - "skills/adp-meeting-pack/**"
+      - "skills/adp-setup/**"
+
+jobs:
+  cross-platform:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Run management panel journeys
+        run: uv run python -m unittest discover -s skills/adp-management-panel/scripts/tests -p "test_*.py"
+      - name: Run panel audit gates
+        run: uv run python -m unittest discover -s skills/adp-state-audit/scripts/tests -p "test_panel_audit.py"
+      - name: Run Program Lead panel inspection
+        run: uv run python -m unittest discover -s skills/adp-agent-program-lead/scripts/tests -p "test_consume_program_status.py"

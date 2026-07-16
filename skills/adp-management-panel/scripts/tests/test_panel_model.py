@@ -104,6 +104,10 @@ class ProductionPanelModelTests(unittest.TestCase):
 
         self.assertEqual(model["data"]["status"]["snapshot_id"], inputs["program_status"]["snapshot_id"])
         self.assertEqual(model["data"]["status"]["progress"], inputs["program_status"]["progress"])
+        self.assertEqual(
+            inputs["request"]["project_lead_scope_id"],
+            model["data"]["flows"]["project-lead"]["scope_id"],
+        )
         for view_id, flow in model["data"]["flows"].items():
             for state in flow["node_states"]:
                 self.assertEqual(state, graph_states[state["node_id"]], view_id)

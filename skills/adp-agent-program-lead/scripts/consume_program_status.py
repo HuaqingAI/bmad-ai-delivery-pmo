@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
@@ -20,6 +21,7 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_ROOT = SKILL_ROOT.parent
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_PROGRAM_STATUS_SCRIPT = SKILLS_ROOT / "adp-program-status/scripts/program_status.py"
+PANEL_MODEL_SCRIPT = SKILLS_ROOT / "adp-management-panel/scripts/panel_model.py"
 STATUS_VALUES = {"on-plan", "at-risk", "off-plan", "indeterminate"}
 CONFIDENCE_VALUES = {"high", "medium", "low", "unknown"}
 INTENTS = {
@@ -446,7 +448,17 @@ def inspect_panel(memory_root: Path) -> dict[str, Any]:
         return {"ok": False, "reason": f"current management panel is invalid: {exc}"}
     if manifest != model.get("manifest"):
         return {"ok": False, "reason": "current panel manifest differs from its embedded model"}
-    bundle = memory_root / "snapshots/management-panel" / f"{manifest.get('panel_id')}.json"
+    spec = importlib.util.spec_from_file_location("adp_program_lead_panel_model", PANEL_MODEL_SCRIPT)
+    if spec is None or spec.loader is None:
+        return {"ok": False, "reason": "management panel artifact contract is unavailable"}
+    panel_model_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(panel_model_module)
+    try:
+        bundle = panel_model_module.existing_panel_bundle_path(
+            memory_root / "snapshots/management-panel", manifest.get("panel_id")
+        )
+    except ValueError as exc:
+        return {"ok": False, "reason": f"current management panel is invalid: {exc}"}
     if not bundle.is_file() or load_json(bundle) != model:
         return {"ok": False, "reason": "current panel does not match its immutable bundle"}
     return {

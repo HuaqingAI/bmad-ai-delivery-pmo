@@ -124,6 +124,7 @@
     "distribution_profile": "internal-full",
     "history_snapshot_ids": ["ps-history-2026-07-06"],
     "future_horizon_dates": ["2026-07-20"],
+    "project_lead_scope_id": "ACTIVE-2026-07-13",
     "project_lead_node_ids": ["M-A", "M-B", "G-MERGE"],
     "project_lead_edge_ids": ["E-A-MERGE", "E-B-MERGE"],
     "layout": {

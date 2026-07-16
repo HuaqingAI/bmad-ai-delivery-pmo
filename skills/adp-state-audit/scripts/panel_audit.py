@@ -594,6 +594,7 @@ def audit_panel_artifacts(
     input_audit: dict[str, Any] | None = None,
     source_inputs: dict[str, Any] | None = None,
     publication_targets: dict[str, str | Path] | None = None,
+    allow_legacy_bundle: bool = False,
     resource_path: Path = RESOURCE_PATH,
     panel_root: Path = PANEL_ROOT,
 ) -> dict[str, Any]:
@@ -739,6 +740,13 @@ def audit_panel_artifacts(
             if any(item in exposed_values for item in internal_ids if item):
                 findings.append(_finding("panel.artifact.redaction.identity-leak", "blocking", "blocked", "shareable data exposes internal graph identity", "panel-model", "adp-management-panel"))
 
+    expected_basename = None
+    if panel_model_module is not None:
+        try:
+            expected_basename = panel_model_module.panel_artifact_basename(manifest.get("panel_id"))
+        except ValueError as exc:
+            findings.append(_finding("panel.artifact.archive.identity-mismatch", "blocking", "blocked", str(exc), "panel-manifest", "adp-management-panel"))
+
     expected_payloads = {"bundle": bundle_bytes, "html": html_bytes}
     for name, raw_path in (publication_targets or {}).items():
         path = Path(raw_path)
@@ -747,9 +755,18 @@ def audit_panel_artifacts(
             continue
         if path.exists() and path.read_bytes() != expected:
             findings.append(_finding("panel.artifact.immutable-collision", "blocking", "blocked", f"publication target already exists with different bytes: {path}", str(path), "adp-management-panel"))
-        if name == "bundle" and path.name != f"{manifest.get('panel_id')}.json":
-            findings.append(_finding("panel.artifact.archive.identity-mismatch", "blocking", "blocked", "immutable bundle filename does not match panel_id", str(path), "adp-management-panel"))
-        if name == "html" and "snapshots/management-panel" in path.as_posix() and path.name != f"{manifest.get('panel_id')}.html":
+        if name == "bundle" and expected_basename is not None:
+            safe_name = f"{expected_basename}.json"
+            legacy_name = f"{manifest.get('panel_id')}.json"
+            legacy_read = (
+                allow_legacy_bundle
+                and os.name != "nt"
+                and path.name == legacy_name
+                and not path.with_name(safe_name).exists()
+            )
+            if path.name != safe_name and not legacy_read:
+                findings.append(_finding("panel.artifact.archive.identity-mismatch", "blocking", "blocked", "immutable bundle filename does not match the filesystem-safe panel basename", str(path), "adp-management-panel"))
+        if name == "html" and expected_basename is not None and "snapshots/management-panel" in path.as_posix() and path.name != f"{expected_basename}.html":
             findings.append(_finding("panel.artifact.archive.identity-mismatch", "blocking", "blocked", "immutable HTML filename does not match panel_id", str(path), "adp-management-panel"))
 
     for name, payload in before_targets.items():

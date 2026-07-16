@@ -36,6 +36,25 @@ ARTIFACT_AUDIT_PATH = SKILL_ROOT.parent / "adp-state-audit/scripts/audit_state.p
 GENERATOR_VERSION = panel_model.PANEL_GENERATOR_VERSION
 VIEW_IDS = ("project-lead", "fde-morning", "business-biweekly")
 PROFILE_IDS = ("internal-full", "shareable-summary")
+MEETING_LIFECYCLES = {"current-derived", "pre-meeting-snapshot", "post-sync-official", "sync-failed"}
+SELECTION_POLICY_VERSION = "1.0.0"
+SHAREABLE_REMOVED_FIELDS = (
+    "allocations",
+    "counts",
+    "id",
+    "lineage",
+    "milestone_ids",
+    "next_milestone_ids",
+    "owner",
+    "paths",
+    "selected_edge_ids",
+    "selected_node_ids",
+    "source",
+    "source_fingerprints",
+    "source_refs",
+    "sources",
+    "value_lineage",
+)
 
 
 class PanelError(RuntimeError):
@@ -47,11 +66,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("project_root", help="Project root containing ADP memory.")
     parser.add_argument("operation", nargs="?", choices=("refresh", "inspect", "archive"), default="refresh")
     parser.add_argument("--memory-root", default=DEFAULT_MEMORY_ROOT)
-    parser.add_argument("--fixture", action="store_true", help="Use the frozen phase 6 source fixture (tests only).")
+    parser.add_argument("--fixture", action="store_true", help="Use the frozen panel-contract source fixture (tests only).")
     parser.add_argument("--input-bundle", help="Fully composed canonical input bundle override.")
+    parser.add_argument(
+        "--selection-policy",
+        help="Explicit history, project-lead scope, and shareable allowlist JSON for canonical-memory compose.",
+    )
     parser.add_argument("--locale", default="zh-CN")
     parser.add_argument("--default-view", choices=VIEW_IDS, default="project-lead")
-    parser.add_argument("--history-limit", type=int, default=12)
     parser.add_argument("--max-age-days", type=int, default=7)
     parser.add_argument("--distribution-profile", choices=PROFILE_IDS)
     parser.add_argument("--expected-panel-id")
@@ -220,11 +242,54 @@ def attach_artifact_audit(
     return result, audit_path
 
 
-def latest_json(root: Path, scenario: str) -> Path:
-    candidates = [path for path in root.rglob("*.json") if scenario in str(path).lower()]
+def structured_datetime(value: Any, source: Path) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise PanelError(f"meeting pack generated_at is missing: {source}")
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise PanelError(f"meeting pack generated_at is invalid: {source}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def resolve_current_meeting_pack(root: Path, scenario: str) -> tuple[Path, dict[str, Any]]:
+    candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
+    for path in sorted((root / scenario).rglob("*.json")):
+        pack = load_json(path)
+        if not isinstance(pack, dict):
+            continue
+        metadata = pack.get("panel_metadata") if isinstance(pack.get("panel_metadata"), dict) else {}
+        declared_scenario = pack.get("scenario") or metadata.get("scenario")
+        if declared_scenario != scenario:
+            continue
+        if pack.get("scenario") and metadata.get("scenario") and pack["scenario"] != metadata["scenario"]:
+            raise PanelError(f"meeting pack scenario metadata conflicts: {path}")
+        pack_id = pack.get("meeting_pack_id") or metadata.get("meeting_pack_id")
+        if not isinstance(pack_id, str) or not pack_id:
+            raise PanelError(f"meeting pack identity is missing: {path}")
+        if pack.get("meeting_pack_id") and metadata.get("meeting_pack_id") and pack["meeting_pack_id"] != metadata["meeting_pack_id"]:
+            raise PanelError(f"meeting pack identity metadata conflicts: {path}")
+        lifecycle = pack.get("lifecycle") or metadata.get("lifecycle")
+        if lifecycle not in MEETING_LIFECYCLES:
+            raise PanelError(f"meeting pack lifecycle metadata is invalid: {path}")
+        if pack.get("lifecycle") and metadata.get("lifecycle") and pack["lifecycle"] != metadata["lifecycle"]:
+            raise PanelError(f"meeting pack lifecycle metadata conflicts: {path}")
+        generated_at = pack.get("generated_at") or metadata.get("generated_at")
+        candidates.append((structured_datetime(generated_at, path), path, pack))
     if not candidates:
-        raise PanelError(f"canonical {scenario} meeting pack is missing under {root}")
-    return max(candidates, key=lambda path: (path.stat().st_mtime_ns, str(path)))
+        raise PanelError(f"canonical {scenario} meeting pack is missing under {root / scenario}")
+    latest_generated_at = max(item[0] for item in candidates)
+    current = [item for item in candidates if item[0] == latest_generated_at]
+    if len(current) != 1:
+        paths = ", ".join(str(item[1]) for item in current)
+        raise PanelError(f"canonical {scenario} meeting pack identity is ambiguous at {latest_generated_at.isoformat()}: {paths}")
+    _, path, pack = current[0]
+    return path, pack
 
 
 def history_projection(snapshot: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -299,7 +364,7 @@ def enrich_pack(pack: dict[str, Any], memory_root: Path | None = None) -> dict[s
         raise PanelError("meeting pack lacks panel contract fields: " + ", ".join(missing))
     if result["readiness"] not in {"ready", "degraded", "blocked"}:
         raise PanelError("meeting pack readiness is invalid")
-    if result["lifecycle"] not in {"current-derived", "pre-meeting-snapshot", "post-sync-official", "sync-failed"}:
+    if result["lifecycle"] not in MEETING_LIFECYCLES:
         raise PanelError("meeting pack lifecycle is invalid")
     if result["lifecycle"] == "post-sync-official":
         official = result.get("official_panel_archive")
@@ -330,7 +395,28 @@ def meeting_receipt_lifecycle(memory_root: Path, meeting_pack_id: str) -> dict[s
     return {"lifecycle": "current-derived"}
 
 
-def load_memory_inputs(memory_root: Path, history_limit: int) -> dict[str, Any]:
+def history_snapshot_index(
+    memory_root: Path, current_snapshot_id: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, Path]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    paths: dict[str, Path] = {}
+    for path in (memory_root / "snapshots/program-status").glob("*.json"):
+        item = load_json(path)
+        snapshot_id = item.get("snapshot_id")
+        if not isinstance(snapshot_id, str) or not snapshot_id:
+            raise PanelError(f"program-status history lacks snapshot_id: {path}")
+        if snapshot_id == current_snapshot_id:
+            continue
+        if snapshot_id in snapshots:
+            raise PanelError(f"program-status history snapshot_id is ambiguous: {snapshot_id}")
+        snapshots[snapshot_id] = history_projection(item, path)
+        paths[snapshot_id] = path
+    return snapshots, paths
+
+
+def load_memory_inputs(
+    memory_root: Path, policy: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
     status_path = memory_root / "views/program-status.json"
     roadmap_path = memory_root / "views/roadmap.json"
     graph_path = memory_root / "views/flow-graph.json"
@@ -342,31 +428,27 @@ def load_memory_inputs(memory_root: Path, history_limit: int) -> dict[str, Any]:
         memory_root, roadmap_path, load_json(roadmap_path), "roadmap"
     )
     graph = load_json(graph_path)
-    pack_paths = {scenario: latest_json(packs_root, scenario) for scenario in ("fde-morning", "business-biweekly")}
+    resolved_packs = {
+        scenario: resolve_current_meeting_pack(packs_root, scenario)
+        for scenario in ("fde-morning", "business-biweekly")
+    }
+    pack_paths = {scenario: resolved[0] for scenario, resolved in resolved_packs.items()}
     pack_audits: dict[str, Path] = {}
     packs: dict[str, dict[str, Any]] = {}
     for scenario, path in pack_paths.items():
         attached, pack_audits[scenario] = attach_artifact_audit(
-            memory_root, path, load_json(path), f"{scenario}-meeting-pack"
+            memory_root, path, resolved_packs[scenario][1], f"{scenario}-meeting-pack"
         )
         packs[scenario] = enrich_pack(attached, memory_root)
-    history: list[dict[str, Any]] = []
-    history_paths: list[Path] = []
-    for path in sorted((memory_root / "snapshots/program-status").glob("*.json"), reverse=True):
-        item = load_json(path)
-        if item.get("snapshot_id") == status.get("snapshot_id"):
-            continue
-        history.append(history_projection(item, path))
-        history_paths.append(path)
-        if len(history) >= history_limit:
-            break
-    return {
+    history_by_id, history_paths_by_id = history_snapshot_index(memory_root, status["snapshot_id"])
+    selection = validate_selection_policy(graph, policy, set(history_by_id))
+    history_ids = selection["history_snapshot_ids"]
+    inputs = {
         "program_status": status,
         "roadmap": roadmap,
         "flow_graph": graph,
         "meeting_packs": packs,
-        "history": history,
-        "shareable_policy": default_shareable_policy(graph),
+        "history": [history_by_id[snapshot_id] for snapshot_id in history_ids],
         "_panel_source_paths": {
             "program-status": str(status_path),
             "program-status-artifact-audit": str(status_audit_path),
@@ -375,57 +457,142 @@ def load_memory_inputs(memory_root: Path, history_limit: int) -> dict[str, Any]:
             "flow-graph": str(graph_path),
             **{f"{scenario}-meeting-pack": str(path) for scenario, path in pack_paths.items()},
             **{f"{scenario}-meeting-pack-artifact-audit": str(path) for scenario, path in pack_audits.items()},
-            **{f"history-{index:03d}": str(path) for index, path in enumerate(history_paths, start=1)},
+            **{
+                f"history-{index:03d}": str(history_paths_by_id[snapshot_id])
+                for index, snapshot_id in enumerate(history_ids, start=1)
+            },
+        },
+    }
+    return inputs, selection
+
+
+def validated_ids(
+    value: Any, label: str, available: set[str], *, preserve_order: bool = False
+) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise PanelError(f"selection policy {label} must be an array of non-empty canonical IDs")
+    if len(value) != len(set(value)):
+        raise PanelError(f"selection policy {label} contains duplicate IDs")
+    unknown = sorted(set(value) - available)
+    if unknown:
+        raise PanelError(f"selection policy {label} contains unknown IDs: {', '.join(unknown)}")
+    return list(value) if preserve_order else sorted(value)
+
+
+def validate_selection_policy(
+    graph: dict[str, Any], policy: Any, available_history_ids: set[str]
+) -> dict[str, Any]:
+    if not isinstance(policy, dict) or policy.get("policy_version") != SELECTION_POLICY_VERSION:
+        raise PanelError(f"selection policy must use policy_version {SELECTION_POLICY_VERSION}")
+    if policy.get("flow_graph_id") != graph.get("flow_graph_id"):
+        raise PanelError("selection policy flow_graph_id does not match the canonical flow graph")
+    project = policy.get("project_lead") if isinstance(policy.get("project_lead"), dict) else {}
+    shareable = policy.get("shareable") if isinstance(policy.get("shareable"), dict) else {}
+    graph_nodes = {
+        item["node_id"] for item in graph.get("topology", {}).get("nodes", []) if item.get("node_id")
+    }
+    graph_edges = {
+        item["edge_id"]: item for item in graph.get("topology", {}).get("edges", []) if item.get("edge_id")
+    }
+    graph_scope_values = [
+        item["scope_id"]
+        for item in graph.get("overlays", {}).get("scopes", [])
+        if isinstance(item, dict) and isinstance(item.get("scope_id"), str) and item["scope_id"]
+    ]
+    graph_scope_ids = set(graph_scope_values)
+    if len(graph_scope_values) != len(graph_scope_ids):
+        raise PanelError("canonical flow graph contains duplicate overlay scope IDs")
+    history_snapshot_ids = validated_ids(
+        policy.get("history_snapshot_ids"),
+        "history_snapshot_ids",
+        available_history_ids,
+        preserve_order=True,
+    )
+    project_scope_id = project.get("scope_id")
+    if not isinstance(project_scope_id, str) or not project_scope_id:
+        raise PanelError("selection policy project_lead.scope_id must be a non-empty canonical ID")
+    if project_scope_id not in graph_scope_ids:
+        raise PanelError(f"selection policy project_lead.scope_id is unknown: {project_scope_id}")
+    project_nodes = validated_ids(project.get("node_ids"), "project_lead.node_ids", graph_nodes)
+    project_edges = validated_ids(project.get("edge_ids"), "project_lead.edge_ids", set(graph_edges))
+    visible_nodes = validated_ids(shareable.get("visible_node_ids"), "shareable.visible_node_ids", graph_nodes)
+    visible_edges = validated_ids(shareable.get("visible_edge_ids"), "shareable.visible_edge_ids", set(graph_edges))
+    for label, node_ids, edge_ids in (
+        ("project_lead", set(project_nodes), project_edges),
+        ("shareable", set(visible_nodes), visible_edges),
+    ):
+        open_edges = [
+            edge_id
+            for edge_id in edge_ids
+            if graph_edges[edge_id].get("predecessor") not in node_ids
+            or graph_edges[edge_id].get("target") not in node_ids
+        ]
+        if open_edges:
+            raise PanelError(f"selection policy {label} edges are not closed over selected nodes: {', '.join(open_edges)}")
+    return {
+        "history_snapshot_ids": history_snapshot_ids,
+        "project_lead_scope_id": project_scope_id,
+        "project_lead_node_ids": project_nodes,
+        "project_lead_edge_ids": project_edges,
+        "shareable_policy": {
+            "policy_version": policy["policy_version"],
+            "visible_node_ids": visible_nodes,
+            "visible_edge_ids": visible_edges,
+            "removed_fields": list(SHAREABLE_REMOVED_FIELDS),
         },
     }
 
 
-def default_shareable_policy(graph: dict[str, Any]) -> dict[str, Any]:
-    nodes = graph.get("topology", {}).get("nodes", [])
-    visible_nodes = [item["node_id"] for item in nodes if item.get("lane", {}).get("lane_type") == "program"]
-    if not visible_nodes:
-        visible_nodes = [item["node_id"] for item in nodes[:40] if item.get("node_id")]
-    node_set = set(visible_nodes)
-    visible_edges = [
-        item["edge_id"]
-        for item in graph.get("topology", {}).get("edges", [])
-        if item.get("predecessor") in node_set and item.get("target") in node_set
-    ]
-    return {
-        "policy_version": "1.0.0",
-        "visible_node_ids": visible_nodes,
-        "visible_edge_ids": visible_edges,
-        "removed_fields": [
-            "id", "owner", "counts", "allocations", "source", "sources", "source_fingerprints",
-            "source_refs", "paths", "lineage", "value_lineage", "milestone_ids", "next_milestone_ids",
-            "selected_node_ids", "selected_edge_ids",
-        ],
+def embedded_selection_policy(inputs: dict[str, Any]) -> dict[str, Any]:
+    request = inputs.get("request") if isinstance(inputs.get("request"), dict) else {}
+    shareable = inputs.get("shareable_policy") if isinstance(inputs.get("shareable_policy"), dict) else {}
+    history_ids = {
+        item["snapshot_id"]
+        for item in inputs.get("history", [])
+        if isinstance(item, dict) and isinstance(item.get("snapshot_id"), str) and item["snapshot_id"]
     }
+    return validate_selection_policy(
+        inputs["flow_graph"],
+        {
+            "policy_version": shareable.get("policy_version"),
+            "flow_graph_id": inputs["flow_graph"].get("flow_graph_id"),
+            "history_snapshot_ids": request.get("history_snapshot_ids"),
+            "project_lead": {
+                "scope_id": request.get("project_lead_scope_id"),
+                "node_ids": request.get("project_lead_node_ids"),
+                "edge_ids": request.get("project_lead_edge_ids"),
+            },
+            "shareable": {
+                "visible_node_ids": shareable.get("visible_node_ids"),
+                "visible_edge_ids": shareable.get("visible_edge_ids"),
+            },
+        },
+        history_ids,
+    )
 
 
 def build_request(
-    inputs: dict[str, Any], resource: dict[str, Any], args: argparse.Namespace, profile: str
+    inputs: dict[str, Any],
+    resource: dict[str, Any],
+    args: argparse.Namespace,
+    profile: str,
+    selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status = inputs["program_status"]
     graph = inputs["flow_graph"]
     forecast = status.get("progress", {}).get("overall", {}).get("series", {}).get("forecast_points", [])
     generated_at = args.generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    node_ids = [item["node_id"] for item in graph.get("topology", {}).get("nodes", []) if item.get("node_id")][:40]
-    node_set = set(node_ids)
-    edge_ids = [
-        item["edge_id"]
-        for item in graph.get("topology", {}).get("edges", [])
-        if item.get("predecessor") in node_set and item.get("target") in node_set
-    ]
+    selection = selection or embedded_selection_policy(inputs)
     config_hash = panel_model.canonical_hash(resource["options"])
     return {
         "generated_at": generated_at,
         "locale": args.locale,
         "distribution_profile": profile,
-        "history_snapshot_ids": [item["snapshot_id"] for item in inputs.get("history", [])[: args.history_limit]],
+        "history_snapshot_ids": list(selection["history_snapshot_ids"]),
         "future_horizon_dates": [item["horizon_date"] for item in forecast if item.get("horizon_date")],
-        "project_lead_node_ids": node_ids,
-        "project_lead_edge_ids": edge_ids,
+        "project_lead_scope_id": selection["project_lead_scope_id"],
+        "project_lead_node_ids": selection["project_lead_node_ids"],
+        "project_lead_edge_ids": selection["project_lead_edge_ids"],
         "layout": {
             "layout_contract_version": resource["layout_contract_version"],
             "engine": resource["engine"],
@@ -441,14 +608,25 @@ def build_request(
 def load_inputs(args: argparse.Namespace, resource: dict[str, Any], profile: str, memory_root: Path) -> dict[str, Any]:
     if args.fixture:
         inputs = panel_model.load_source_fixture()
+        selection = embedded_selection_policy(inputs)
     elif args.input_bundle:
         input_path = Path(args.input_bundle).expanduser().resolve()
         inputs = load_json(input_path)
         inputs["_panel_source_paths"] = {"input-bundle": str(input_path)}
+        selection = embedded_selection_policy(inputs)
     else:
-        inputs = load_memory_inputs(memory_root, args.history_limit)
+        if not args.selection_policy:
+            raise PanelError("canonical-memory compose requires --selection-policy")
+        policy_path = Path(args.selection_policy).expanduser()
+        if not policy_path.is_absolute():
+            policy_path = Path(args.project_root).expanduser().resolve() / policy_path
+        policy_path = policy_path.resolve()
+        policy = load_json(policy_path)
+        inputs, selection = load_memory_inputs(memory_root, policy)
+        inputs["_panel_source_paths"]["panel-selection-policy"] = str(policy_path)
     inputs = copy.deepcopy(inputs)
-    inputs["request"] = build_request(inputs, resource, args, profile)
+    inputs["shareable_policy"] = selection["shareable_policy"]
+    inputs["request"] = build_request(inputs, resource, args, profile, selection)
     return inputs
 
 
@@ -658,6 +836,44 @@ def immutable_write(path: Path, payload: bytes) -> str:
             pass
 
 
+def panel_logical_identity(model: dict[str, Any]) -> tuple[Any, ...]:
+    manifest = model.get("manifest") if isinstance(model.get("manifest"), dict) else {}
+    return (
+        model.get("panel_id"),
+        model.get("panel_model_id"),
+        manifest.get("panel_id"),
+        manifest.get("panel_model_id"),
+        manifest.get("layout_id"),
+    )
+
+
+def resolve_existing_panel_bundle(
+    artifact_root: Path, expected_model: dict[str, Any]
+) -> tuple[Path, Path | None, dict[str, Any] | None, bytes | None]:
+    panel_id = expected_model["panel_id"]
+    safe_path, legacy_path = panel_model.panel_bundle_paths(artifact_root, panel_id)
+    existing_paths = [path for path in (safe_path, legacy_path) if path is not None and path.exists()]
+    if not existing_paths:
+        return safe_path, None, None, None
+
+    payloads = {path: path.read_bytes() for path in existing_paths}
+    if len(set(payloads.values())) != 1:
+        raise PanelError(f"immutable panel bundle collision between safe and legacy basenames: {panel_id}")
+
+    expected_identity = panel_logical_identity(expected_model)
+    models: dict[Path, dict[str, Any]] = {}
+    for path, payload in payloads.items():
+        existing = load_json(path)
+        if payload != canonical_json_bytes(existing):
+            raise PanelError(f"immutable panel bundle bytes are not canonical: {path}")
+        if panel_logical_identity(existing) != expected_identity:
+            raise PanelError(f"immutable panel bundle identity collision: {path}")
+        models[path] = existing
+
+    selected_path = safe_path if safe_path in models else existing_paths[0]
+    return safe_path, selected_path, models[selected_path], payloads[selected_path]
+
+
 def compose(
     args: argparse.Namespace, memory_root: Path, profile: str
 ) -> tuple[dict[str, Any], bytes, bytes, dict[str, Any], dict[str, Any], Path]:
@@ -668,7 +884,7 @@ def compose(
     model_errors = panel_model.validate_schema(model, load_json(panel_model.PANEL_SCHEMA_PATH))
     manifest_errors = panel_model.validate_schema(model["manifest"], load_json(panel_model.MANIFEST_SCHEMA_PATH))
     if model_errors or manifest_errors:
-        raise PanelError("composed panel violates phase 6 schema: " + "; ".join([*model_errors, *manifest_errors]))
+        raise PanelError("composed panel violates the panel schema: " + "; ".join([*model_errors, *manifest_errors]))
     bundle = canonical_json_bytes(model)
     rendered = render_html(model, elk_js, args.default_view)
     return model, bundle, rendered, inputs, input_audit, input_audit_path
@@ -698,17 +914,19 @@ def inspect_current(memory_root: Path, expected_panel_id: str | None = None) -> 
         raise PanelError("embedded manifest differs from embedded panel bundle")
     if expected_panel_id and manifest.get("panel_id") != expected_panel_id:
         raise PanelError(f"panel id mismatch: expected {expected_panel_id}, got {manifest.get('panel_id')}")
-    bundle_path = memory_root / "snapshots/management-panel" / f"{manifest['panel_id']}.json"
-    if not bundle_path.exists() or load_json(bundle_path) != model:
+    artifact_root = memory_root / "snapshots/management-panel"
+    _, bundle_path, existing_model, bundle = resolve_existing_panel_bundle(artifact_root, model)
+    if bundle_path is None or existing_model != model or bundle is None:
         raise PanelError("current HTML does not match its immutable panel bundle")
     if manifest.get("layout", {}).get("engine_sha256") != resource["engine_sha256"]:
         raise PanelError("embedded ELK metadata differs from fixed resource")
     audit_module = load_panel_audit_module()
     artifact_audit = audit_module.audit_panel_artifacts(
         model,
-        bundle_path.read_bytes(),
+        bundle,
         current.read_bytes(),
         publication_targets={"bundle": bundle_path},
+        allow_legacy_bundle=True,
     )
     artifact_audit_path = audit_module.write_audit_record(
         artifact_audit, memory_root / "audits/management-panel"
@@ -746,19 +964,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     profile = args.distribution_profile or "internal-full"
     model, bundle, rendered, inputs, input_audit, input_audit_path = compose(args, memory_root, profile)
     panel_id = model["panel_id"]
-    bundle_path = memory_root / "snapshots/management-panel" / f"{panel_id}.json"
-    if bundle_path.exists():
-        existing = load_json(bundle_path)
-        identities = ("panel_id", "panel_model_id")
-        if all(existing.get(key) == model.get(key) for key in identities) and existing.get("manifest", {}).get("layout_id") == model["manifest"]["layout_id"]:
-            model = existing
-            bundle = canonical_json_bytes(existing)
-            inputs["request"]["generated_at"] = existing["manifest"]["generated_at"]
-            _, elk_js = verify_layout_resource()
-            rendered = render_html(existing, elk_js, args.default_view)
+    artifact_root = memory_root / "snapshots/management-panel"
+    bundle_path, _, existing, existing_bundle = resolve_existing_panel_bundle(artifact_root, model)
+    if existing is not None and existing_bundle is not None:
+        model = existing
+        bundle = existing_bundle
+        inputs["request"]["generated_at"] = existing["manifest"]["generated_at"]
+        _, elk_js = verify_layout_resource()
+        rendered = render_html(existing, elk_js, args.default_view)
     publication_targets = {"bundle": bundle_path}
     if args.operation == "archive":
-        publication_targets["html"] = memory_root / "snapshots/management-panel" / f"{panel_id}.html"
+        publication_targets["html"] = panel_model.panel_artifact_path(artifact_root, panel_id, ".html")
     artifact_audit, artifact_audit_path = run_artifact_audit_gate(
         model,
         bundle,
@@ -792,7 +1008,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         result["current_html"] = str(current)
         result["current_html_sha256"] = sha256_bytes(rendered)
     else:
-        archive = memory_root / "snapshots/management-panel" / f"{panel_id}.html"
+        archive = panel_model.panel_artifact_path(artifact_root, panel_id, ".html")
         result["archive_state"] = immutable_write(archive, rendered)
         result["archive_html"] = str(archive)
         result["archive_html_sha256"] = sha256_bytes(rendered)
