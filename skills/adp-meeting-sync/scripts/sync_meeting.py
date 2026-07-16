@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
+import errno
 import hashlib
 import importlib.util
 import json
@@ -15,10 +15,16 @@ import os
 import re
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +63,13 @@ MEETING_LINEAGE_FIELDS = (
 GENERATOR_VERSION = "2.0.0"
 PANEL_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 PANEL_PROFILES = {"internal-full", "shareable-summary"}
+WINDOWS_LOCK_RETRY_SECONDS = 0.05
+WINDOWS_LOCK_CONTENTION_ERRORS = {
+    error
+    for error in (errno.EACCES, errno.EAGAIN, getattr(errno, "EDEADLK", None))
+    if error is not None
+}
+WINDOWS_LOCK_CONTENTION_WINERRORS = {33, 36}
 
 
 class MeetingSyncConflict(RuntimeError):
@@ -402,11 +415,43 @@ def meeting_sync_lock(memory_root: Path):
     lock_path = memory_root / ".meeting-sync.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        acquire_file_lock(handle)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            release_file_lock(handle)
+
+
+def acquire_file_lock(handle: BinaryIO) -> None:
+    if sys.platform != "win32":
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+
+    # msvcrt cannot lock a byte beyond the current end of the file.
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+    handle.seek(0)
+    while True:
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if (
+                exc.errno not in WINDOWS_LOCK_CONTENTION_ERRORS
+                and getattr(exc, "winerror", None) not in WINDOWS_LOCK_CONTENTION_WINERRORS
+            ):
+                raise
+            time.sleep(WINDOWS_LOCK_RETRY_SECONDS)
+
+
+def release_file_lock(handle: BinaryIO) -> None:
+    if sys.platform == "win32":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def apply_plan(

@@ -1,0 +1,34 @@
+name: ADP meeting sync
+
+on:
+  push:
+    paths:
+      - ".github/workflows/adp-meeting-sync.yml"
+      - "skills/adp-meeting-sync/**"
+      - "skills/adp-plan-baseline/scripts/adp_effective_config.py"
+  pull_request:
+    paths:
+      - ".github/workflows/adp-meeting-sync.yml"
+      - "skills/adp-meeting-sync/**"
+      - "skills/adp-plan-baseline/scripts/adp_effective_config.py"
+
+jobs:
+  cross-platform:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Smoke test the script entry point
+        run: uv run skills/adp-meeting-sync/scripts/sync_meeting.py --help
+      - name: Run meeting sync regression tests
+        run: uv run python -m unittest discover -s skills/adp-meeting-sync/scripts/tests -p "test_sync_meeting.py"

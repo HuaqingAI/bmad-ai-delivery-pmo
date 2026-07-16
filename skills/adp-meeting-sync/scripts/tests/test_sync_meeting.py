@@ -1,7 +1,9 @@
+import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,6 +13,15 @@ SCRIPT = Path(__file__).resolve().parents[1] / "sync_meeting.py"
 SKILL_ROOT = SCRIPT.parents[1]
 DEFAULT_MEETING_TEMPLATE = SKILL_ROOT / "assets" / "meeting-sync-templates" / "meeting-note.md"
 DEFAULT_PACKET_TEMPLATE = SKILL_ROOT / "assets" / "meeting-sync-templates" / "business-decision-packet.md"
+
+
+def load_sync_meeting_module():
+    spec = importlib.util.spec_from_file_location("adp_sync_meeting_test", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load sync_meeting module from {SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class SyncMeetingTests(unittest.TestCase):
@@ -119,6 +130,80 @@ class SyncMeetingTests(unittest.TestCase):
             encoding="utf-8",
         )
         return archive.relative_to(memory_root).as_posix()
+
+    def test_module_import_and_help_smoke(self) -> None:
+        module = load_sync_meeting_module()
+        self.assertTrue(callable(module.meeting_sync_lock))
+
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--dry-run", completed.stdout)
+
+    def test_lock_blocks_second_process_and_releases_after_exception(self) -> None:
+        module = load_sync_meeting_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir) / "memory"
+            ready_path = Path(temp_dir) / "child-ready"
+            acquired_path = Path(temp_dir) / "child-acquired"
+
+            with self.assertRaisesRegex(RuntimeError, "release lock"):
+                with module.meeting_sync_lock(memory_root):
+                    raise RuntimeError("release lock")
+
+            child_code = """
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("adp_sync_meeting_child", sys.argv[1])
+if spec is None or spec.loader is None:
+    raise RuntimeError("could not load sync_meeting module")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+Path(sys.argv[3]).write_text("ready", encoding="utf-8")
+with module.meeting_sync_lock(Path(sys.argv[2])):
+    Path(sys.argv[4]).write_text("acquired", encoding="utf-8")
+"""
+            child = None
+            try:
+                with module.meeting_sync_lock(memory_root):
+                    child = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            child_code,
+                            str(SCRIPT),
+                            str(memory_root),
+                            str(ready_path),
+                            str(acquired_path),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                    )
+                    deadline = time.monotonic() + 10
+                    while not ready_path.exists() and child.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready_path.exists(), "child did not reach lock acquisition")
+                    time.sleep(0.2)
+                    self.assertIsNone(child.poll(), "child acquired the lock before it was released")
+                    self.assertFalse(acquired_path.exists())
+
+                stdout, stderr = child.communicate(timeout=10)
+                self.assertEqual(child.returncode, 0, stderr or stdout)
+                self.assertTrue(acquired_path.exists())
+            finally:
+                if child is not None and child.poll() is None:
+                    child.kill()
+                    child.communicate()
 
     def test_sync_writes_meeting_daily_decision_packet_and_wdr(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -726,6 +811,7 @@ class SyncMeetingTests(unittest.TestCase):
             self.assertEqual(result["replay_status"], "planned")
             self.assertFalse(Path(result["planned_receipt"]).exists())
             self.assertFalse(Path(result["planned_cursor"]).exists())
+            self.assertFalse((memory_root / ".meeting-sync.lock").exists())
             self.assertEqual(list((memory_root / "meetings").glob("*.md")), [])
 
     def test_same_instance_replay_is_noop_without_duplicate_appends(self) -> None:
