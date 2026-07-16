@@ -564,7 +564,10 @@ def status_sync_intake_path(memory_root: Path, workstream_id: str, checkpoint: s
     return memory_root / "intake" / "status-sync" / f"{stable_key}-actions.json"
 
 
-def status_sync_intake_payload(actions: list[dict[str, Any]]) -> dict[str, Any]:
+def status_sync_intake_payload(
+    actions: list[dict[str, Any]],
+    projection_workstream_id: str,
+) -> dict[str, Any]:
     updates: list[dict[str, Any]] = []
     by_id: dict[str, list[dict[str, Any]]] = {}
     order: list[str] = []
@@ -575,7 +578,14 @@ def status_sync_intake_payload(actions: list[dict[str, Any]]) -> dict[str, Any]:
             order.append(update_id)
         by_id[update_id].append(action)
     for update_id in order:
-        updates.append({"id": update_id, "source": "adp-bmm-checkpoint-sync", "actions": by_id[update_id]})
+        updates.append(
+            {
+                "id": update_id,
+                "source": "adp-bmm-checkpoint-sync",
+                "actions": by_id[update_id],
+                "refresh_actions": update_id == projection_workstream_id,
+            }
+        )
     return {"updates": updates}
 
 
@@ -595,7 +605,7 @@ def write_status_sync_intake(
     dry_run: bool,
 ) -> tuple[Path, bool]:
     path = status_sync_intake_path(memory_root, workstream_id, checkpoint, stable_key, dry_run)
-    payload = status_sync_intake_payload(actions)
+    payload = status_sync_intake_payload(actions, workstream_id)
     canonical = canonical_json(payload)
     if dry_run:
         return path, False

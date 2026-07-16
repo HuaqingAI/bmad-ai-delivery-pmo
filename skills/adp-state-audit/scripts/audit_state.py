@@ -1426,7 +1426,22 @@ def build_audit(
     consistency = audit_consistency(prepass, freshness)
     closure = audit_closure(prepass, memory_root, as_of)
     merge_quality = audit_merge_quality(prepass)
-    vnext = audit_vnext_inputs(project_root, memory_root, as_of, config_script, baseline_script)
+    requested_scopes = prepass.get("scope", {}).get("workstreams_requested", []) if isinstance(prepass.get("scope"), dict) else []
+    skip_wdr_registry = bool(requested_scopes) and not prepass.get("registered_workstreams") and bool(prepass.get("virtual_scopes"))
+    selected_scope_ids = {
+        str(item.get("scope_id"))
+        for item in prepass.get("virtual_scopes", [])
+        if isinstance(item, dict)
+    } | {str(value) for value in prepass.get("registered_workstreams", [])}
+    vnext = audit_vnext_inputs(
+        project_root,
+        memory_root,
+        as_of,
+        config_script,
+        baseline_script,
+        skip_wdr_registry=skip_wdr_registry,
+        selected_scope_ids=selected_scope_ids or None,
+    )
 
     contract_findings = canonical_findings(
         freshness,
@@ -1455,6 +1470,13 @@ def build_audit(
     source_inventory_items = canonical_source_inventory(sources, prepass.get("missing_sources", []))
 
     source_fingerprints = collect_source_fingerprints(memory_root, sources, vnext["source_fingerprints"])
+    scope_contract = vnext.get("scope_contract", {})
+    registered_workstreams = prepass.get("registered_workstreams")
+    if not isinstance(registered_workstreams, list):
+        registered_workstreams = [str(item.get("id", "")) for item in workstreams if item.get("id")]
+    virtual_scopes = prepass.get("virtual_scopes")
+    if not isinstance(virtual_scopes, list):
+        virtual_scopes = []
     audit = {
         "ok": True,
         "audit_type": "input",
@@ -1478,10 +1500,16 @@ def build_audit(
             "scope": prepass.get("scope", {}),
             "counts": prepass.get("counts", {}),
         },
+        "scope_contract": scope_contract,
+        "registered_workstreams": registered_workstreams,
+        "virtual_scopes": virtual_scopes,
+        "migration_warnings": scope_contract.get("migration_warnings", []) if isinstance(scope_contract, dict) else [],
         "source_inventory": {
             "sources_read": sources,
             "missing_sources": list(prepass.get("missing_sources", [])),
             "workstreams": [item.get("id", "") for item in workstreams],
+            "registered_workstreams": registered_workstreams,
+            "virtual_scopes": virtual_scopes,
         },
         "source_inventory_items": source_inventory_items,
         "source_fingerprints": source_fingerprints,
@@ -1507,6 +1535,7 @@ def build_audit(
             "sources_read": len(sources),
             "missing_sources": len(prepass.get("missing_sources", [])),
             "workstreams": len(workstreams),
+            "virtual_scopes": len(virtual_scopes),
             "active_ledger_actions": sum(
                 str(item.get("status", "")).lower() in ACTIVE_ACTION_STATUSES
                 for item in ledger_actions
@@ -1528,6 +1557,9 @@ def audit_vnext_inputs(
     as_of: date,
     config_script: Path,
     baseline_script: Path,
+    *,
+    skip_wdr_registry: bool = False,
+    selected_scope_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     fingerprints: dict[str, str] = {}
@@ -1581,13 +1613,17 @@ def audit_vnext_inputs(
             "locale_fallback": locale_fallback,
             "effective_config": public_effective_config(config),
             "source_fingerprints": fingerprints,
+            "scope_contract": {},
         }
 
     baseline_fingerprint = file_sha256(baseline_path)
     fingerprints[rel_to_memory(memory_root, baseline_path)] = baseline_fingerprint
+    validation_arguments = ["validate", str(project_root), "--baseline", str(baseline_path)]
+    if skip_wdr_registry:
+        validation_arguments.append("--skip-wdr-registry")
     validation = run_shared_json_script(
         baseline_script,
-        ["validate", str(project_root), "--baseline", str(baseline_path)],
+        validation_arguments,
         allow_nonzero=True,
     )
     if not validation.get("valid"):
@@ -1607,8 +1643,28 @@ def audit_vnext_inputs(
     else:
         baseline = parse_program_baseline(baseline_path)
     baseline_revision = baseline.get("revision") if isinstance(baseline, dict) else validation.get("baseline_revision")
+    scope_contract = validation.get("scope_contract") if isinstance(validation.get("scope_contract"), dict) else {}
+    for warning in scope_contract.get("migration_warnings", []) if isinstance(scope_contract, dict) else []:
+        findings.append(
+            vnext_finding(
+                str(warning.get("code") or "ADP-LEGACY-VIRTUAL-SCOPE-WDR"),
+                "warning",
+                "degraded",
+                str(warning.get("risk") or "legacy virtual-scope WDR requires manual migration review"),
+                str(warning.get("directory") or "workstreams/program/"),
+                "adp-state-audit",
+                workstream="program",
+            )
+        )
     if isinstance(baseline, dict):
-        mapping_findings, wdr_fingerprints = audit_plan_actual_mapping(baseline, memory_root, as_of)
+        mapping_findings, wdr_fingerprints = audit_plan_actual_mapping(
+            baseline,
+            memory_root,
+            as_of,
+            scope_contract,
+            selected_scope_ids=selected_scope_ids,
+            scan_wdrs=not skip_wdr_registry,
+        )
         findings.extend(mapping_findings)
         fingerprints.update(wdr_fingerprints)
     return {
@@ -1619,6 +1675,7 @@ def audit_vnext_inputs(
         "locale_fallback": locale_fallback,
         "effective_config": public_effective_config(config),
         "source_fingerprints": fingerprints,
+        "scope_contract": scope_contract,
     }
 
 
@@ -1697,6 +1754,10 @@ def audit_plan_actual_mapping(
     baseline: dict[str, Any],
     memory_root: Path,
     as_of: date,
+    scope_contract: dict[str, Any],
+    *,
+    selected_scope_ids: set[str] | None = None,
+    scan_wdrs: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     findings: list[dict[str, Any]] = []
     fingerprints: dict[str, str] = {}
@@ -1704,14 +1765,23 @@ def audit_plan_actual_mapping(
         str(item.get("id")): item
         for item in baseline.get("milestones", [])
         if isinstance(item, dict) and str(item.get("id", "")).strip()
+        and (selected_scope_ids is None or str(item.get("workstream_id")) in selected_scope_ids)
     }
     baseline_revision = baseline.get("revision")
     mapped_rows: dict[str, list[dict[str, str]]] = defaultdict(list)
-    records = sorted((memory_root / "workstreams").glob("*/delivery-record.md"))
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in scope_contract.get("virtual_scopes", [])
+        if isinstance(item, dict)
+    }
+    virtual_normalized = {normalize_workstream_id(value) for value in virtual_scope_ids}
+    records = sorted((memory_root / "workstreams").glob("*/delivery-record.md")) if scan_wdrs else []
     for record in records:
+        workstream_id = normalize_workstream_id(record.parent.name)
+        if workstream_id in virtual_normalized:
+            continue
         rel = rel_to_memory(memory_root, record)
         fingerprints[rel] = file_sha256(record)
-        workstream_id = normalize_workstream_id(record.parent.name)
         for row in roadmap_rows(record):
             milestone_id = row_value(row, "milestone id", "milestone_id", "id")
             status = normalize_status(row_value(row, "status"))
@@ -1806,6 +1876,8 @@ def audit_plan_actual_mapping(
             )
 
     for milestone_id, milestone in milestones.items():
+        if str(milestone.get("workstream_id")) in virtual_scope_ids:
+            continue
         planned = parse_date(milestone.get("planned_date"))
         raw_tolerance = milestone.get("tolerance_days", baseline.get("default_tolerance_days", 0))
         tolerance = raw_tolerance if isinstance(raw_tolerance, int) and not isinstance(raw_tolerance, bool) else 0

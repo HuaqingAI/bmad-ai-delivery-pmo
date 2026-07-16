@@ -93,6 +93,8 @@ If receipt publication fails or the lock changes, retain the lock and return a d
 
 For flow-bearing vNext input, load `assets/program-baseline-flow-vnext.schema.json` and the **Flow dependency vNext contract** in `assets/program-baseline-schema.md`. Legacy string dependencies normalize by that contract before validation and topology identity; milestone/gate remains the only node boundary. Validation covers current WDR workstream IDs, hard-dependency date order, ordered critical-path connectivity, stable edge IDs, same-revision references, conditions, aggregation targets, and explicit rework cycles. Update previews expose `flow_diff` by node and edge identity.
 
+The validator also emits the shared `scope_contract` resolved by `scripts/scope_contract.py`. Physical Workstreams come only from valid WDR registry entries. The exact case-sensitive baseline ID `program` is the reserved virtual scope and remains virtual even when a legacy program WDR exists; CLI consumers may normalize user input before selecting it. `project` and `adp-program` are action-routing IDs only. Consumers must rerun Audit when an older audit lacks this contract rather than infer scope identity.
+
 Run deterministic validation whenever another workflow questions baseline integrity:
 
 ```text
@@ -108,6 +110,8 @@ uv run "{skill-root}/scripts/baseline.py" inspect "{project-root}" --revision <n
 
 Treat JSON `status`, `findings`, `baseline_revision`, `value_sources`, and `written_files` as authoritative. Dry-run `planned_files` are targets, not generated files.
 
+When validation reports `ADP-LEGACY-VIRTUAL-SCOPE-WDR`, load `references/virtual-scope-migration.md`. Report the migration risk and human cleanup order; never delete or rewrite the directory automatically.
+
 ## Headless Contract
 
 Headless use never asks for confirmation. `propose`, `validate`, `inspect`, and `lock-inspect` remain read-only. `lock-recover` requires a verified orphan and emits an audit receipt. `create` and `update` may write only with complete input, explicit `--execute`, and the reviewed `preview_token`; otherwise they do not write. A blocked run returns deterministic findings and `recommended_next_step` instead of guessing missing facts.
@@ -120,6 +124,7 @@ Headless use never asks for confirmation. `propose`, `validate`, `inspect`, and 
 - `critical_path` is an ordered hard-dependency chain; keep attention-only nodes out of it.
 - Weighting is optional and disabled by default. When enabled, every weighted milestone needs auditable completion criteria and weights must total 100.
 - Baseline changes require a reason and approved decision source. Forecast and actual state belong to `adp-status-sync`, never here.
+- Preserve approved `program` milestones. They own no WDR, sidecar, BMM phase, or BMM artifact index and never participate in physical Workstream completeness checks.
 - Lock recovery writes audit receipts only; it never changes baseline facts or revision history.
 - If the scripts cannot run, prepare a review-only candidate from `assets/baseline-input.example.json`; do not write or claim deterministic validation, conflict protection, or archival.
 

@@ -19,6 +19,8 @@ Load `references/flow-graph-contract-v1.md` and validate against `assets/adp-flo
 
 Only approved baseline milestones and gates are nodes. Only normalized same-revision baseline dependency objects are edges. Copy execution and health as independent axes, count only explicitly related canonical actions and risks inside the selected scope, and preserve every unresolvable overlay in `unmapped`.
 
+Lane identity follows the shared scope contract. Physical milestones use `lane_type: workstream`; a milestone whose baseline `workstream_id` is the virtual `program` scope uses `lane_type: virtual` and `lane_id: program`. Program gates may retain the program lane. Virtual nodes own no WDR or BMM artifacts, and graph generation never infers aggregation or completion from node names.
+
 Canonical identity is layered as topology, state, overlay, then flow graph. Do not produce `layout_id`, coordinates, routing, dimensions, locale-derived measurements, or ELK configuration; those identities belong to `adp-management-panel`.
 
 ## Generate

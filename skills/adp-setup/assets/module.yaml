@@ -70,7 +70,7 @@ shared_resources:
     path: assets/program-status-flow-state-v1.schema.json
     purpose: canonical node execution and health state extension
   - owner_skill: adp-program-status
-    path: assets/program-status-progress-v2.schema.json
+    path: assets/program-status-progress-v3.schema.json
     purpose: canonical progress projection extension
   - owner_skill: adp-management-panel
     path: assets/adp-management-panel-v1.schema.json

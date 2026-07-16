@@ -39,7 +39,6 @@ BASELINE_REL = Path("plans") / "program-baseline.md"
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 ACTION_STATUSES = {"open", "in-progress", "blocked", "done", "cancelled"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
-PROJECT_ACTION_IDS = {"program", "project", "adp-program"}
 MILESTONE_STATUSES = {"planned", "in-progress", "at-risk", "done", "blocked"}
 RECEIPT_SCHEMA_VERSION = 1
 STATUS_SYNC_RECEIPT_REL = Path("receipts") / "status-sync"
@@ -52,6 +51,7 @@ ATTESTATION_WRAPPER_FIELDS = {
     "wrapper_attestation",
 }
 DEFAULT_CONFIG_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/adp_effective_config.py"
+DEFAULT_SCOPE_CONTRACT_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/scope_contract.py"
 ROADMAP_FIELDS = [
     "Milestone ID",
     "Milestone",
@@ -87,6 +87,15 @@ ACTION_FIELDS = [
     "Last Updated",
     "Owning Workflow",
 ]
+
+
+class StatusSyncContractError(ValueError):
+    def __init__(self, error_code: str, message: str) -> None:
+        self.error_code = error_code
+        super().__init__(message)
+
+
+_SCOPE_CONTRACT_MODULE: Any | None = None
 
 
 @dataclass
@@ -132,6 +141,8 @@ class StatusUpdate:
     dependencies: list[str] = field(default_factory=list)
     change_notes: list[str] = field(default_factory=list)
     next_actions: list[str] = field(default_factory=list)
+    next_actions_provided: bool = False
+    refresh_actions: bool = False
     actions: list[ActionUpdate] = field(default_factory=list)
     milestones: list[MilestoneUpdate] = field(default_factory=list)
     reported_gaps: list[str] = field(default_factory=list)
@@ -147,7 +158,8 @@ class StatusUpdate:
                 self.risks,
                 self.dependencies,
                 self.change_notes,
-                self.next_actions,
+                self.next_actions_provided,
+                self.refresh_actions,
                 self.actions,
                 self.milestones,
             ]
@@ -180,6 +192,11 @@ def parse_args() -> argparse.Namespace:
     update.add_argument("--dependency", action="append", default=[], help="Dependency change to set; repeat as needed.")
     update.add_argument("--change-note", action="append", default=[], help="Scope or change note; repeat as needed.")
     update.add_argument("--next-action", action="append", default=[], help="Next action; repeat as needed.")
+    update.add_argument(
+        "--refresh-actions",
+        action="store_true",
+        help="Explicitly replace ledger-projected action summaries for the target physical workstream.",
+    )
     update.add_argument("--milestone-id", help="Baseline milestone ID for a single structured milestone update.")
     update.add_argument("--milestone-status", choices=sorted(MILESTONE_STATUSES), help="Canonical milestone status.")
     update.add_argument("--milestone-forecast", help="Forecast date in ISO YYYY-MM-DD format.")
@@ -281,6 +298,16 @@ def load_python_module(path: Path, name: str) -> Any:
     return module
 
 
+def scope_contract_module() -> Any:
+    global _SCOPE_CONTRACT_MODULE
+    if _SCOPE_CONTRACT_MODULE is None:
+        _SCOPE_CONTRACT_MODULE = load_python_module(
+            DEFAULT_SCOPE_CONTRACT_SCRIPT,
+            "adp_status_sync_scope_contract",
+        )
+    return _SCOPE_CONTRACT_MODULE
+
+
 def sha256_bytes(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
@@ -301,12 +328,20 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
         payload = json.loads(Path(args.updates_file).read_text(encoding="utf-8"))
         items = payload.get("updates", payload) if isinstance(payload, dict) else payload
         payload_revision = parse_optional_revision(payload.get("baseline_revision"), "baseline_revision") if isinstance(payload, dict) else None
+        payload_refresh_actions = boolean_value(payload.get("refresh_actions", False), "refresh_actions") if isinstance(payload, dict) else False
         if not isinstance(items, list):
             raise ValueError("updates-file must contain a list or an object with an 'updates' list")
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError("each batch update must be a JSON object")
-            updates.append(update_from_mapping(item, default_source=args.source, default_revision=payload_revision))
+            updates.append(
+                update_from_mapping(
+                    item,
+                    default_source=args.source,
+                    default_revision=payload_revision,
+                    default_refresh_actions=payload_refresh_actions,
+                )
+            )
 
     single_has_fields = any(
         [
@@ -318,6 +353,7 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
             args.dependency,
             args.change_note,
             args.next_action,
+            args.refresh_actions,
             args.milestone_id,
             args.milestone_status,
             args.milestone_forecast,
@@ -339,6 +375,8 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
                 dependencies=clean_list(args.dependency),
                 change_notes=clean_list(args.change_note),
                 next_actions=clean_list(args.next_action),
+                next_actions_provided=bool(args.next_action),
+                refresh_actions=bool(args.refresh_actions),
                 actions=[],
                 milestones=milestones_from_cli(args),
                 source=args.source,
@@ -350,7 +388,12 @@ def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
     return updates
 
 
-def update_from_mapping(item: dict[str, Any], default_source: str, default_revision: int | None = None) -> StatusUpdate:
+def update_from_mapping(
+    item: dict[str, Any],
+    default_source: str,
+    default_revision: int | None = None,
+    default_refresh_actions: bool = False,
+) -> StatusUpdate:
     raw_id = item.get("id") or item.get("workstream_id")
     if not raw_id:
         raise ValueError("batch update is missing id/workstream_id")
@@ -364,6 +407,11 @@ def update_from_mapping(item: dict[str, Any], default_source: str, default_revis
         dependencies=clean_list(item.get("dependencies", [])),
         change_notes=clean_list(item.get("change_notes", item.get("changeNotes", []))),
         next_actions=clean_list(item.get("next_actions", item.get("nextActions", []))),
+        next_actions_provided="next_actions" in item or "nextActions" in item,
+        refresh_actions=boolean_value(
+            item.get("refresh_actions", item.get("refreshActions", default_refresh_actions)),
+            "refresh_actions",
+        ),
         actions=actions_from_mapping(
             item,
             default_workstream=normalize_id(str(raw_id)),
@@ -377,6 +425,12 @@ def update_from_mapping(item: dict[str, Any], default_source: str, default_revis
         reported_gaps=clean_list(item.get("unresolved_gaps", item.get("gaps", []))),
         source=str(item.get("source") or default_source),
     )
+
+
+def boolean_value(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be true or false")
+    return value
 
 
 def milestones_from_cli(args: argparse.Namespace) -> list[MilestoneUpdate]:
@@ -942,7 +996,7 @@ def merge_action_workstreams(existing: str, new: list[str], fallback: str) -> st
             continue
         seen.add(candidate)
         merged.append(candidate)
-    if not merged and fallback.upper() not in {"", "TBD"} and fallback not in PROJECT_ACTION_IDS:
+    if not merged and fallback.upper() not in {"", "TBD"} and not scope_contract_module().is_action_routing_id(fallback):
         merged.append(fallback)
     return "; ".join(merged) if merged else "TBD"
 
@@ -1027,6 +1081,11 @@ def active_action_summaries(rows: list[dict[str, str]], workstream_id: str) -> l
         action_id = row.get("Action ID", "").strip() or "TBD"
         summaries.append(f"[action_id:{action_id}] {owner}: {action} (due: {due})")
     return summaries
+
+
+def refreshed_action_projection(existing: list[str], active_summaries: list[str]) -> list[str]:
+    manual = [item for item in existing if action_summary_id(item) is None]
+    return [*manual, *active_summaries]
 
 
 def safe_normalize_id(value: str) -> str:
@@ -1262,19 +1321,9 @@ def apply_update(
     record_path = memory_root / "workstreams" / update.workstream_id / "delivery-record.md"
     if not record_path.exists():
         project_action_scope = (
-            update.workstream_id in PROJECT_ACTION_IDS
-            and update.actions
-            and not any(
-                [
-                    update.status,
-                    update.phase,
-                    update.progress,
-                    update.blockers,
-                    update.risks,
-                    update.dependencies,
-                    update.change_notes,
-                ]
-            )
+            scope_contract_module().is_action_routing_id(update.workstream_id)
+            and bool(update.actions)
+            and not has_wdr_delta(update)
         )
         if update.actions and (project_action_scope or not has_wdr_delta(update)):
             timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -1323,13 +1372,13 @@ def apply_update(
         }
 
     values = update_values(update, timestamp)
-    active_summaries = active_action_summaries(ledger_actions, update.workstream_id)
-    summary_gaps: list[str] = []
-    if update.next_actions or active_summaries or update.actions:
+    active_summaries = active_action_summaries(ledger_actions, update.workstream_id) if update.refresh_actions else []
+    if update.next_actions_provided:
+        values["next_actions"] = "; ".join(update.next_actions)
+    elif update.refresh_actions:
         existing_actions = split_next_actions(existing_field_value(original, "Project Status", "Next actions"))
-        existing_actions, summary_gaps = remove_closed_action_summaries(existing_actions, update.actions)
-        merged_actions = merge_unique(existing_actions, [*update.next_actions, *active_summaries])
-        values["next_actions"] = "; ".join(merged_actions) if merged_actions else "fill missing state"
+        projected_actions = refreshed_action_projection(existing_actions, active_summaries)
+        values["next_actions"] = "; ".join(projected_actions)
     if values and "last_status_sync" not in values:
         values["last_status_sync"] = timestamp
     changed_fields: list[dict[str, str]] = []
@@ -1362,11 +1411,11 @@ def apply_update(
             for item in update.milestones
             if any(change["field"] == f"Milestone {item.milestone_id}" for change in milestone_changes)
         ],
-        "action_candidates": active_summaries or update.next_actions,
+        "action_candidates": active_summaries if update.refresh_actions else update.next_actions,
         "actions_registered": [],
         "actions_updated": [],
         "actions_closed": [],
-        "unresolved_gaps": sorted(set([*unresolved_gaps(update), *summary_gaps])),
+        "unresolved_gaps": sorted(set(unresolved_gaps(update))),
     }
 
 
@@ -1380,7 +1429,8 @@ def has_wdr_delta(update: StatusUpdate) -> bool:
             update.risks,
             update.dependencies,
             update.change_notes,
-            update.next_actions,
+            update.next_actions_provided,
+            update.refresh_actions,
             update.milestones,
         ]
     )
@@ -1402,8 +1452,8 @@ def update_values(update: StatusUpdate, timestamp: str) -> dict[str, str]:
         values["dependencies"] = "; ".join(update.dependencies)
     if update.change_notes:
         values["change_notes"] = "; ".join(update.change_notes)
-    if update.next_actions:
-        values["next_actions"] = "; ".join(update.next_actions)
+    if update.next_actions_provided:
+        values["next_actions"] = "; ".join(update.next_actions) if update.next_actions else "fill missing state"
     if update.milestones:
         values["last_status_sync"] = timestamp
     if values:
@@ -1577,24 +1627,22 @@ def parse_date(value: str) -> date | None:
 
 def validate_update_targets(memory_root: Path, updates: list[StatusUpdate]) -> None:
     for update in updates:
+        if scope_contract_module().is_virtual_cli_scope_id(update.workstream_id):
+            if has_wdr_delta(update):
+                raise StatusSyncContractError(
+                    "ADP-VIRTUAL-SCOPE-NOT-WDR-TARGET",
+                    "program is a virtual scope and cannot receive WDR fields, milestone updates, or action refresh",
+                )
+            if update.actions:
+                continue
         record_path = memory_root / "workstreams" / update.workstream_id / "delivery-record.md"
         if record_path.is_file():
             record_path.read_text(encoding="utf-8")
             continue
         project_action_scope = (
-            update.workstream_id in PROJECT_ACTION_IDS
+            scope_contract_module().is_action_routing_id(update.workstream_id)
             and bool(update.actions)
-            and not any(
-                [
-                    update.status,
-                    update.phase,
-                    update.progress,
-                    update.blockers,
-                    update.risks,
-                    update.dependencies,
-                    update.change_notes,
-                ]
-            )
+            and not has_wdr_delta(update)
         )
         if update.actions and (project_action_scope or not has_wdr_delta(update)):
             continue
@@ -1825,8 +1873,8 @@ def run_update(args: argparse.Namespace) -> int:
     if input_path:
         args.updates_file = str(input_path)
     updates = updates_from_args(args)
-    baseline_context = validate_milestone_updates(memory_root, updates)
     validate_update_targets(memory_root, updates)
+    baseline_context = validate_milestone_updates(memory_root, updates)
     memory_root.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".status-sync-", dir=memory_root.parent) as temp_dir:
         staged_root = Path(temp_dir) / "memory"
@@ -2095,6 +2143,10 @@ def main() -> int:
         if args.command == "migrate-receipt":
             return run_migrate_receipt(args)
         raise ValueError(f"unknown command: {args.command}")
+    except StatusSyncContractError as exc:
+        payload = {"ok": False, "error_code": exc.error_code, "error": str(exc)}
+        emit(payload, getattr(args, "output", None))
+        return 2
     except Exception as exc:
         payload = {"ok": False, "error": str(exc)}
         emit(payload, getattr(args, "output", None))

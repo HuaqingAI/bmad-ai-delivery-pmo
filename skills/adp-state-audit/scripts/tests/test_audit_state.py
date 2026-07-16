@@ -474,6 +474,50 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertNotIn("MS-TODAY", "\n".join(item["summary"] for item in audit["warnings"]))
             self.assertNotIn("MS-TOLERANCE", "\n".join(item["summary"] for item in audit["warnings"]))
 
+    def test_program_only_audit_does_not_open_physical_or_legacy_program_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            self.write_valid_baseline(
+                project_root,
+                memory_root,
+                [
+                    self.milestone("MS-L1", "l1-checkout", "2026-07-01"),
+                    self.milestone("MS-PROGRAM", "program", "2026-07-01"),
+                ],
+            )
+            (memory_root / "workstreams/l1-checkout/delivery-record.md").write_bytes(b"\xff\xfe")
+            legacy = memory_root / "workstreams/program/delivery-record.md"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"\xff\xfe")
+
+            completed = self.run_script(
+                project_root,
+                "--workstream",
+                "PROGRAM",
+                "--as-of",
+                "2026-07-10",
+            )
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertTrue(result["ok"])
+            self.assertEqual([], audit["registered_workstreams"])
+            self.assertEqual(["program"], [item["scope_id"] for item in audit["virtual_scopes"]])
+            self.assertEqual([], audit["source_inventory"]["workstreams"])
+            self.assertFalse(
+                any("delivery-record.md" in str(item.get("path", "")) for item in audit["source_inventory"]["sources_read"])
+            )
+            findings = [*audit["blocking_gaps"], *audit["warnings"]]
+            self.assertIn("ADP-LEGACY-VIRTUAL-SCOPE-WDR", {item.get("code") for item in findings})
+            self.assertFalse(
+                any(
+                    item.get("workstream") == "program"
+                    and item.get("code") != "ADP-LEGACY-VIRTUAL-SCOPE-WDR"
+                    for item in findings
+                )
+            )
+
     def test_unmapped_actual_blocks_before_generation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -1628,7 +1672,7 @@ class AdpStateAuditTests(unittest.TestCase):
     def test_free_text_tbd_does_not_make_ungenerated_view_substantive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
-            memory_root = self.scaffold(project_root)
+            self.scaffold(project_root)
 
             completed = self.run_script(project_root, "--as-of", "2026-07-10")
             result = json.loads(completed.stdout)

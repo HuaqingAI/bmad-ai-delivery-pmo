@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:adp:schema:program-status-progress:2.0.0",
-  "title": "ADP Program Status Progress v2",
+  "$id": "urn:adp:schema:program-status-progress:3.0.0",
+  "title": "ADP Program Status Progress v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,6 +13,7 @@
     "measurement_status",
     "measurement_reasons",
     "overall",
+    "by_scope",
     "by_workstream",
     "eligibility",
     "corrections",
@@ -23,7 +24,7 @@
     "recovery"
   ],
   "properties": {
-    "progress_schema_version": {"const": "2.0.0"},
+    "progress_schema_version": {"const": "3.0.0"},
     "basis": {"const": "weighted-milestone"},
     "as_of": {"$ref": "#/$defs/date"},
     "reporting_period": {"$ref": "#/$defs/reportingPeriod"},
@@ -35,6 +36,10 @@
       "uniqueItems": true
     },
     "overall": {"$ref": "#/$defs/projection"},
+    "by_scope": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/scopeProjection"}
+    },
     "by_workstream": {
       "type": "array",
       "items": {"$ref": "#/$defs/workstreamProjection"}
@@ -152,7 +157,7 @@
       "additionalProperties": false,
       "required": ["source_type", "source_reference", "fingerprint", "rule_id", "audit_id", "correction_id", "rebase_id"],
       "properties": {
-        "source_type": {"enum": ["baseline", "wdr", "input-audit", "correction", "rebase"]},
+        "source_type": {"enum": ["baseline", "wdr", "virtual-aggregation", "input-audit", "correction", "rebase"]},
         "source_reference": {"type": "string", "minLength": 1},
         "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "rule_id": {"type": "string", "minLength": 1},
@@ -514,6 +519,55 @@
         }
       ]
     },
+    "scopeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope_id",
+        "scope_kind",
+        "progress_kind",
+        "measurement_status",
+        "measurement_reasons",
+        "current",
+        "forecast_summary",
+        "series",
+        "milestone_counts",
+        "comparability",
+        "gate_readiness",
+        "value_lineage"
+      ],
+      "properties": {
+        "scope_id": {"type": "string", "minLength": 1},
+        "scope_kind": {"enum": ["physical", "virtual"]},
+        "workstream_id": {"type": "string", "minLength": 1},
+        "workstream_kind": {"enum": ["L0", "delivery"]},
+        "progress_kind": {"enum": ["weighted-milestone", "gate-readiness"]},
+        "measurement_status": {"$ref": "#/$defs/measurementStatus"},
+        "measurement_reasons": {"type": "array", "items": {"$ref": "#/$defs/measurementReason"}},
+        "current": {"$ref": "#/$defs/current"},
+        "forecast_summary": {"$ref": "#/$defs/forecastSummary"},
+        "series": {"$ref": "#/$defs/series"},
+        "milestone_counts": {"$ref": "#/$defs/milestoneCounts"},
+        "comparability": {"$ref": "#/$defs/comparability"},
+        "gate_readiness": {"$ref": "#/$defs/gateReadiness"},
+        "value_lineage": {"$ref": "#/$defs/valueLineage"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"scope_kind": {"const": "virtual"}}},
+          "then": {
+            "properties": {
+              "workstream_id": false,
+              "workstream_kind": false,
+              "gate_readiness": {"const": null}
+            }
+          },
+          "else": {
+            "required": ["workstream_id", "workstream_kind"]
+          }
+        }
+      ]
+    },
     "eligibleActual": {
       "type": "object",
       "additionalProperties": false,
@@ -574,8 +628,8 @@
       "additionalProperties": false,
       "required": ["legacy_progress_version", "strategy", "migration_error_code"],
       "properties": {
-        "legacy_progress_version": {"const": "1.0"},
-        "strategy": {"const": "legacy-alias"},
+        "legacy_progress_version": {"const": "2.0"},
+        "strategy": {"const": "physical-by-workstream-alias"},
         "migration_error_code": {"const": "ADP-PROGRESS-MIGRATION-REQUIRED"}
       }
     },

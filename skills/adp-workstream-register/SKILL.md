@@ -55,6 +55,8 @@ Run the deterministic writer:
 uv run "{skill-root}/scripts/register_workstream.py" "{project-root}" --id <workstream-id> --name "<name>" --owner "<fde-owner>"
 ```
 
+The shared scope resolver reserves CLI-normalized `program` for the virtual baseline scope. Reject it before any file write with `ADP-VIRTUAL-SCOPE-NOT-WORKSTREAM` and stable exit code `2`; a legacy directory does not make registration valid. This guard also applies to the manual fallback.
+
 Add optional flags only for reliable facts:
 
 - `--business-owner "<name>"`

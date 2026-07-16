@@ -9,7 +9,7 @@ The machine contract is `assets/adp-flow-graph-v1.schema.json`; normative exampl
 
 ## Topology
 
-Nodes are approved milestones and gates from exactly one baseline revision. Milestones use their workstream lane. Gates use an explicit workstream lane or the program lane. Edges are the target node's normalized dependency objects. `aggregation` converges only on a target with `predecessor_rule: all`; that rule never changes or blocks the predecessor lanes themselves. `conditional` requires an explicit canonical condition fact. Unconfirmed conditions remain present with relationship state `pending-confirmation`; graph generation does not select a branch. Only an all-`rework` cycle is valid.
+Nodes are approved milestones and gates from exactly one baseline revision. Physical milestones use a `workstream` lane. Milestones classified as the virtual `program` scope by the shared baseline scope contract use a `virtual` lane with `lane_id: program`; they never become physical because a legacy program WDR exists. Gates use an explicit workstream lane or the program lane. Edges are the target node's normalized dependency objects. `aggregation` converges only on a target with `predecessor_rule: all`; that rule never changes or blocks the predecessor lanes themselves. `conditional` requires an explicit canonical condition fact. Unconfirmed conditions remain present with relationship state `pending-confirmation`; graph generation does not select a branch. Only an all-`rework` cycle is valid.
 
 ## State
 

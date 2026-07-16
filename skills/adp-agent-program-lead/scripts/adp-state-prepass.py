@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -83,6 +84,7 @@ VIEW_FILES = [
 ]
 ACTION_LEDGER_REL = Path("actions") / "action-ledger.md"
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
+SCOPE_CONTRACT_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline" / "scripts" / "scope_contract.py"
 
 
 @dataclass
@@ -150,6 +152,15 @@ def normalize_id(raw: str) -> str:
     value = raw.strip().lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
     return value.strip("-")
+
+
+def load_scope_contract_module() -> Any:
+    spec = importlib.util.spec_from_file_location("adp_scope_contract_prepass", SCOPE_CONTRACT_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load shared scope contract: {SCOPE_CONTRACT_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def canonical_cross_workstream_id(raw: str) -> str | None:
@@ -530,7 +541,8 @@ def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_
     impacts, impact_facts, impact_lines = split_cross_workstream_entries(
         parse_list_after_label_with_lines(lines, "Cross-Workstream Links", "Impacts")
     )
-    workstream_id = normalize_id(identity.get("workstream id") or record_path.parent.name) or record_path.parent.name
+    raw_workstream_id = identity.get("workstream id") or record_path.parent.name
+    workstream_id = raw_workstream_id if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", raw_workstream_id) else (normalize_id(raw_workstream_id) or record_path.parent.name)
     ws = Workstream(
         workstream_id=workstream_id,
         path=record_path,
@@ -837,11 +849,12 @@ def registered_workstream_ids(memory_root: Path) -> set[str]:
 
 def cross_reference_gaps(workstreams: list[Workstream], known: set[str]) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
+    normalized_known = {normalize_id(value) for value in known}
     for ws in workstreams:
         source_path = ws.files.get("delivery_record", ws.path.as_posix())
         for relationship, targets in [("depends_on", ws.depends_on), ("impacts", ws.impacts)]:
             for target in targets:
-                if target not in known:
+                if normalize_id(target) not in normalized_known:
                     source_line = ws.cross_link_lines.get(relationship, {}).get(target)
                     gaps.append(
                         {
@@ -1071,9 +1084,31 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             },
         )
 
+    scope_module = load_scope_contract_module()
+    baseline_path = memory_root / "plans/program-baseline.md"
+    baseline = scope_module.load_canonical_baseline(baseline_path) if baseline_path.is_file() else {}
+    program_only = bool(args.workstream) and all(
+        scope_module.is_virtual_cli_scope_id(item) for item in args.workstream
+    )
+    registry_entries = scope_module.discover_wdr_registry(
+        memory_root,
+        include_physical=not program_only,
+    )
+    scope_contract = scope_module.resolve_scope_contract(
+        baseline,
+        [item["scope_id"] for item in registry_entries],
+    )
+    scope_selection = scope_module.select_scope_contract(scope_contract, args.workstream)
+
     groups = set(CAPABILITY_FILES[args.capability])
     sources, missing_sources = collect_files(memory_root, groups)
-    records, missing_workstreams = discover_workstream_records(memory_root, args.workstream)
+    selected_physical = set(scope_selection["registered_workstreams"])
+    records = [
+        Path(item["path"])
+        for item in registry_entries
+        if item["scope_id"] in selected_physical
+    ]
+    missing_workstreams = list(scope_selection["unknown_scopes"])
     workstreams = [parse_workstream(path, memory_root, as_of, args.max_age_days) for path in records]
     workstream_sources = [file_item(ws.path, memory_root) for ws in workstreams]
     all_sources = [*sources, *workstream_sources]
@@ -1103,7 +1138,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         }
         for item in missing_workstreams
     )
-    xref_gaps = cross_reference_gaps(workstreams, registered_workstream_ids(memory_root))
+    xref_gaps = cross_reference_gaps(workstreams, set(scope_contract["registered_workstreams"]))
     action_xref_evidence = action_cross_check_evidence(memory_root, workstreams, ledger_actions) if ledger_actions else []
 
     payload = {
@@ -1113,6 +1148,10 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "memory_root": str(memory_root),
         "capability": args.capability,
         "configuration": configuration,
+        "scope_contract": scope_contract,
+        "registered_workstreams": scope_selection["registered_workstreams"],
+        "virtual_scopes": scope_selection["virtual_scopes"],
+        "migration_warnings": scope_contract["migration_warnings"],
         "scope": {
             "workstreams_requested": args.workstream,
             "groups_scanned": sorted(groups),

@@ -10,7 +10,7 @@ from progress_contract_testkit import FIXTURE_ROOT, comparability_for, evaluate_
 class ProgressContractPropertyTests(unittest.TestCase):
     def test_normative_formula_cases_match_golden_expectations(self) -> None:
         payload = load_json(FIXTURE_ROOT / "formula-boundaries.json")
-        self.assertEqual("2.0.0", payload["contract_version"])
+        self.assertEqual("3.0.0", payload["contract_version"])
         for case in payload["cases"]:
             with self.subTest(case=case["name"]):
                 self.assertEqual(case["expected"], evaluate_formula_case(case))

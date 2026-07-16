@@ -162,6 +162,15 @@ class FlowGraphProjectionTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.findings[0]["code"], "flow.reference.unknown")
 
+    def test_program_milestone_uses_virtual_lane(self) -> None:
+        baseline, _, _, _ = source_inputs()
+        baseline["milestones"][0]["workstream_id"] = "program"
+
+        topology = topology_projection(baseline, "plans/program-baseline.md")
+        node = next(item for item in topology["nodes"] if item["node_id"] == baseline["milestones"][0]["id"])
+
+        self.assertEqual({"lane_type": "virtual", "lane_id": "program"}, node["lane"])
+
     def test_current_and_immutable_publication_is_idempotent_and_rolls_back_pair(self) -> None:
         baseline, status, actions, risks = source_inputs()
         graph = build_flow_graph(baseline, status, actions, risks)

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from adp_effective_config import display_label, format_date, message, resolve_effective_config
+from scope_contract import discover_wdr_registry, resolve_scope_contract
 
 
 MARKER = "<!-- adp:program-baseline:v1 -->"
@@ -87,8 +88,12 @@ def parse_baseline(path: Path) -> dict[str, Any]:
     return value
 
 
-def current_wdr_registry(project_root: Path, baseline_path: Path | None = None) -> set[str]:
-    registry: set[str] = set()
+def current_wdr_registry(
+    project_root: Path,
+    baseline_path: Path | None = None,
+    *,
+    include_physical: bool = True,
+) -> set[str]:
     memory_root = project_root / MEMORY_RELATIVE
     if baseline_path is not None:
         resolved = baseline_path.expanduser().resolve()
@@ -96,15 +101,10 @@ def current_wdr_registry(project_root: Path, baseline_path: Path | None = None) 
             memory_root = resolved.parent.parent
         elif resolved.parent.name == "baseline-history" and resolved.parent.parent.name == "plans":
             memory_root = resolved.parent.parent.parent
-    workstreams_root = memory_root / "workstreams"
-    for record in sorted(workstreams_root.glob("*/delivery-record.md")):
-        try:
-            match = WDR_WORKSTREAM_ID_PATTERN.search(record.read_text(encoding="utf-8-sig"))
-        except OSError:
-            continue
-        if match and ID_PATTERN.fullmatch(match.group(1)):
-            registry.add(match.group(1))
-    return registry
+    return {
+        item["scope_id"]
+        for item in discover_wdr_registry(memory_root, include_physical=include_physical)
+    }
 
 
 def source_ref(source: Any) -> str:
@@ -153,6 +153,7 @@ def _validate_item(
     kind: str,
     execute: bool,
     stored: bool,
+    virtual_scope_ids: set[str],
     findings: list[dict[str, str]],
 ) -> str | None:
     if not isinstance(item, dict):
@@ -187,10 +188,13 @@ def _validate_item(
         findings.append(finding("flow.node_type.invalid", "blocked", f"{path}.node_type", f"node_type must be {kind}"))
     lane = item.get("lane")
     if lane is not None:
-        if not isinstance(lane, dict) or lane.get("lane_type") not in {"program", "workstream"} or not isinstance(lane.get("lane_id"), str) or not ID_PATTERN.fullmatch(lane["lane_id"]):
-            findings.append(finding("flow.lane.invalid", "blocked", f"{path}.lane", "lane must identify a stable program or workstream lane"))
-        elif kind == "milestone" and lane.get("lane_type") != "workstream":
-            findings.append(finding("flow.lane.invalid", "blocked", f"{path}.lane", "milestones must use a workstream lane"))
+        if not isinstance(lane, dict) or lane.get("lane_type") not in {"program", "virtual", "workstream"} or not isinstance(lane.get("lane_id"), str) or not ID_PATTERN.fullmatch(lane["lane_id"]):
+            findings.append(finding("flow.lane.invalid", "blocked", f"{path}.lane", "lane must identify a stable program, virtual, or workstream lane"))
+        elif kind == "milestone":
+            is_virtual = item.get("workstream_id") in virtual_scope_ids
+            allowed_lane_types = {"program", "virtual"} if is_virtual else {"workstream"}
+            if lane.get("lane_type") not in allowed_lane_types:
+                findings.append(finding("flow.lane.invalid", "blocked", f"{path}.lane", "milestone lane kind must match the shared scope contract"))
     tolerance = item.get("tolerance_days")
     if tolerance is not None and (not isinstance(tolerance, int) or isinstance(tolerance, bool) or not 0 <= tolerance <= 90):
         findings.append(finding("tolerance.invalid", "blocked", f"{path}.tolerance_days", "tolerance_days must be an integer from 0 through 90"))
@@ -292,10 +296,23 @@ def validate_model(
     execute: bool = False,
     stored: bool = True,
     registered_workstreams: set[str] | None = None,
+    skip_wdr_registry: bool = False,
 ) -> dict[str, Any]:
     findings: list[dict[str, str]] = []
     if not isinstance(model, dict):
         return {"valid": False, "findings": [finding("model.invalid", "blocked", "$", "baseline must be an object")]}
+
+    scope_contract = resolve_scope_contract(model, registered_workstreams or set())
+    virtual_scope_ids = {str(item["scope_id"]) for item in scope_contract["virtual_scopes"]}
+    for warning in scope_contract["migration_warnings"]:
+        findings.append(
+            finding(
+                str(warning["code"]),
+                "warning",
+                str(warning["directory"]),
+                str(warning["risk"]),
+            )
+        )
 
     required = ["schema_version", "baseline_id", "confirmation_status", "project", "default_tolerance_days", "gates", "milestones", "critical_path", "weighting"]
     if stored:
@@ -357,16 +374,17 @@ def validate_model(
             continue
         for index, row in enumerate(rows):
             path = f"{collection}[{index}]"
-            item_id = _validate_item(row, path, kind, execute, stored, findings)
+            item_id = _validate_item(row, path, kind, execute, stored, virtual_scope_ids, findings)
             if isinstance(row, dict):
                 all_items.append((path, row))
                 workstream_id = row.get("workstream_id")
                 if (
                     kind == "milestone"
                     and registered_workstreams is not None
+                    and not skip_wdr_registry
                     and isinstance(workstream_id, str)
                     and workstream_id.strip()
-                    and workstream_id != "program"
+                    and workstream_id not in virtual_scope_ids
                     and workstream_id not in registered_workstreams
                 ):
                     findings.append(
@@ -517,7 +535,7 @@ def validate_model(
                 findings.append(finding("weight.ignored", "warning", f"milestones[{index}].weight", "weight is present but weighting is disabled"))
 
     blocked = any(item["severity"] == "blocked" for item in findings)
-    return {"valid": not blocked, "findings": findings}
+    return {"valid": not blocked, "findings": findings, "scope_contract": scope_contract}
 
 
 def stamp_model(model: dict[str, Any], revision: int, timestamp: str, created_at: str | None = None) -> dict[str, Any]:
@@ -1216,10 +1234,11 @@ def _command_create(args: argparse.Namespace, project_root: Path, config: dict[s
         return 1, result
     timestamp = now_iso(args.as_of)
     model = stamp_model(read_json(Path(args.input)), 1, timestamp)
+    registry = None if getattr(args, "skip_wdr_registry", False) else current_wdr_registry(project_root, baseline_path)
     validation = validate_model(
         model,
         execute=True,
-        registered_workstreams=current_wdr_registry(project_root, baseline_path),
+        registered_workstreams=registry,
     )
     preview_token = fingerprint({"intent": "create", "baseline": fact_model(model)})
     result.update({"status": "ready" if validation["valid"] else "blocked", "dry_run": not args.execute, "can_apply": validation["valid"], "baseline_revision": 1, "baseline_fingerprint": fingerprint(model), "preview_token": preview_token, "findings": validation["findings"], "planned_files": [str(baseline_path)] if validation["valid"] else [], "recommended_next_step": "Review the plan, then repeat with --execute and --preview-token." if validation["valid"] and not args.execute else "Resolve blocked findings and rerun create."})
@@ -1327,6 +1346,7 @@ def _command_update(args: argparse.Namespace, project_root: Path, config: dict[s
 
 def command_validate(args: argparse.Namespace, project_root: Path, config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     baseline_path = Path(args.baseline).resolve() if args.baseline else paths(project_root)[0]
+    skip_wdr_registry = bool(getattr(args, "skip_wdr_registry", False))
     result = base_result("validate", project_root, config)
     if not baseline_path.is_file():
         result.update({"status": "blocked", "valid": False, "baseline_path": str(baseline_path), "findings": [finding("baseline.missing", "blocked", str(baseline_path), "baseline file does not exist")], "recommended_next_step": "Run adp-plan-baseline propose or create."})
@@ -1336,16 +1356,22 @@ def command_validate(args: argparse.Namespace, project_root: Path, config: dict[
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         result.update({"status": "blocked", "valid": False, "baseline_path": str(baseline_path), "findings": [finding("baseline.parse_error", "blocked", str(baseline_path), str(exc))], "recovery_command": f'uv run scripts/baseline.py validate "{project_root}" --baseline "{baseline_path}"', "recommended_next_step": "Restore a valid archived revision or repair through an approved update, then rerun the recovery command."})
         return 1, result
+    registry = current_wdr_registry(
+        project_root,
+        baseline_path,
+        include_physical=not skip_wdr_registry,
+    )
     validation = validate_model(
         model,
         execute=True,
-        registered_workstreams=current_wdr_registry(project_root, baseline_path),
+        registered_workstreams=registry,
+        skip_wdr_registry=skip_wdr_registry,
     )
     lineage = validate_lineage(project_root, model, baseline_path)
     findings = validation["findings"] + lineage["findings"]
     valid = not any(item["severity"] == "blocked" for item in findings)
     revision = model.get("revision")
-    result.update({"status": "complete" if valid else "blocked", "valid": valid, "baseline_path": str(baseline_path), "baseline_revision": revision, "baseline_fingerprint": fingerprint(model), "lineage": {key: value for key, value in lineage.items() if key != "findings"}, "findings": findings, "recommended_next_step": "Baseline is valid; continue to adp-state-audit." if valid else "Resolve blocked findings through adp-plan-baseline update, then rerun validation."})
+    result.update({"status": "complete" if valid else "blocked", "valid": valid, "baseline_path": str(baseline_path), "baseline_revision": revision, "baseline_fingerprint": fingerprint(model), "scope_contract": validation["scope_contract"], "lineage": {key: value for key, value in lineage.items() if key != "findings"}, "findings": findings, "recommended_next_step": "Baseline is valid; continue to adp-state-audit." if valid else "Resolve blocked findings through adp-plan-baseline update, then rerun validation."})
     if not valid:
         result["recovery_command"] = f'uv run scripts/baseline.py validate "{project_root}" --baseline "{baseline_path}"'
     return (0 if valid else 1), result
@@ -1373,10 +1399,10 @@ def command_inspect(args: argparse.Namespace, project_root: Path, config: dict[s
     valid = not any(item["severity"] == "blocked" for item in findings)
     if not valid:
         revision = model.get("revision")
-        result.update({"status": "blocked", "valid": False, "baseline_path": str(selected), "baseline_revision": revision, "baseline_fingerprint": fingerprint(model), "lineage": {key: value for key, value in lineage.items() if key != "findings"}, "findings": findings, "recovery_command": f'uv run scripts/baseline.py validate "{project_root}" --baseline "{selected}"', "recommended_next_step": "Resolve blocked findings, then rerun the recovery command."})
+        result.update({"status": "blocked", "valid": False, "baseline_path": str(selected), "baseline_revision": revision, "baseline_fingerprint": fingerprint(model), "scope_contract": validation["scope_contract"], "lineage": {key: value for key, value in lineage.items() if key != "findings"}, "findings": findings, "recovery_command": f'uv run scripts/baseline.py validate "{project_root}" --baseline "{selected}"', "recommended_next_step": "Resolve blocked findings, then rerun the recovery command."})
         return 1, result
     archives = [item["path"] for item in lineage["archives"]]
-    result.update({"status": "complete", "valid": True, "baseline_path": str(selected), "baseline_revision": model.get("revision"), "baseline_fingerprint": fingerprint(model), "project": model.get("project"), "gate_count": len(model.get("gates", [])), "milestone_count": len(model.get("milestones", [])), "critical_path": model.get("critical_path", []), "history": archives, "lineage": {key: value for key, value in lineage.items() if key != "findings"}, "summary_markdown": render_markdown(model, config["document_locale"], config).split(MARKER, 1)[0].rstrip(), "findings": [], "recommended_next_step": "Use update for approved plan changes; otherwise continue to baseline consumers."})
+    result.update({"status": "complete", "valid": True, "baseline_path": str(selected), "baseline_revision": model.get("revision"), "baseline_fingerprint": fingerprint(model), "scope_contract": validation["scope_contract"], "project": model.get("project"), "gate_count": len(model.get("gates", [])), "milestone_count": len(model.get("milestones", [])), "critical_path": model.get("critical_path", []), "history": archives, "lineage": {key: value for key, value in lineage.items() if key != "findings"}, "summary_markdown": render_markdown(model, config["document_locale"], config).split(MARKER, 1)[0].rstrip(), "findings": findings, "recommended_next_step": "Use update for approved plan changes; otherwise continue to baseline consumers."})
     return 0, result
 
 
@@ -1412,6 +1438,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate", help="Validate an existing baseline without writing.")
     add_common(validate)
     validate.add_argument("--baseline", help="Optional baseline path override.")
+    validate.add_argument(
+        "--skip-wdr-registry",
+        action="store_true",
+        help="Skip physical WDR identity checks for an explicitly virtual-only downstream scope.",
+    )
 
     inspect = subparsers.add_parser("inspect", help="Inspect current or archived baseline without writing.")
     add_common(inspect)

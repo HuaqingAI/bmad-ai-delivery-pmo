@@ -227,7 +227,7 @@ class AdpSetupScriptTests(unittest.TestCase):
                 "adp-status-sync/assets/action-flow-relation-v1.schema.json",
                 "adp-risk-dependency-change-review/assets/risk-flow-relation-v1.schema.json",
                 "adp-program-status/assets/program-status-flow-state-v1.schema.json",
-                "adp-program-status/assets/program-status-progress-v2.schema.json",
+                "adp-program-status/assets/program-status-progress-v3.schema.json",
                 "adp-management-panel/assets/adp-management-panel-v1.schema.json",
                 "adp-management-panel/assets/adp-management-panel-manifest-v1.schema.json",
                 "adp-management-panel/assets/panel-template.html",

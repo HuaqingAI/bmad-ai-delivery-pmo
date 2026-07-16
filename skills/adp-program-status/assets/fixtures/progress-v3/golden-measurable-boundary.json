@@ -1,0 +1,1336 @@
+{
+  "progress_schema_version": "3.0.0",
+  "basis": "weighted-milestone",
+  "as_of": "2026-07-13",
+  "reporting_period": {
+    "start": "2026-07-07",
+    "end": "2026-07-13"
+  },
+  "scope_identity": {
+    "baseline_revision": 4,
+    "scope_revision": "scope-4",
+    "scope_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "weighting_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "measurement_status": "measurable",
+  "measurement_reasons": [
+    {
+      "reason_code": "eligible",
+      "rule_id": "PS-PROGRESS-MEASURABLE",
+      "detail": "Approved scope, weighting, audit, and identity are complete.",
+      "source_references": [
+        "plans/program-baseline.md"
+      ],
+      "recovery_workflows": []
+    }
+  ],
+  "overall": {
+    "scope_id": "program",
+    "progress_kind": "weighted-milestone",
+    "measurement_status": "measurable",
+    "measurement_reasons": [
+      {
+        "reason_code": "eligible",
+        "rule_id": "PS-PROGRESS-MEASURABLE",
+        "detail": "All weighted delivery workstreams are measurable.",
+        "source_references": [
+          "plans/program-baseline.md"
+        ],
+        "recovery_workflows": []
+      }
+    ],
+    "current": {
+      "actual_completion_percent": 40,
+      "planned_completion_percent": 80,
+      "completion_gap_pp": -40,
+      "project_weight_percent": 100,
+      "completed_contribution_pp": 40
+    },
+    "forecast_summary": {
+      "horizon_date": "2026-07-20",
+      "forecast_completion_percent": 60,
+      "forecast_coverage_percent": 33.33,
+      "forecast_coverage_status": "partial",
+      "remaining_weight_percent": 60,
+      "covered_remaining_weight_percent": 20,
+      "next_milestone_ids": [
+        "MS-L1-B"
+      ]
+    },
+    "series": {
+      "actual_points": [
+        {
+          "horizon_date": "2026-07-13",
+          "completion_percent": 40,
+          "milestone_ids": [
+            "MS-L1-A"
+          ],
+          "value_lineage": [
+            {
+              "source_type": "wdr",
+              "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+              "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "rule_id": "PS-PROGRESS-ACTUAL-ELIGIBLE",
+              "audit_id": "audit-input-04",
+              "correction_id": null,
+              "rebase_id": null
+            }
+          ]
+        }
+      ],
+      "planned_points": [
+        {
+          "horizon_date": "2026-07-13",
+          "completion_percent": 80,
+          "milestone_ids": [
+            "MS-L1-A",
+            "MS-L2-A"
+          ],
+          "value_lineage": [
+            {
+              "source_type": "baseline",
+              "source_reference": "plans/program-baseline.md#revision-4",
+              "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "rule_id": "PS-PROGRESS-PLANNED-STEP",
+              "audit_id": "audit-input-04",
+              "correction_id": null,
+              "rebase_id": null
+            }
+          ]
+        }
+      ],
+      "forecast_points": [
+        {
+          "horizon_date": "2026-07-20",
+          "forecast_completion_percent": 60,
+          "forecast_coverage_percent": 33.33,
+          "forecast_coverage_status": "partial",
+          "remaining_weight_percent": 60,
+          "covered_remaining_weight_percent": 20,
+          "milestone_ids": [
+            "MS-L1-A",
+            "MS-L1-B"
+          ],
+          "value_lineage": [
+            {
+              "source_type": "wdr",
+              "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+              "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "rule_id": "PS-PROGRESS-FORECAST-STEP",
+              "audit_id": "audit-input-04",
+              "correction_id": null,
+              "rebase_id": null
+            }
+          ]
+        }
+      ]
+    },
+    "milestone_counts": {
+      "applicable": 3,
+      "eligible_actual": 1,
+      "completed": 1,
+      "with_valid_forecast": 1
+    },
+    "comparability": {
+      "disposition": "comparable",
+      "previous_snapshot_id": "ps-previous",
+      "rebase_id": null,
+      "continuous_trend": true,
+      "actual_delta_pp": 20,
+      "reason_codes": []
+    },
+    "gate_readiness": null,
+    "value_lineage": {
+      "actual_completion_percent": [
+        {
+          "source_type": "wdr",
+          "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+          "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "rule_id": "PS-PROGRESS-ACTUAL-ELIGIBLE",
+          "audit_id": "audit-input-04",
+          "correction_id": null,
+          "rebase_id": null
+        }
+      ],
+      "planned_completion_percent": [
+        {
+          "source_type": "baseline",
+          "source_reference": "plans/program-baseline.md#revision-4",
+          "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "rule_id": "PS-PROGRESS-PLANNED-STEP",
+          "audit_id": "audit-input-04",
+          "correction_id": null,
+          "rebase_id": null
+        }
+      ],
+      "completion_gap_pp": [
+        {
+          "source_type": "baseline",
+          "source_reference": "plans/program-baseline.md#revision-4",
+          "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "rule_id": "PS-PROGRESS-COMPLETION-GAP",
+          "audit_id": "audit-input-04",
+          "correction_id": null,
+          "rebase_id": null
+        }
+      ],
+      "project_weight_percent": [
+        {
+          "source_type": "baseline",
+          "source_reference": "plans/program-baseline.md#revision-4",
+          "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "rule_id": "PS-PROGRESS-PROJECT-WEIGHT",
+          "audit_id": "audit-input-04",
+          "correction_id": null,
+          "rebase_id": null
+        }
+      ],
+      "completed_contribution_pp": [
+        {
+          "source_type": "wdr",
+          "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+          "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "rule_id": "PS-PROGRESS-COMPLETED-CONTRIBUTION",
+          "audit_id": "audit-input-04",
+          "correction_id": null,
+          "rebase_id": null
+        }
+      ],
+      "forecast_completion_percent": [
+        {
+          "source_type": "wdr",
+          "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+          "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "rule_id": "PS-PROGRESS-FORECAST-STEP",
+          "audit_id": "audit-input-04",
+          "correction_id": null,
+          "rebase_id": null
+        }
+      ],
+      "forecast_coverage_percent": [
+        {
+          "source_type": "wdr",
+          "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+          "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "rule_id": "PS-PROGRESS-FORECAST-COVERAGE",
+          "audit_id": "audit-input-04",
+          "correction_id": null,
+          "rebase_id": null
+        }
+      ]
+    }
+  },
+  "by_workstream": [
+    {
+      "workstream_id": "L0",
+      "workstream_kind": "L0",
+      "progress_kind": "gate-readiness",
+      "measurement_status": "not-measurable",
+      "measurement_reasons": [
+        {
+          "reason_code": "l0-gate-only",
+          "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+          "detail": "L0 has no approved weighted milestones and remains a gate/readiness scope.",
+          "source_references": [
+            "plans/program-baseline.md#L0"
+          ],
+          "recovery_workflows": []
+        }
+      ],
+      "current": {
+        "actual_completion_percent": null,
+        "planned_completion_percent": null,
+        "completion_gap_pp": null,
+        "project_weight_percent": null,
+        "completed_contribution_pp": null
+      },
+      "forecast_summary": {
+        "horizon_date": null,
+        "forecast_completion_percent": null,
+        "forecast_coverage_percent": null,
+        "forecast_coverage_status": "not-applicable",
+        "remaining_weight_percent": null,
+        "covered_remaining_weight_percent": null,
+        "next_milestone_ids": []
+      },
+      "series": {
+        "actual_points": [],
+        "planned_points": [],
+        "forecast_points": []
+      },
+      "milestone_counts": {
+        "applicable": 0,
+        "eligible_actual": 0,
+        "completed": 0,
+        "with_valid_forecast": 0
+      },
+      "comparability": {
+        "disposition": "no-predecessor",
+        "previous_snapshot_id": null,
+        "rebase_id": null,
+        "continuous_trend": false,
+        "actual_delta_pp": null,
+        "reason_codes": [
+          "l0-gate-only"
+        ]
+      },
+      "gate_readiness": {
+        "applicable_gate_count": 3,
+        "satisfied_gate_count": 2,
+        "blocked_gate_count": 1,
+        "readiness_status": "blocked"
+      },
+      "value_lineage": {
+        "actual_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "planned_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completion_gap_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "project_weight_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completed_contribution_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_coverage_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ]
+      }
+    },
+    {
+      "workstream_id": "L1",
+      "workstream_kind": "delivery",
+      "progress_kind": "weighted-milestone",
+      "measurement_status": "measurable",
+      "measurement_reasons": [
+        {
+          "reason_code": "eligible",
+          "rule_id": "PS-PROGRESS-MEASURABLE",
+          "detail": "L1 weighting and actual evidence are complete.",
+          "source_references": [
+            "plans/program-baseline.md#L1"
+          ],
+          "recovery_workflows": []
+        }
+      ],
+      "current": {
+        "actual_completion_percent": 66.67,
+        "planned_completion_percent": 66.67,
+        "completion_gap_pp": 0,
+        "project_weight_percent": 60,
+        "completed_contribution_pp": 40
+      },
+      "forecast_summary": {
+        "horizon_date": "2026-07-20",
+        "forecast_completion_percent": 100,
+        "forecast_coverage_percent": 100,
+        "forecast_coverage_status": "full",
+        "remaining_weight_percent": 33.33,
+        "covered_remaining_weight_percent": 33.33,
+        "next_milestone_ids": [
+          "MS-L1-B"
+        ]
+      },
+      "series": {
+        "actual_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 66.67,
+            "milestone_ids": [
+              "MS-L1-A"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "wdr",
+                "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+                "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "rule_id": "PS-PROGRESS-ACTUAL-ELIGIBLE",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "planned_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 66.67,
+            "milestone_ids": [
+              "MS-L1-A"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "baseline",
+                "source_reference": "plans/program-baseline.md#L1",
+                "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "rule_id": "PS-PROGRESS-PLANNED-STEP",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "forecast_points": [
+          {
+            "horizon_date": "2026-07-20",
+            "forecast_completion_percent": 100,
+            "forecast_coverage_percent": 100,
+            "forecast_coverage_status": "full",
+            "remaining_weight_percent": 33.33,
+            "covered_remaining_weight_percent": 33.33,
+            "milestone_ids": [
+              "MS-L1-A",
+              "MS-L1-B"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "wdr",
+                "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+                "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "rule_id": "PS-PROGRESS-FORECAST-STEP",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ]
+      },
+      "milestone_counts": {
+        "applicable": 2,
+        "eligible_actual": 1,
+        "completed": 1,
+        "with_valid_forecast": 1
+      },
+      "comparability": {
+        "disposition": "comparable",
+        "previous_snapshot_id": "ps-previous",
+        "rebase_id": null,
+        "continuous_trend": true,
+        "actual_delta_pp": 33.34,
+        "reason_codes": []
+      },
+      "gate_readiness": null,
+      "value_lineage": {
+        "actual_completion_percent": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+            "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "rule_id": "PS-PROGRESS-ACTUAL-ELIGIBLE",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "planned_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L1",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PLANNED-STEP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completion_gap_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L1",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-COMPLETION-GAP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "project_weight_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L1",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PROJECT-WEIGHT",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completed_contribution_pp": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+            "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "rule_id": "PS-PROGRESS-COMPLETED-CONTRIBUTION",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_completion_percent": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+            "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "rule_id": "PS-PROGRESS-FORECAST-STEP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_coverage_percent": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+            "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "rule_id": "PS-PROGRESS-FORECAST-COVERAGE",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ]
+      }
+    },
+    {
+      "workstream_id": "L2",
+      "workstream_kind": "delivery",
+      "progress_kind": "weighted-milestone",
+      "measurement_status": "measurable",
+      "measurement_reasons": [
+        {
+          "reason_code": "eligible",
+          "rule_id": "PS-PROGRESS-MEASURABLE",
+          "detail": "L2 weighting is complete; its future actual is explicitly excluded.",
+          "source_references": [
+            "plans/program-baseline.md#L2"
+          ],
+          "recovery_workflows": [
+            "adp-status-sync"
+          ]
+        }
+      ],
+      "current": {
+        "actual_completion_percent": 0,
+        "planned_completion_percent": 100,
+        "completion_gap_pp": -100,
+        "project_weight_percent": 40,
+        "completed_contribution_pp": 0
+      },
+      "forecast_summary": {
+        "horizon_date": "2026-07-20",
+        "forecast_completion_percent": 0,
+        "forecast_coverage_percent": 0,
+        "forecast_coverage_status": "none",
+        "remaining_weight_percent": 100,
+        "covered_remaining_weight_percent": 0,
+        "next_milestone_ids": []
+      },
+      "series": {
+        "actual_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 0,
+            "milestone_ids": [],
+            "value_lineage": [
+              {
+                "source_type": "input-audit",
+                "source_reference": "audits/input-audit-04.json",
+                "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "rule_id": "PS-PROGRESS-FUTURE-ACTUAL-EXCLUDED",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "planned_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 100,
+            "milestone_ids": [
+              "MS-L2-A"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "baseline",
+                "source_reference": "plans/program-baseline.md#L2",
+                "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "rule_id": "PS-PROGRESS-PLANNED-STEP",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "forecast_points": [
+          {
+            "horizon_date": "2026-07-20",
+            "forecast_completion_percent": 0,
+            "forecast_coverage_percent": 0,
+            "forecast_coverage_status": "none",
+            "remaining_weight_percent": 100,
+            "covered_remaining_weight_percent": 0,
+            "milestone_ids": [],
+            "value_lineage": [
+              {
+                "source_type": "input-audit",
+                "source_reference": "audits/input-audit-04.json",
+                "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "rule_id": "PS-PROGRESS-FORECAST-MISSING",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ]
+      },
+      "milestone_counts": {
+        "applicable": 1,
+        "eligible_actual": 0,
+        "completed": 0,
+        "with_valid_forecast": 0
+      },
+      "comparability": {
+        "disposition": "comparable",
+        "previous_snapshot_id": "ps-previous",
+        "rebase_id": null,
+        "continuous_trend": true,
+        "actual_delta_pp": 0,
+        "reason_codes": []
+      },
+      "gate_readiness": null,
+      "value_lineage": {
+        "actual_completion_percent": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-FUTURE-ACTUAL-EXCLUDED",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "planned_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L2",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PLANNED-STEP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completion_gap_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L2",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-COMPLETION-GAP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "project_weight_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L2",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PROJECT-WEIGHT",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completed_contribution_pp": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-COMPLETED-CONTRIBUTION",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_completion_percent": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-FORECAST-MISSING",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_coverage_percent": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-FORECAST-COVERAGE",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ]
+      }
+    }
+  ],
+  "eligibility": {
+    "as_of": "2026-07-13",
+    "input_audit_id": "audit-input-04",
+    "eligible_actuals": [
+      {
+        "milestone_id": "MS-L1-A",
+        "workstream_id": "L1",
+        "actual_date": "2026-07-13",
+        "weight_percent": 40,
+        "completion_criteria_reference": "plans/program-baseline.md#MS-L1-A-completion",
+        "evidence_references": [
+          "evidence/MS-L1-A.md"
+        ],
+        "audit_id": "audit-input-04",
+        "rule_id": "PS-PROGRESS-ACTUAL-ELIGIBLE"
+      }
+    ],
+    "excluded_actuals": [
+      {
+        "milestone_id": "MS-L2-A",
+        "workstream_id": "L2",
+        "actual_date": "2026-07-14",
+        "reason_code": "future-actual",
+        "rule_id": "PS-PROGRESS-FUTURE-ACTUAL-EXCLUDED",
+        "source_references": [
+          "workstreams/L2/delivery-record.md#MS-L2-A"
+        ],
+        "recovery_workflows": [
+          "adp-status-sync"
+        ]
+      }
+    ]
+  },
+  "corrections": [],
+  "weighted_completion_percent": 40,
+  "completion_measure": "accepted milestone weight",
+  "reason_key": "status.progress_reason.weighted_actuals",
+  "compatibility": {
+    "legacy_progress_version": "2.0",
+    "strategy": "physical-by-workstream-alias",
+    "migration_error_code": "ADP-PROGRESS-MIGRATION-REQUIRED"
+  },
+  "recovery": {
+    "status": "available",
+    "reason_codes": [
+      "future-actual"
+    ],
+    "workflows": [
+      "adp-status-sync"
+    ]
+  },
+  "by_scope": [
+    {
+      "workstream_id": "L0",
+      "workstream_kind": "L0",
+      "progress_kind": "gate-readiness",
+      "measurement_status": "not-measurable",
+      "measurement_reasons": [
+        {
+          "reason_code": "l0-gate-only",
+          "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+          "detail": "L0 has no approved weighted milestones and remains a gate/readiness scope.",
+          "source_references": [
+            "plans/program-baseline.md#L0"
+          ],
+          "recovery_workflows": []
+        }
+      ],
+      "current": {
+        "actual_completion_percent": null,
+        "planned_completion_percent": null,
+        "completion_gap_pp": null,
+        "project_weight_percent": null,
+        "completed_contribution_pp": null
+      },
+      "forecast_summary": {
+        "horizon_date": null,
+        "forecast_completion_percent": null,
+        "forecast_coverage_percent": null,
+        "forecast_coverage_status": "not-applicable",
+        "remaining_weight_percent": null,
+        "covered_remaining_weight_percent": null,
+        "next_milestone_ids": []
+      },
+      "series": {
+        "actual_points": [],
+        "planned_points": [],
+        "forecast_points": []
+      },
+      "milestone_counts": {
+        "applicable": 0,
+        "eligible_actual": 0,
+        "completed": 0,
+        "with_valid_forecast": 0
+      },
+      "comparability": {
+        "disposition": "no-predecessor",
+        "previous_snapshot_id": null,
+        "rebase_id": null,
+        "continuous_trend": false,
+        "actual_delta_pp": null,
+        "reason_codes": [
+          "l0-gate-only"
+        ]
+      },
+      "gate_readiness": {
+        "applicable_gate_count": 3,
+        "satisfied_gate_count": 2,
+        "blocked_gate_count": 1,
+        "readiness_status": "blocked"
+      },
+      "value_lineage": {
+        "actual_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "planned_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completion_gap_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "project_weight_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completed_contribution_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_coverage_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L0",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-L0-GATE-ONLY",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ]
+      },
+      "scope_id": "L0",
+      "scope_kind": "physical"
+    },
+    {
+      "workstream_id": "L1",
+      "workstream_kind": "delivery",
+      "progress_kind": "weighted-milestone",
+      "measurement_status": "measurable",
+      "measurement_reasons": [
+        {
+          "reason_code": "eligible",
+          "rule_id": "PS-PROGRESS-MEASURABLE",
+          "detail": "L1 weighting and actual evidence are complete.",
+          "source_references": [
+            "plans/program-baseline.md#L1"
+          ],
+          "recovery_workflows": []
+        }
+      ],
+      "current": {
+        "actual_completion_percent": 66.67,
+        "planned_completion_percent": 66.67,
+        "completion_gap_pp": 0,
+        "project_weight_percent": 60,
+        "completed_contribution_pp": 40
+      },
+      "forecast_summary": {
+        "horizon_date": "2026-07-20",
+        "forecast_completion_percent": 100,
+        "forecast_coverage_percent": 100,
+        "forecast_coverage_status": "full",
+        "remaining_weight_percent": 33.33,
+        "covered_remaining_weight_percent": 33.33,
+        "next_milestone_ids": [
+          "MS-L1-B"
+        ]
+      },
+      "series": {
+        "actual_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 66.67,
+            "milestone_ids": [
+              "MS-L1-A"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "wdr",
+                "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+                "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "rule_id": "PS-PROGRESS-ACTUAL-ELIGIBLE",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "planned_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 66.67,
+            "milestone_ids": [
+              "MS-L1-A"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "baseline",
+                "source_reference": "plans/program-baseline.md#L1",
+                "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "rule_id": "PS-PROGRESS-PLANNED-STEP",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "forecast_points": [
+          {
+            "horizon_date": "2026-07-20",
+            "forecast_completion_percent": 100,
+            "forecast_coverage_percent": 100,
+            "forecast_coverage_status": "full",
+            "remaining_weight_percent": 33.33,
+            "covered_remaining_weight_percent": 33.33,
+            "milestone_ids": [
+              "MS-L1-A",
+              "MS-L1-B"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "wdr",
+                "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+                "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "rule_id": "PS-PROGRESS-FORECAST-STEP",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ]
+      },
+      "milestone_counts": {
+        "applicable": 2,
+        "eligible_actual": 1,
+        "completed": 1,
+        "with_valid_forecast": 1
+      },
+      "comparability": {
+        "disposition": "comparable",
+        "previous_snapshot_id": "ps-previous",
+        "rebase_id": null,
+        "continuous_trend": true,
+        "actual_delta_pp": 33.34,
+        "reason_codes": []
+      },
+      "gate_readiness": null,
+      "value_lineage": {
+        "actual_completion_percent": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+            "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "rule_id": "PS-PROGRESS-ACTUAL-ELIGIBLE",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "planned_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L1",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PLANNED-STEP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completion_gap_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L1",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-COMPLETION-GAP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "project_weight_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L1",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PROJECT-WEIGHT",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completed_contribution_pp": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-A",
+            "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "rule_id": "PS-PROGRESS-COMPLETED-CONTRIBUTION",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_completion_percent": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+            "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "rule_id": "PS-PROGRESS-FORECAST-STEP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_coverage_percent": [
+          {
+            "source_type": "wdr",
+            "source_reference": "workstreams/L1/delivery-record.md#MS-L1-B",
+            "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "rule_id": "PS-PROGRESS-FORECAST-COVERAGE",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ]
+      },
+      "scope_id": "L1",
+      "scope_kind": "physical"
+    },
+    {
+      "workstream_id": "L2",
+      "workstream_kind": "delivery",
+      "progress_kind": "weighted-milestone",
+      "measurement_status": "measurable",
+      "measurement_reasons": [
+        {
+          "reason_code": "eligible",
+          "rule_id": "PS-PROGRESS-MEASURABLE",
+          "detail": "L2 weighting is complete; its future actual is explicitly excluded.",
+          "source_references": [
+            "plans/program-baseline.md#L2"
+          ],
+          "recovery_workflows": [
+            "adp-status-sync"
+          ]
+        }
+      ],
+      "current": {
+        "actual_completion_percent": 0,
+        "planned_completion_percent": 100,
+        "completion_gap_pp": -100,
+        "project_weight_percent": 40,
+        "completed_contribution_pp": 0
+      },
+      "forecast_summary": {
+        "horizon_date": "2026-07-20",
+        "forecast_completion_percent": 0,
+        "forecast_coverage_percent": 0,
+        "forecast_coverage_status": "none",
+        "remaining_weight_percent": 100,
+        "covered_remaining_weight_percent": 0,
+        "next_milestone_ids": []
+      },
+      "series": {
+        "actual_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 0,
+            "milestone_ids": [],
+            "value_lineage": [
+              {
+                "source_type": "input-audit",
+                "source_reference": "audits/input-audit-04.json",
+                "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "rule_id": "PS-PROGRESS-FUTURE-ACTUAL-EXCLUDED",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "planned_points": [
+          {
+            "horizon_date": "2026-07-13",
+            "completion_percent": 100,
+            "milestone_ids": [
+              "MS-L2-A"
+            ],
+            "value_lineage": [
+              {
+                "source_type": "baseline",
+                "source_reference": "plans/program-baseline.md#L2",
+                "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "rule_id": "PS-PROGRESS-PLANNED-STEP",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ],
+        "forecast_points": [
+          {
+            "horizon_date": "2026-07-20",
+            "forecast_completion_percent": 0,
+            "forecast_coverage_percent": 0,
+            "forecast_coverage_status": "none",
+            "remaining_weight_percent": 100,
+            "covered_remaining_weight_percent": 0,
+            "milestone_ids": [],
+            "value_lineage": [
+              {
+                "source_type": "input-audit",
+                "source_reference": "audits/input-audit-04.json",
+                "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "rule_id": "PS-PROGRESS-FORECAST-MISSING",
+                "audit_id": "audit-input-04",
+                "correction_id": null,
+                "rebase_id": null
+              }
+            ]
+          }
+        ]
+      },
+      "milestone_counts": {
+        "applicable": 1,
+        "eligible_actual": 0,
+        "completed": 0,
+        "with_valid_forecast": 0
+      },
+      "comparability": {
+        "disposition": "comparable",
+        "previous_snapshot_id": "ps-previous",
+        "rebase_id": null,
+        "continuous_trend": true,
+        "actual_delta_pp": 0,
+        "reason_codes": []
+      },
+      "gate_readiness": null,
+      "value_lineage": {
+        "actual_completion_percent": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-FUTURE-ACTUAL-EXCLUDED",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "planned_completion_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L2",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PLANNED-STEP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completion_gap_pp": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L2",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-COMPLETION-GAP",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "project_weight_percent": [
+          {
+            "source_type": "baseline",
+            "source_reference": "plans/program-baseline.md#L2",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rule_id": "PS-PROGRESS-PROJECT-WEIGHT",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "completed_contribution_pp": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-COMPLETED-CONTRIBUTION",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_completion_percent": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-FORECAST-MISSING",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ],
+        "forecast_coverage_percent": [
+          {
+            "source_type": "input-audit",
+            "source_reference": "audits/input-audit-04.json",
+            "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "rule_id": "PS-PROGRESS-FORECAST-COVERAGE",
+            "audit_id": "audit-input-04",
+            "correction_id": null,
+            "rebase_id": null
+          }
+        ]
+      },
+      "scope_id": "L2",
+      "scope_kind": "physical"
+    }
+  ]
+}

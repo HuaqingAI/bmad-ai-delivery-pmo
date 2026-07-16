@@ -34,7 +34,7 @@ IDENTITY_GOLDEN_PATH = FIXTURE_ROOT / "identity-golden.json"
 PANEL_SCHEMA_PATH = SKILL_ROOT / "assets/adp-management-panel-v1.schema.json"
 MANIFEST_SCHEMA_PATH = SKILL_ROOT / "assets/adp-management-panel-manifest-v1.schema.json"
 CATALOG_PATH = SKILL_ROOT / "assets/panel-locale-catalog-v1.json"
-PROGRESS_GOLDEN_PATH = PROJECT_SKILLS / "adp-program-status/assets/fixtures/progress-v2/golden-measurable-boundary.json"
+PROGRESS_GOLDEN_PATH = PROJECT_SKILLS / "adp-program-status/assets/fixtures/progress-v3/golden-measurable-boundary.json"
 FLOW_GOLDEN_PATH = PROJECT_SKILLS / "adp-flow-graph/assets/fixtures/flow-contract-v1/golden-parallel-aggregation-conditional-rework.json"
 
 VIEW_SECTIONS = {
@@ -296,8 +296,10 @@ def evaluate_recovery(inputs: dict[str, Any]) -> dict[str, Any]:
         findings.append(_finding("panel.input.program-status.missing", "blocked", "program-status", "Canonical program status is missing.", ["adp-state-audit", "adp-program-status"]))
     else:
         progress = status.get("progress")
-        if not isinstance(progress, dict) or progress.get("progress_schema_version") != "2.0.0":
-            findings.append(_finding("panel.input.progress.migration-required", "blocked", "program-status", "Canonical progress schema 2.0.0 is required.", ["adp-state-audit", "adp-program-status"]))
+        if not isinstance(progress, dict) or progress.get("progress_schema_version") != "3.0.0":
+            findings.append(_finding("panel.input.progress.migration-required", "blocked", "program-status", "Canonical progress schema 3.0.0 is required.", ["adp-state-audit", "adp-program-status"]))
+        elif not isinstance(progress.get("by_scope"), list):
+            findings.append(_finding("panel.input.progress.migration-required", "blocked", "program-status", "Canonical progress by_scope projection is required.", ["adp-state-audit", "adp-program-status"]))
         else:
             status_progress_valid = True
 
@@ -477,7 +479,7 @@ def build_views() -> list[dict[str, Any]]:
             _section("pl-status-strip", _binding("/data/status", "program-status", "", "allowlist")),
             _section("pl-progress-summary", _binding("/data/status/progress/overall", "program-status", "/progress/overall")),
             _section("pl-progress-trend", _binding("/data/status/progress/overall/series", "program-status", "/progress/overall/series")),
-            _section("pl-workstream-comparison", _binding("/data/status/progress/by_workstream", "program-status", "/progress/by_workstream", "stable-sort", "workstream_id")),
+            _section("pl-workstream-comparison", _binding("/data/status/progress/by_scope", "program-status", "/progress/by_scope", "stable-sort", "scope_id")),
             _section("pl-flow", _binding("/data/flows/project-lead", "flow-graph", "", "select"), flow=True),
             _section("pl-roadmap-variance", _binding("/data/roadmap", "roadmap", "", "allowlist")),
             _section("pl-source-lineage", _binding("/data/status/source_fingerprints", "program-status", "/source_fingerprints")),

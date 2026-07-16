@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 
-PROGRESS_SCHEMA_VERSION = "2.0.0"
+PROGRESS_SCHEMA_VERSION = "3.0.0"
 PROGRESS_BASIS = "weighted-milestone"
 MIGRATION_ERROR_CODE = "ADP-PROGRESS-MIGRATION-REQUIRED"
 ZERO = Decimal("0")
@@ -24,6 +24,7 @@ class ProgressContractError(ValueError):
 def build_progress_projection(
     *,
     baseline: dict[str, Any],
+    scope_contract: dict[str, Any],
     assessed_milestones: list[dict[str, Any]],
     assessed_gates: list[dict[str, Any]],
     rows: dict[str, dict[str, Any]],
@@ -45,13 +46,26 @@ def build_progress_projection(
         audit,
         as_of,
         source_fingerprints,
+        scope_contract,
     )
     corrections = collect_corrections(rows, baseline_items, audit, source_fingerprints)
     horizons = forecast_horizons(progress_rows, as_of)
     comparability = comparability_for(identity, previous_snapshot, audit)
     weighting_status, weighting_reasons = validate_weighting(baseline_items, baseline.get("weighting", {}))
 
-    workstream_ids = sorted({str(item.get("workstream_id") or "") for item in baseline_items.values()} - {""})
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in scope_contract.get("virtual_scopes", [])
+        if isinstance(item, dict)
+    }
+    workstream_ids = sorted(
+        {
+            str(item.get("workstream_id") or "")
+            for item in baseline_items.values()
+            if str(item.get("workstream_id") or "") not in virtual_scope_ids
+        }
+        - {""}
+    )
     if "L0" not in workstream_ids:
         workstream_ids.insert(0, "L0")
 
@@ -84,6 +98,28 @@ def build_progress_projection(
                     comparability=comparability_for_scope(comparability, previous_snapshot, workstream_id),
                 ),
                 workstream_id,
+            )
+        )
+
+    by_scope: list[dict[str, Any]] = [as_physical_scope_projection(item) for item in by_workstream]
+    for scope_id in sorted(virtual_scope_ids):
+        scope_items = [item for item in progress_rows if item["workstream_id"] == scope_id]
+        scope_status, scope_reasons = validate_scope_weights(scope_items, weighting_status, weighting_reasons)
+        by_scope.append(
+            as_virtual_scope_projection(
+                build_scope_projection(
+                    scope_id=scope_id,
+                    items=scope_items,
+                    measurement_status=scope_status,
+                    measurement_reasons=scope_reasons,
+                    as_of=as_of,
+                    reporting_period=reporting_period,
+                    horizons=horizons,
+                    project_scale=True,
+                    baseline_lineage=baseline_lineage,
+                    audit_lineage=audit_lineage,
+                    comparability=comparability_for_scope(comparability, previous_snapshot, scope_id),
+                )
             )
         )
 
@@ -192,6 +228,7 @@ def build_progress_projection(
         "measurement_status": overall_status,
         "measurement_reasons": overall["measurement_reasons"],
         "overall": overall,
+        "by_scope": by_scope,
         "by_workstream": by_workstream,
         "eligibility": {
             "as_of": as_of.isoformat(),
@@ -204,8 +241,8 @@ def build_progress_projection(
         "completion_measure": str(baseline.get("weighting", {}).get("completion_measure") or "") or None,
         "reason_key": "status.progress_reason.weighted_actuals" if overall_status == "measurable" else "status.progress_reason.weighting_disabled",
         "compatibility": {
-            "legacy_progress_version": "1.0",
-            "strategy": "legacy-alias",
+            "legacy_progress_version": "2.0",
+            "strategy": "physical-by-workstream-alias",
             "migration_error_code": MIGRATION_ERROR_CODE,
         },
         "recovery": build_recovery(overall_status, overall["measurement_reasons"], excluded_actuals),
@@ -222,20 +259,28 @@ def evaluate_actual_eligibility(
     audit: dict[str, Any],
     as_of: date,
     source_fingerprints: dict[str, str],
+    scope_contract: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     accepted_sources = {normalize_path(path) for path in audit.get("source_fingerprints", {})}
     projection_rows: list[dict[str, Any]] = []
     eligible_actuals: list[dict[str, Any]] = []
     excluded_actuals: list[dict[str, Any]] = []
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in scope_contract.get("virtual_scopes", [])
+        if isinstance(item, dict)
+    }
     for milestone_id in sorted(baseline_items):
         item = baseline_items[milestone_id]
         row = rows.get(milestone_id, {})
         assessed = assessed_items[milestone_id]
-        raw_actual = parse_optional_date(row.get("actual"))
-        weight = decimal_or_none(item.get("weight"))
         workstream_id = str(item["workstream_id"])
+        is_virtual = workstream_id in virtual_scope_ids
+        raw_actual = parse_optional_date(assessed.get("actual_date") if is_virtual else row.get("actual"))
+        weight = decimal_or_none(item.get("weight"))
         wdr_path = str(row.get("wdr_path") or "")
-        evidence = sorted(set(str(value) for value in row.get("source_references", []) if str(value).strip()))
+        evidence_source = assessed.get("source_references", []) if is_virtual else row.get("source_references", [])
+        evidence = sorted(set(str(value) for value in evidence_source if str(value).strip()))
         exclusion: str | None = None
         if raw_actual is not None and raw_actual > as_of:
             exclusion = "future-actual"
@@ -243,13 +288,17 @@ def evaluate_actual_eligibility(
             exclusion = "missing-completion-criteria"
         elif raw_actual is not None and not evidence:
             exclusion = "missing-evidence"
-        elif raw_actual is not None and normalize_path(wdr_path) not in accepted_sources:
+        elif raw_actual is not None and not is_virtual and normalize_path(wdr_path) not in accepted_sources:
             exclusion = "unaudited-actual"
         elif raw_actual is not None and (weight is None or weight <= ZERO or not weight.is_finite()):
             exclusion = "invalid-weight"
 
         eligible_date = raw_actual if raw_actual is not None and exclusion is None else None
-        actual_lineage = lineage_for_wdr(wdr_path, source_fingerprints, str(audit["input_audit_id"]))
+        actual_lineage = (
+            lineage_for_virtual(assessed, str(audit["input_audit_id"]))
+            if is_virtual
+            else lineage_for_wdr(wdr_path, source_fingerprints, str(audit["input_audit_id"]))
+        )
         if eligible_date is not None:
             eligible_actuals.append(
                 {
@@ -260,7 +309,7 @@ def evaluate_actual_eligibility(
                     "completion_criteria_reference": str(item["completion_criteria"]),
                     "evidence_references": evidence,
                     "audit_id": str(audit["input_audit_id"]),
-                    "rule_id": "PROGRESS-ACTUAL-ELIGIBLE",
+                    "rule_id": "PROGRESS-VIRTUAL-ACTUAL-ELIGIBLE" if is_virtual else "PROGRESS-ACTUAL-ELIGIBLE",
                 }
             )
         elif raw_actual is not None:
@@ -317,12 +366,12 @@ def validate_scope_weights(
     weighting_reasons: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
     if not items:
-        return "not-measurable", [measurement_reason("no-applicable-milestones", "PROGRESS-SCOPE-NO-MILESTONES", "The workstream has no approved weighted milestones.", ["plans/program-baseline.md"], ["adp-plan-baseline"])]
+        return "not-measurable", [measurement_reason("no-applicable-milestones", "PROGRESS-SCOPE-NO-MILESTONES", "The scope has no approved weighted milestones.", ["plans/program-baseline.md"], ["adp-plan-baseline"])]
     if weighting_status != "measurable":
         return weighting_status, weighting_reasons
     if any(item["weight"] is None for item in items):
-        return "not-measurable", [measurement_reason("incomplete-weighting", "PROGRESS-SCOPE-WEIGHTING-INCOMPLETE", "The workstream has incomplete approved weighting.", ["plans/program-baseline.md"], ["adp-plan-baseline"])]
-    return "measurable", [measurement_reason("eligible", "PROGRESS-SCOPE-ELIGIBLE", "The workstream has approved weighting and auditable milestone state.", ["plans/program-baseline.md"], [])]
+        return "not-measurable", [measurement_reason("incomplete-weighting", "PROGRESS-SCOPE-WEIGHTING-INCOMPLETE", "The scope has incomplete approved weighting.", ["plans/program-baseline.md"], ["adp-plan-baseline"])]
+    return "measurable", [measurement_reason("eligible", "PROGRESS-SCOPE-ELIGIBLE", "The scope has approved weighting and auditable milestone state.", ["plans/program-baseline.md"], [])]
 
 
 def build_scope_projection(
@@ -480,6 +529,19 @@ def as_workstream_projection(projection: dict[str, Any], workstream_id: str) -> 
     return result
 
 
+def as_physical_scope_projection(projection: dict[str, Any]) -> dict[str, Any]:
+    result = dict(projection)
+    result["scope_id"] = str(projection["workstream_id"])
+    result["scope_kind"] = "physical"
+    return result
+
+
+def as_virtual_scope_projection(projection: dict[str, Any]) -> dict[str, Any]:
+    result = dict(projection)
+    result["scope_kind"] = "virtual"
+    return result
+
+
 def comparability_for(
     identity: dict[str, Any], previous_snapshot: dict[str, Any] | None, audit: dict[str, Any]
 ) -> dict[str, Any]:
@@ -530,6 +592,13 @@ def apply_actual_deltas(projection: dict[str, Any], previous_snapshot: dict[str,
         overall["comparability"]["actual_delta_pp"] = round2(Decimal(str(current)) - Decimal(str(previous)))
     for item in projection["by_workstream"]:
         previous = previous_scope_actual(previous_snapshot, item["workstream_id"])
+        current = item["current"]["actual_completion_percent"]
+        if item["comparability"]["continuous_trend"] and previous is not None and current is not None:
+            item["comparability"]["actual_delta_pp"] = round2(Decimal(str(current)) - Decimal(str(previous)))
+    for item in projection["by_scope"]:
+        if item.get("scope_kind") != "virtual":
+            continue
+        previous = previous_scope_actual(previous_snapshot, item["scope_id"])
         current = item["current"]["actual_completion_percent"]
         if item["comparability"]["continuous_trend"] and previous is not None and current is not None:
             item["comparability"]["actual_delta_pp"] = round2(Decimal(str(current)) - Decimal(str(previous)))
@@ -592,7 +661,7 @@ def collect_corrections(
 
 
 def validate_progress_projection(value: dict[str, Any]) -> None:
-    required = {"progress_schema_version", "basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "measurement_reasons", "overall", "by_workstream", "eligibility", "corrections", "weighted_completion_percent", "completion_measure", "reason_key", "compatibility", "recovery"}
+    required = {"progress_schema_version", "basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "measurement_reasons", "overall", "by_scope", "by_workstream", "eligibility", "corrections", "weighted_completion_percent", "completion_measure", "reason_key", "compatibility", "recovery"}
     missing = sorted(required - set(value))
     if missing:
         raise ProgressContractError("progress projection missing fields: " + ", ".join(missing))
@@ -601,7 +670,16 @@ def validate_progress_projection(value: dict[str, Any]) -> None:
     status = value["measurement_status"]
     if status not in {"measurable", "partial", "not-measurable", "blocked"}:
         raise ProgressContractError(f"invalid measurement_status {status!r}")
-    for scope in [value["overall"], *value["by_workstream"]]:
+    if not isinstance(value["by_scope"], list) or not isinstance(value["by_workstream"], list):
+        raise ProgressContractError("by_scope and by_workstream must be arrays")
+    virtual_ids = {
+        str(item.get("scope_id"))
+        for item in value["by_scope"]
+        if isinstance(item, dict) and item.get("scope_kind") == "virtual"
+    }
+    if any(item.get("workstream_id") in virtual_ids for item in value["by_workstream"] if isinstance(item, dict)):
+        raise ProgressContractError("virtual scopes must not appear in by_workstream")
+    for scope in [value["overall"], *value["by_scope"]]:
         current = scope["current"]
         numeric = [current["actual_completion_percent"], current["planned_completion_percent"], current["project_weight_percent"], current["completed_contribution_pp"]]
         if scope["measurement_status"] == "measurable":
@@ -615,7 +693,7 @@ def validate_progress_projection(value: dict[str, Any]) -> None:
         for point in scope["series"]["forecast_points"]:
             if point["forecast_coverage_status"] == "complete" and point["forecast_coverage_percent"] is not None:
                 raise ProgressContractError("complete forecast coverage must have a null percent")
-    measurable = [item for item in value["by_workstream"] if item["progress_kind"] == PROGRESS_BASIS and item["measurement_status"] == "measurable"]
+    measurable = [item for item in value["by_scope"] if item["progress_kind"] == PROGRESS_BASIS and item["measurement_status"] == "measurable"]
     if status == "measurable":
         contribution = round2(sum((Decimal(str(item["current"]["completed_contribution_pp"])) for item in measurable), ZERO))
         if contribution != value["overall"]["current"]["actual_completion_percent"]:
@@ -691,6 +769,21 @@ def lineage_for_wdr(reference: str, source_fingerprints: dict[str, str], audit_i
     return lineage("wdr", reference or "delivery-record:missing", fingerprint_for(reference, source_fingerprints), "PROGRESS-WDR-ACTUAL", audit_id=audit_id)
 
 
+def lineage_for_virtual(assessed: dict[str, Any], audit_id: str) -> dict[str, Any]:
+    references = [str(value) for value in assessed.get("source_references", []) if str(value).strip()]
+    reference = next(
+        (value for value in references if value.startswith("snapshots/program-status/")),
+        references[0] if references else f"virtual-scope:{assessed.get('workstream_id', 'program')}",
+    )
+    return lineage(
+        "virtual-aggregation",
+        reference,
+        digest({"references": references, "aggregation": assessed.get("aggregation")}),
+        str(assessed.get("rule_id") or "PROGRESS-VIRTUAL-SCOPE"),
+        audit_id=audit_id,
+    )
+
+
 def lineage_for_correction(item: dict[str, Any], source_fingerprints: dict[str, str]) -> dict[str, Any]:
     reference = item["source_references"][0]
     return lineage("correction", reference, fingerprint_for(reference, source_fingerprints), item["rule_id"], audit_id=item["audit_id"], correction_id=item["correction_id"])
@@ -735,6 +828,9 @@ def previous_scope_actual(snapshot: dict[str, Any] | None, scope_id: str) -> flo
     progress = snapshot.get("progress")
     if not isinstance(progress, dict) or progress.get("progress_schema_version") != PROGRESS_SCHEMA_VERSION:
         return None
+    for item in progress.get("by_scope", []):
+        if item.get("scope_id") == scope_id:
+            return item.get("current", {}).get("actual_completion_percent")
     for item in progress.get("by_workstream", []):
         if item.get("workstream_id") == scope_id:
             return item.get("current", {}).get("actual_completion_percent")

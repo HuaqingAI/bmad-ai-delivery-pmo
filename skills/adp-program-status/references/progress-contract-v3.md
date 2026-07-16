@@ -1,14 +1,14 @@
-# Canonical Progress Contract v2
+# Canonical Progress Contract v3
 
-This reference freezes the `program-status.progress` contract that roadmap, meeting-pack, management-panel, and Program Lead consumers will read. The machine contract is `assets/program-status-progress-v2.schema.json`. Contract fixtures under `assets/fixtures/progress-v2/` are normative examples. A consumer may format, filter, or select a supplied horizon; it must not aggregate milestone weights, substitute dates, infer comparability, or repair missing values.
+This reference freezes the `program-status.progress` contract that roadmap, meeting-pack, management-panel, and Program Lead consumers will read. The machine contract is `assets/program-status-progress-v3.schema.json`. Contract fixtures under `assets/fixtures/progress-v3/` are normative examples. A consumer may format, filter, or select a supplied horizon; it must not aggregate milestone weights, substitute dates, infer comparability, or repair missing values.
 
 ## Version and units
 
-- `progress_schema_version` is exactly `2.0.0`; `basis` is exactly `weighted-milestone`.
+- `progress_schema_version` is exactly `3.0.0`; `basis` is exactly `weighted-milestone`.
 - Fields ending in `_percent` use a `0..100` scale. `completion_gap_pp`, `actual_delta_pp`, and `completed_contribution_pp` are percentage points; date variance remains `variance_days` outside this object.
 - Approved milestone weights are project percentage points with at most two decimal places and sum to `100.00` across the applicable project scope. Calculations use decimal arithmetic and serialize to two decimal places with round-half-up.
 - `completion_gap_pp` is the serialized actual percent minus the serialized planned percent. It is never a schedule-days metric.
-- `by_workstream[].project_weight_percent` is the workstream's share of project weight. `completed_contribution_pp` is completed project weight, not the within-workstream completion rate. Overall actual equals the sum of weighted workstream contributions.
+- `by_scope[].current.project_weight_percent` is the scope's share of project weight. `completed_contribution_pp` is completed project weight, not the within-scope completion rate. Overall actual equals the sum of measurable weighted scope contributions.
 
 ## Measurement status and nulls
 
@@ -57,11 +57,13 @@ Forecast coverage uses all uncompleted weight in the same scope as denominator a
 
 `forecast_summary` is the first supplied future horizon, already copied into display-ready fields. Consumers do not derive it from planned dates or choose a replacement horizon.
 
-## Workstream and L0 boundary
+## Scope, Workstream, and L0 boundary
 
-L1 and higher workstreams use `progress_kind: weighted-milestone`. Their actual, planned, gap, and forecast percentages are normalized by that workstream's approved milestone weight while project weight and completed contribution stay on the project scale.
+`by_scope` is the canonical scope projection. Each entry declares `scope_id` and `scope_kind: physical|virtual`. Physical L1 and higher scopes use `progress_kind: weighted-milestone`; their actual, planned, gap, and forecast percentages are normalized by that Workstream's approved milestone weight while project weight and completed contribution stay on the project scale.
 
 L0 defaults to `progress_kind: gate-readiness`. It carries `gate_readiness`, has `measurement_status: not-measurable` with reason `l0-gate-only`, and all completion fields are `null`. L0 enters weighted progress only when its upstream source supplies approved milestone weights, completion criteria, audited actual evidence, and the same scope identity; then it uses `weighted-milestone` exactly like any other workstream.
+
+The reserved `program` scope appears only in `by_scope` with `scope_kind: virtual`; it has no `workstream_id`, `workstream_kind`, WDR, or gate-readiness projection. Its weighted eligibility uses canonical virtual milestone evidence from Program Status, including aggregation or source-backed signal lineage. It never appears in `by_workstream`.
 
 ## Comparability and corrections
 
@@ -76,13 +78,13 @@ Within a comparable scope and without correction lineage, actual step points nev
 
 ## Compatibility and recovery
 
-The v2 object retains the v1 fields `weighted_completion_percent`, `completion_measure`, and `reason_key` as read-only compatibility aliases. The weighted alias equals `overall.current.actual_completion_percent` when the overall scope is measurable and is `null` otherwise. `compatibility.strategy` is `legacy-alias`; consumers requiring v2 reject a missing or different `progress_schema_version` with `ADP-PROGRESS-MIGRATION-REQUIRED` rather than guessing fields.
+The v3 object retains `weighted_completion_percent`, `completion_measure`, and `reason_key` as read-only compatibility aliases. The weighted alias equals `overall.current.actual_completion_percent` when the overall scope is measurable and is `null` otherwise. `by_workstream` is a physical-only compatibility projection of the physical entries in `by_scope`; it must never contain `program` or any other virtual scope. `compatibility.strategy` is `physical-by-workstream-alias`; consumers requiring v3 reject a missing or different `progress_schema_version` with `ADP-PROGRESS-MIGRATION-REQUIRED` rather than guessing fields.
 
 `recovery.status` is `not-required`, `available`, or `required`. Non-measurable conditions may offer recovery; blocked conditions require at least one reason code and workflow. Recovery routes to the owner of the missing contract (`adp-plan-baseline`, `adp-status-sync`, or `adp-state-audit`) and never computes a substitute percentage.
 
 ## Consumer invariants
 
-- Read `overall` and `by_workstream` values directly; never sum milestones or infer L0 completion.
+- Read `overall` and `by_scope` values directly; use `by_workstream` only for physical compatibility and never sum milestones or infer L0 completion.
 - Use `forecast_summary` or a supplied `forecast_points` entry; never fill forecast from planned.
 - Break trend lines when `continuous_trend` is false.
 - Show correction lineage when actual decreases.

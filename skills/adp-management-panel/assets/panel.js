@@ -7,7 +7,7 @@
   var modeIds = ["quantitative-progress", "flow-progress"];
   var statusValues = ["on-plan", "at-risk", "blocked", "off-plan", "indeterminate", "complete", "in-progress", "ready", "planned", "not-applicable"];
   var state = parseHash();
-  var sortState = { key: "workstream_id", direction: "ascending" };
+  var sortState = { key: "scope_id", direction: "ascending" };
   var collapsedLanes = new Set();
   var flowTransform = { scale: 1, x: 0, y: 0 };
   var svgNamespace = "http://www.w3.org/2000/svg";
@@ -97,7 +97,7 @@
 
   function initControls() {
     var workstream = document.getElementById("filter-workstream");
-    (model.data.status.progress.by_workstream || []).forEach(function (item) { addOption(workstream, item.workstream_id); });
+    (model.data.status.progress.by_scope || []).forEach(function (item) { addOption(workstream, item.scope_id); });
     var statuses = document.getElementById("filter-status");
     statusValues.forEach(function (value) { addOption(statuses, value); });
     var owners = document.getElementById("filter-owner");
@@ -153,7 +153,7 @@
   function currentProgress() {
     var current = model.data.status.progress.overall;
     if (state.workstream !== "all") {
-      var selected = (model.data.status.progress.by_workstream || []).find(function (item) { return item.workstream_id === state.workstream; });
+      var selected = (model.data.status.progress.by_scope || []).find(function (item) { return item.scope_id === state.workstream; });
       if (selected) current = selected;
     }
     if (state.period === "current") return { current: current.current, forecast: current.forecast_summary, label: model.data.status.as_of };
@@ -309,7 +309,7 @@
     var table = create("table", "data-table");
     table.appendChild(create("caption", "", "Canonical workstream progress; values are copied from program-status."));
     var columns = [
-      ["workstream_id", "Workstream"], ["measurement_status", "Measurement"], ["project_weight_percent", "Project weight"],
+      ["scope_id", "Scope"], ["scope_kind", "Scope kind"], ["measurement_status", "Measurement"], ["project_weight_percent", "Project weight"],
       ["completed_contribution_pp", "Contribution"], ["actual_completion_percent", "Actual"], ["planned_completion_percent", "Planned"],
       ["completion_gap_pp", "Gap (pp)"], ["forecast_completion_percent", "Forecast / coverage"]
     ];
@@ -342,7 +342,7 @@
       var current = item.current || {};
       var forecast = item.forecast_summary || {};
       [
-        item.workstream_id, item.measurement_status, percent(current.project_weight_percent), percent(current.completed_contribution_pp, " pp"),
+        item.scope_id, item.scope_kind, item.measurement_status, percent(current.project_weight_percent), percent(current.completed_contribution_pp, " pp"),
         percent(current.actual_completion_percent), percent(current.planned_completion_percent), percent(current.completion_gap_pp, " pp"),
         percent(forecast.forecast_completion_percent) + " / " + percent(forecast.forecast_coverage_percent)
       ].forEach(function (value, index) {
@@ -359,15 +359,15 @@
   }
 
   function sortValue(item, key) {
-    if (key === "workstream_id" || key === "measurement_status") return item[key] || "";
+    if (key === "scope_id" || key === "scope_kind" || key === "measurement_status") return item[key] || "";
     if (key === "forecast_completion_percent") return Number((item.forecast_summary || {})[key] || -1);
     return Number((item.current || {})[key] || -1);
   }
 
   function filteredWorkstreams() {
     var query = document.getElementById("filter-search").value.trim().toLocaleLowerCase();
-    return (model.data.status.progress.by_workstream || []).filter(function (item) {
-      if (state.workstream !== "all" && item.workstream_id !== state.workstream) return false;
+    return (model.data.status.progress.by_scope || []).filter(function (item) {
+      if (state.workstream !== "all" && item.scope_id !== state.workstream) return false;
       if (state.status !== "all" && item.measurement_status !== state.status && (item.gate_readiness || {}).readiness_status !== state.status) return false;
       return !query || JSON.stringify(item).toLocaleLowerCase().indexOf(query) >= 0;
     });
@@ -397,7 +397,7 @@
       summary.appendChild(create("p", "warning", "Historical comparison is shown side by side. Forecast is intentionally absent when it is not part of the selected immutable snapshot."));
     }
     root.appendChild(summary);
-    var trendScope = state.workstream === "all" ? model.data.status.progress.overall : (model.data.status.progress.by_workstream || []).find(function (item) { return item.workstream_id === state.workstream; }) || model.data.status.progress.overall;
+    var trendScope = state.workstream === "all" ? model.data.status.progress.overall : (model.data.status.progress.by_scope || []).find(function (item) { return item.scope_id === state.workstream; }) || model.data.status.progress.overall;
     var trend = section("Milestone step trend / scope " + (trendScope.scope_id || trendScope.workstream_id || "program"), "pl-progress-trend");
     renderTrend(trend, trendScope);
     root.appendChild(trend);
@@ -405,7 +405,7 @@
     var rows = filteredWorkstreams();
     tableSection.appendChild(sortableTable(rows));
     root.appendChild(tableSection);
-    document.getElementById("result-count").textContent = rows.length + " workstreams";
+    document.getElementById("result-count").textContent = rows.length + " scopes";
   }
 
   function readinessBlock(meeting) {

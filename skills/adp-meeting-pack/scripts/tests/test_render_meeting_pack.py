@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "render_meeting_pack.py"
-PROGRESS_GOLDEN = SCRIPT.parents[2] / "adp-program-status" / "assets" / "fixtures" / "progress-v2" / "golden-measurable-boundary.json"
+PROGRESS_GOLDEN = SCRIPT.parents[2] / "adp-program-status" / "assets" / "fixtures" / "progress-v3" / "golden-measurable-boundary.json"
 
 
 def progress_fixture(as_of: str, revision: int, period: dict[str, str]) -> dict:

@@ -19,6 +19,7 @@ from typing import Any
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "assets" / "workstream-templates"
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
+DEFAULT_SCOPE_CONTRACT_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "scope_contract.py"
 TEMPLATE_FILES = ["delivery-record.md", "evidence.md", "decisions.md", "readiness.md"]
 CORE_MEMORY_FILES = [
     "index.md",
@@ -264,6 +265,18 @@ def main() -> int:
 
     try:
         workstream_id = normalize_id(args.id)
+        scope_module = load_module(DEFAULT_SCOPE_CONTRACT_SCRIPT, "adp_workstream_scope_contract")
+        if scope_module.is_virtual_cli_scope_id(args.id):
+            emit(
+                {
+                    "ok": False,
+                    "error_code": "ADP-VIRTUAL-SCOPE-NOT-WORKSTREAM",
+                    "error": "program is a reserved virtual scope and cannot own a WDR or BMM artifacts",
+                    "workstream_id": workstream_id,
+                },
+                args.output,
+            )
+            return 2
         args.depends_on = canonical_cross_workstream_ids(args.depends_on, "--depends-on")
         args.impacts = canonical_cross_workstream_ids(args.impacts, "--impacts")
     except ValueError as exc:

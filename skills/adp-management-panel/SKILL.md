@@ -19,7 +19,7 @@ This workflow composes audited ADP projections into a self-contained, `file://` 
 
 Accept only audited, versioned inputs from their owners:
 
-- `adp-program-status`: status snapshot and `progress_schema_version: 2.0.0`.
+- `adp-program-status`: status snapshot and `progress_schema_version: 3.0.0`; read `by_scope`, while `by_workstream` remains a physical-only compatibility projection.
 - `adp-roadmap-sync`: timeline and the same copied canonical progress object.
 - `adp-flow-graph`: `flow_graph_schema_version: 1.0.0`; layout fields are forbidden.
 - `adp-meeting-pack`: FDE morning and business biweekly distillates with explicit pack ID, confirmed window, readiness, lifecycle, audit identity, information budget, and canonical flow selection.

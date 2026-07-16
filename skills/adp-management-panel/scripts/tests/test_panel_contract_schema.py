@@ -28,7 +28,7 @@ class PanelContractSchemaTests(unittest.TestCase):
         self.assertEqual(self.model["panel_id"], self.model["manifest"]["panel_id"])
 
     def test_authoritative_progress_and_flow_fixtures_remain_schema_shaped(self) -> None:
-        progress_schema = load_json(PROGRESS_GOLDEN_PATH.parent.parent.parent / "program-status-progress-v2.schema.json")
+        progress_schema = load_json(PROGRESS_GOLDEN_PATH.parent.parent.parent / "program-status-progress-v3.schema.json")
         flow_schema = load_json(FLOW_GOLDEN_PATH.parent.parent.parent / "adp-flow-graph-v1.schema.json")
         self.assertEqual([], validate_schema(self.inputs["program_status"]["progress"], progress_schema))
         self.assertEqual([], validate_schema(self.inputs["flow_graph"], flow_schema))

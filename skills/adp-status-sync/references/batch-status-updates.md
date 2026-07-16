@@ -4,9 +4,11 @@ Load this reference for multiple workstreams, workflow-produced structured actio
 
 ## Payload Contract
 
-Batch files use `{"updates":[{"id":"<workstream-id>","milestones":[...],"actions":[...]}]}`. A milestone requires `milestone_id`, `status`, and `evidence`, with optional `forecast` or `actual`. New action registration requires `owner`, `workstream` or `affected_workstreams`, `action`, `source`, `due`, `status`, `closure_criteria`, and `owning_workflow`; any existing-action mutation requires its exact `action_id`. `next_actions` is accepted only for legacy compatibility. Put interpreted owner or closure-quality deficiencies in the update's `unresolved_gaps` array so they survive into the writer result.
+Batch files use `{"updates":[{"id":"<workstream-id>","milestones":[...],"actions":[...],"refresh_actions":false}]}`. `refresh_actions` is boolean and defaults to false. A milestone requires `milestone_id`, `status`, and `evidence`, with optional `forecast` or `actual`. New action registration requires `owner`, `workstream` or `affected_workstreams`, `action`, `source`, `due`, `status`, `closure_criteria`, and `owning_workflow`; any existing-action mutation requires its exact `action_id`. `next_actions` is accepted only for legacy compatibility and, when supplied, wins over `refresh_actions`: write only the explicit content without merging ledger entries. Put interpreted owner or closure-quality deficiencies in the update's `unresolved_gaps` array so they survive into the writer result.
 
 For one source action affecting several workstreams, write one canonical action with `workstream: "program"` and `affected_workstreams`. Split it only when owner, due trigger, or deliverable differs. Program actions update the ledger and daily log without requiring `workstreams/program/delivery-record.md`.
+
+When `refresh_actions` is true, project only active actions targeted to the physical update ID or explicitly listing it in `affected_workstreams`. Preserve manual WDR text without a stable action marker and reconcile ledger-backed entries by action ID. Reject refresh, milestone, or WDR-field updates targeting `program` with `ADP-VIRTUAL-SCOPE-NOT-WDR-TARGET`; action-only program updates remain valid.
 
 ## Preview And Apply
 

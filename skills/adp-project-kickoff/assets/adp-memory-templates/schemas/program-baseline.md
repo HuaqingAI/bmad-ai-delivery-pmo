@@ -8,7 +8,22 @@ Every gate and milestone requires `id`, `name`, `planned_date`, `owner`, `confir
 
 Canonical confirmation values are `candidate`, `confirmed`, and `approved`. Executed baselines require the root and every plan item to be `confirmed` or `approved`.
 
-IDs are case-sensitive stable tokens matching `[A-Za-z0-9][A-Za-z0-9._-]*`. Dependencies and `critical_path` entries reference those IDs. Dates use ISO `YYYY-MM-DD`. Item tolerance overrides are integers from 0 through 90.
+IDs are case-sensitive stable tokens matching `[A-Za-z0-9][A-Za-z0-9._-]*`. A milestone `workstream_id` must equal a current WDR's canonical `Workstream ID`, except for the exact reserved baseline ID `program`. Dependencies and `critical_path` entries reference plan-item IDs. Dates use ISO `YYYY-MM-DD`. Item tolerance overrides are integers from 0 through 90.
+
+## Scope Contract
+
+`adp-plan-baseline/scripts/scope_contract.py` is the identity authority shared by all consumers. It derives physical `registered_workstreams` from valid WDR registry entries and derives `virtual_scopes` from the canonical baseline. The exact case-sensitive baseline ID `program` resolves to:
+
+```json
+{
+  "scope_id": "program",
+  "scope_kind": "virtual",
+  "requires_wdr": false,
+  "owns_bmm_artifacts": false
+}
+```
+
+CLI selectors may normalize supplied casing before matching. `project` and `adp-program` remain action-routing IDs only. A legacy `workstreams/program/` directory produces `ADP-LEGACY-VIRTUAL-SCOPE-WDR` but never changes the virtual identity and is never deleted automatically. Virtual milestones require no WDR, sidecar, BMM phase, or BMM artifact index.
 
 Weighting is disabled by default. When enabled, `completion_measure` and `source` are required, every milestone needs a numeric `weight` and non-empty `completion_criteria`, and weights total exactly 100.
 

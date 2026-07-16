@@ -6,6 +6,7 @@
       "constraint_type": "gate",
       "constraint_id": "GATE-DESIGN-APPROVED",
       "status": "on-plan",
+      "actual_date": "2026-09-01",
       "critical": true,
       "summary": "Design gate was approved with linked evidence.",
       "source": {
@@ -13,6 +14,21 @@
         "reference": "_bmad-output/adp/memory/decisions/decision-log.md#design-approved"
       },
       "observed_at": "2026-09-01",
+      "baseline_revision": 1
+    },
+    {
+      "id": "SIG-PROGRAM-LAUNCH",
+      "constraint_type": "milestone",
+      "constraint_id": "MS-PROGRAM-LAUNCH",
+      "status": "at-risk",
+      "forecast_date": "2026-09-30",
+      "critical": true,
+      "summary": "The source-backed program launch forecast moved to September 30.",
+      "source": {
+        "type": "approved-status",
+        "reference": "_bmad-output/adp/memory/decisions/decision-log.md#program-launch-forecast"
+      },
+      "observed_at": "2026-09-08",
       "baseline_revision": 1
     },
     {

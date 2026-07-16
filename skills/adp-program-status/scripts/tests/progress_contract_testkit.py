@@ -9,8 +9,8 @@ from typing import Any
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_PATH = SKILL_ROOT / "assets/program-status-progress-v2.schema.json"
-FIXTURE_ROOT = SKILL_ROOT / "assets/fixtures/progress-v2"
+SCHEMA_PATH = SKILL_ROOT / "assets/program-status-progress-v3.schema.json"
+FIXTURE_ROOT = SKILL_ROOT / "assets/fixtures/progress-v3"
 GOLDEN_PATH = FIXTURE_ROOT / "golden-measurable-boundary.json"
 
 

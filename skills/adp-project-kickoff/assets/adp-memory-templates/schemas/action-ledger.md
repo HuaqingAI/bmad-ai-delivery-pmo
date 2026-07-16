@@ -29,4 +29,4 @@
 
 ## Intake
 
-Workflows should create status-sync intake JSON under `intake/status-sync/` instead of editing this file directly. `adp-status-sync` owns ledger upsert, deduplication, and WDR `Next actions` refresh.
+Workflows should create status-sync intake JSON under `intake/status-sync/` instead of editing this file directly. `adp-status-sync` owns ledger upsert and deduplication. It refreshes a physical WDR `Next actions` projection only when `refresh_actions: true` is explicitly requested; action-only updates do not refresh WDRs by default.

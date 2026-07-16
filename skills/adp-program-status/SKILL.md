@@ -27,9 +27,11 @@ The script resolves the shared ADP effective config. Conversation text follows `
 
 ## Canonical Inputs
 
-Milestone planned dates, tolerances, critical path, and optional approved weights come only from the baseline. Forecast, actual, milestone status, and evidence come only from the baseline-mapped WDR `Roadmap` rows. Ordinary action due dates never become milestones.
+Milestone planned dates, tolerances, critical path, and optional approved weights come only from the baseline. For physical Workstreams, forecast, actual, milestone status, and evidence come only from baseline-mapped WDR `Roadmap` rows. The shared scope contract classifies `program` as virtual, so Program Status never searches for a program WDR or emits `actual.wdr_missing: program`. Ordinary action due dates never become milestones.
 
-When explicit checkpoint, readiness, dependency, decision, or gate evidence carries a project-level signal that those structures cannot express, prepare a run-scoped JSON matching `assets/status-signals.example.json`. Include only canonical status, criticality, baseline revision, and a traceable source reference. Do not infer a signal from tone, translate its source in place, or persist it back into a fact source. Ambiguous evidence remains `indeterminate` or is confirmed with the owner.
+When explicit checkpoint, readiness, dependency, decision, or gate evidence carries a project-level signal that those structures cannot express, prepare a run-scoped JSON matching `assets/status-signals.example.json`. Include only canonical status, optional `forecast_date`/`actual_date`, criticality, baseline revision, and a traceable source reference. Do not infer a signal from tone, translate its source in place, or persist it back into a fact source. Ambiguous evidence remains `indeterminate` or is confirmed with the owner.
+
+Virtual milestones derive dates or status only from source-backed milestone signals or explicit incoming `aggregation` edges with `predecessor_rule: all`. All completed predecessors produce the latest predecessor actual; otherwise all unfinished predecessors must have forecasts to produce the latest valid forecast. Lineage names every participating predecessor and the Program Status snapshot. A signal that conflicts with the aggregation blocks generation. With neither evidence source, retain the baseline milestone and apply the existing date rule without inventing a WDR gap.
 
 ## Judgment Contract
 
@@ -42,7 +44,7 @@ Critical precedence is `off-plan` > `at-risk` > `indeterminate` > `on-plan`. A n
 
 ## Versioned Progress Contract
 
-The production v2 contract is `references/progress-contract-v2.md`, with machine schema `assets/program-status-progress-v2.schema.json` and golden cases under `assets/fixtures/progress-v2/`. `scripts/progress_projection.py` owns its formulas, gates, lineage, compatibility, and recovery. Roadmap and meeting-pack copy the validated object. A missing or wrong version returns `ADP-PROGRESS-MIGRATION-REQUIRED`.
+The production v3 contract is `references/progress-contract-v3.md`, with machine schema `assets/program-status-progress-v3.schema.json` and golden cases under `assets/fixtures/progress-v3/`. `scripts/progress_projection.py` owns its formulas, gates, lineage, compatibility, and recovery. `by_scope` carries physical and virtual projections; the compatibility `by_workstream` array carries physical delivery Workstreams only. Roadmap and meeting-pack copy the validated object. A missing or wrong version returns `ADP-PROGRESS-MIGRATION-REQUIRED`.
 
 An actual counts only with an audit-accepted WDR, completion criteria, evidence, and a date no later than as-of. A same-baseline decrease requires `Correction ID`, `Correction Kind`, `Correction Audit ID`, `Correction Source`, and `Previous Actual`; otherwise progress is blocked.
 

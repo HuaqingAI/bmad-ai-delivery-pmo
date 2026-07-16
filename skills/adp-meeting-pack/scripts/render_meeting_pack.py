@@ -32,7 +32,7 @@ DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_eff
 LOCALE_CATALOG_PATH = SKILLS_ROOT / "adp-plan-baseline" / "assets" / "locale-catalog.json"
 GENERATOR_VERSION = "2.0.0"
 DISTILLATE_SCHEMA_VERSION = 2
-PROGRESS_SCHEMA_VERSION = "2.0.0"
+PROGRESS_SCHEMA_VERSION = "3.0.0"
 PROGRESS_MIGRATION_ERROR = "ADP-PROGRESS-MIGRATION-REQUIRED"
 SCENARIO_CAPABILITIES = {
     "fde-morning": "fde-action-list",
@@ -723,7 +723,7 @@ def business_meeting_window(program_status: dict[str, Any], pack_date: date) -> 
 def validate_canonical_progress(progress: Any, program_status: dict[str, Any]) -> str | None:
     if not isinstance(progress, dict) or progress.get("progress_schema_version") != PROGRESS_SCHEMA_VERSION:
         return f"{PROGRESS_MIGRATION_ERROR}: canonical progress schema {PROGRESS_SCHEMA_VERSION} is required"
-    required = {"basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "overall", "by_workstream", "eligibility", "compatibility", "recovery"}
+    required = {"basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "overall", "by_scope", "by_workstream", "eligibility", "compatibility", "recovery"}
     missing = sorted(required - set(progress))
     if missing:
         return "canonical progress is missing: " + ", ".join(missing)
@@ -737,8 +737,15 @@ def validate_canonical_progress(progress: Any, program_status: dict[str, Any]) -
     overall = progress.get("overall")
     if not isinstance(overall, dict) or not isinstance(overall.get("current"), dict):
         return "canonical progress overall.current is required"
-    if not isinstance(progress.get("by_workstream"), list):
-        return "canonical progress by_workstream must be an array"
+    if not isinstance(progress.get("by_scope"), list) or not isinstance(progress.get("by_workstream"), list):
+        return "canonical progress by_scope and by_workstream must be arrays"
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in progress["by_scope"]
+        if isinstance(item, dict) and item.get("scope_kind") == "virtual"
+    }
+    if any(item.get("workstream_id") in virtual_scope_ids for item in progress["by_workstream"] if isinstance(item, dict)):
+        return "canonical progress exposes a virtual scope as a delivery workstream"
     if progress.get("measurement_status") == "measurable" and progress.get("weighted_completion_percent") != overall["current"].get("actual_completion_percent"):
         return "canonical progress legacy alias does not match overall actual completion"
     return None
@@ -973,9 +980,9 @@ def canonical_progress_delta_rows(
     overall = progress.get("overall")
     if isinstance(overall, dict):
         scopes.append(("program", overall))
-    for item in progress.get("by_workstream", []):
-        if isinstance(item, dict) and item.get("workstream_id"):
-            scopes.append((str(item["workstream_id"]), item))
+    for item in progress.get("by_scope", []):
+        if isinstance(item, dict) and item.get("scope_id"):
+            scopes.append((str(item["scope_id"]), item))
     rows: list[dict[str, Any]] = []
     for scope_id, scope in scopes:
         comparability = scope.get("comparability") if isinstance(scope.get("comparability"), dict) else {}
@@ -1998,12 +2005,13 @@ def render_progress(context: dict[str, Any], *, include_forecast: bool) -> list[
         )
     lines.extend([f"- {message(context, 'status.progress_comparability')}: `{progress['overall']['comparability']['disposition']}`", ""])
     rows: list[dict[str, str]] = []
-    for item in progress["by_workstream"]:
+    for item in progress["by_scope"]:
         values = item["current"]
         rows.append(
             {
-                "Workstream": item["workstream_id"],
-                "Kind": item["progress_kind"],
+                "Scope": item["scope_id"],
+                "Kind": item["scope_kind"],
+                "Progress Kind": item["progress_kind"],
                 "Measurement": item["measurement_status"],
                 "Actual": progress_value(values["actual_completion_percent"], "%"),
                 "Planned": progress_value(values["planned_completion_percent"], "%"),
@@ -2012,7 +2020,7 @@ def render_progress(context: dict[str, Any], *, include_forecast: bool) -> list[
                 "Contribution": progress_value(values["completed_contribution_pp"], " pp"),
             }
         )
-    lines.extend(localized_section(context, "status.progress_workstreams", ["Workstream", "Kind", "Measurement", "Actual", "Planned", "Gap", "Project Weight", "Contribution"], rows))
+    lines.extend(localized_section(context, "status.progress_workstreams", ["Scope", "Kind", "Progress Kind", "Measurement", "Actual", "Planned", "Gap", "Project Weight", "Contribution"], rows))
     return lines
 
 

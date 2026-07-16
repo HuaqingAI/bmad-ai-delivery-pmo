@@ -11,7 +11,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "render_roadmap.py"
 KICKOFF_TEMPLATE_ROOT = SCRIPT.parents[2] / "adp-project-kickoff" / "assets" / "adp-memory-templates"
-PROGRESS_GOLDEN = SCRIPT.parents[2] / "adp-program-status" / "assets" / "fixtures" / "progress-v2" / "golden-measurable-boundary.json"
+PROGRESS_GOLDEN = SCRIPT.parents[2] / "adp-program-status" / "assets" / "fixtures" / "progress-v3" / "golden-measurable-boundary.json"
 SCRIPT_GLOBALS = runpy.run_path(str(SCRIPT))
 NORMALIZE_DATE_FIELD = SCRIPT_GLOBALS["normalize_date_field"]
 ROADMAP_ITEM = SCRIPT_GLOBALS["RoadmapItem"]
@@ -264,6 +264,12 @@ class RenderRoadmapTests(unittest.TestCase):
         planned = baseline["milestones"][0]["planned_date"]
         forecast = (date.fromisoformat(planned) + timedelta(days=2)).isoformat()
         reporting_period = {"start": as_of, "end": as_of}
+        scope_module = SCRIPT_GLOBALS["load_scope_contract_module"]()
+        registry = scope_module.discover_wdr_registry(memory_root)
+        scope_contract = scope_module.resolve_scope_contract(
+            baseline,
+            [item["scope_id"] for item in registry],
+        )
         model = {
             "schema_version": "1.0",
             "snapshot_id": snapshot_id,
@@ -272,6 +278,7 @@ class RenderRoadmapTests(unittest.TestCase):
             "reporting_period": reporting_period,
             "baseline_revision": baseline["revision"],
             "baseline_id": baseline["baseline_id"],
+            "scope_contract": scope_contract,
             "source_inventory": [],
             "source_fingerprints": source_fingerprints,
             "input_audit_id": "audit-program-status-fixture",
@@ -367,7 +374,21 @@ class RenderRoadmapTests(unittest.TestCase):
         audit_root.mkdir(parents=True, exist_ok=True)
         audit_path = audit_root / f"fixture-{status}.json"
         selected = set(scope_workstreams or [])
-        inventory = CANONICAL_RENDER_SOURCE_INVENTORY(memory_root, selected)
+        baseline_text = baseline_path.read_text(encoding="utf-8")
+        baseline = json.loads(baseline_text.split("```json", 1)[1].split("```", 1)[0])
+        scope_module = SCRIPT_GLOBALS["load_scope_contract_module"]()
+        registry = scope_module.discover_wdr_registry(memory_root)
+        scope_contract = scope_module.resolve_scope_contract(
+            baseline,
+            [item["scope_id"] for item in registry],
+        )
+        selection = scope_module.select_scope_contract(scope_contract, scope_workstreams or [])
+        selected_physical = {str(value).lower() for value in selection["registered_workstreams"]}
+        inventory = CANONICAL_RENDER_SOURCE_INVENTORY(
+            memory_root,
+            selected_physical,
+            restrict_workstreams=bool(selected),
+        )
         sources_read = [
             {key: item[key] for key in ["path", "bytes", "modified", "modified_ns"]}
             for item in inventory.values()
@@ -390,6 +411,9 @@ class RenderRoadmapTests(unittest.TestCase):
             "locale_fallback": False,
             "memory_root": str(audit_memory_root or memory_root),
             "report_confidence": {"pass": "high", "warning": "medium", "blocked": "low"}.get(status, "low"),
+            "scope_contract": scope_contract,
+            "registered_workstreams": selection["registered_workstreams"],
+            "virtual_scopes": selection["virtual_scopes"],
             "prepass": {
                 "schema_version": 2,
                 "capability": "global-project-readout",
@@ -516,7 +540,7 @@ class RenderRoadmapTests(unittest.TestCase):
             self.assertEqual(roadmap["program_status"]["overall_status"], "indeterminate")
             self.assertEqual(roadmap["baseline_revision"], 1)
             self.assertEqual(roadmap["progress"], program_status["progress"])
-            self.assertEqual(roadmap["program_status"]["progress_schema_version"], "2.0.0")
+            self.assertEqual(roadmap["program_status"]["progress_schema_version"], "3.0.0")
             self.assertEqual(roadmap["program_status_snapshot_id"], program_status["snapshot_id"])
             self.assertEqual(roadmap["reporting_period"], program_status["reporting_period"])
             self.assertEqual(roadmap["scenario"], "roadmap")
@@ -952,7 +976,7 @@ class RenderRoadmapTests(unittest.TestCase):
                 "scope",
                 {"scope_workstreams": ["l2-payments"], "inventory_workstreams": ["l1-checkout"]},
                 None,
-                "workstreams_requested",
+                "registered_workstreams",
             ),
             (
                 "as of",
@@ -983,6 +1007,12 @@ class RenderRoadmapTests(unittest.TestCase):
                 {},
                 "source_inventory",
                 "source_inventory must be an object",
+            ),
+            (
+                "missing scope contract",
+                {},
+                "scope_contract",
+                "ADP-SCOPE-CONTRACT-MIGRATION-REQUIRED",
             ),
         ]
         for label, audit_args, field_to_remove, expected_error in cases:
@@ -1059,6 +1089,106 @@ class RenderRoadmapTests(unittest.TestCase):
                 any("l2-payments" in item.get("workstreams", []) for item in roadmap["excluded_items"])
             )
             self.assertFalse(roadmap["changed_since_last_roadmap"])
+
+    def test_program_only_render_keeps_virtual_lineage_without_reading_any_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            baseline_path = memory_root / "plans/program-baseline.md"
+            baseline_text = baseline_path.read_text(encoding="utf-8")
+            baseline = json.loads(baseline_text.split("```json", 1)[1].split("```", 1)[0])
+            program_milestone = json.loads(json.dumps(baseline["milestones"][0]))
+            program_milestone.update(
+                {
+                    "id": "MS-PROGRAM-LAUNCH",
+                    "name": "Program launch",
+                    "workstream_id": "program",
+                    "planned_date": "2026-07-20",
+                    "owner": "PMO",
+                    "source": {
+                        "type": "approved-plan",
+                        "reference": "plans/program-baseline.md#MS-PROGRAM-LAUNCH",
+                        "confirmed_by": "PMO",
+                    },
+                    "critical_path": False,
+                }
+            )
+            baseline["milestones"].append(program_milestone)
+            baseline_path.write_text(
+                "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps(baseline, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            status_path = self.write_program_status(memory_root, baseline, "2026-07-10")
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            virtual_status = {
+                "constraint_type": "milestone",
+                "id": "MS-PROGRAM-LAUNCH",
+                "name": "Program launch",
+                "workstream_id": "program",
+                "critical": False,
+                "planned_date": "2026-07-20",
+                "forecast_date": None,
+                "actual_date": None,
+                "tolerance_days": 0,
+                "variance_days": None,
+                "source_status": None,
+                "status": "on-plan",
+                "rule_id": "PS-VIRTUAL-BASELINE-FUTURE",
+                "source_references": [
+                    "plans/program-baseline.md#MS-PROGRAM-LAUNCH",
+                    "snapshots/program-status/ps-roadmap-fixture.json#MS-PROGRAM-LAUNCH",
+                ],
+            }
+            status["milestones"].append(virtual_status)
+            status["rule_ids"].append("PS-VIRTUAL-BASELINE-FUTURE")
+            virtual_progress = json.loads(json.dumps(status["progress"]["by_scope"][0]))
+            virtual_progress.update({"scope_id": "program", "scope_kind": "virtual", "gate_readiness": None})
+            virtual_progress.pop("workstream_id", None)
+            virtual_progress.pop("workstream_kind", None)
+            status["progress"]["by_scope"].append(virtual_progress)
+            status_text = json.dumps(status, indent=2) + "\n"
+            status_path.write_text(status_text, encoding="utf-8")
+            snapshot_path = memory_root / "snapshots/program-status/ps-roadmap-fixture.json"
+            snapshot_path.write_text(status_text, encoding="utf-8")
+            audit_path = self.write_audit(
+                memory_root,
+                scope_workstreams=["PROGRAM"],
+                inventory_workstreams=[],
+                as_of="2026-07-10",
+                sync_program_status=False,
+            )
+            (memory_root / "workstreams/l1-checkout/delivery-record.md").write_bytes(b"\xff\xfe")
+            legacy = memory_root / "workstreams/program/delivery-record.md"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"\xff\xfe")
+
+            completed = self.run_script(
+                project_root,
+                "--audit",
+                str(audit_path),
+                "--date",
+                "2026-07-10",
+                "--workstream",
+                "PROGRAM",
+                "--dry-run",
+                check=False,
+            )
+            result = json.loads(completed.stdout)
+            self.assertTrue(result["ok"], result)
+            roadmap = result["preview"]["roadmap"]
+            item = next(row for row in roadmap["milestone_timeline"] if row["id"] == "MS-PROGRAM-LAUNCH")
+
+            self.assertNotIn("MS-CHECKOUT", {row["id"] for row in roadmap["milestone_timeline"]})
+            self.assertEqual("virtual", item["scope_kind"])
+            self.assertEqual("PS-VIRTUAL-BASELINE-FUTURE", item["status_rule_id"])
+            self.assertIn("snapshots/program-status/ps-roadmap-fixture.json#MS-PROGRAM-LAUNCH", item["source_references"])
+            self.assertTrue(item["source_fingerprints"])
+            self.assertEqual(["program"], roadmap["scope"]["selected_virtual_scopes"])
+            self.assertFalse(
+                any("delivery-record.md" in row["path"] for row in roadmap["source_inventory"]["sources_read"])
+            )
 
     def test_dry_run_returns_complete_preview_and_would_write_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

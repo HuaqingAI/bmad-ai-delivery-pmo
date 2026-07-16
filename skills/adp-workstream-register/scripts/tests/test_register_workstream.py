@@ -162,6 +162,34 @@ class RegisterWorkstreamTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("missing_core_files", result)
 
+    def test_program_is_rejected_as_reserved_virtual_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.seed_memory(project_root)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--id",
+                    "PROGRAM",
+                    "--name",
+                    "Program",
+                    "--owner",
+                    "PMO",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(2, completed.returncode)
+            self.assertEqual("ADP-VIRTUAL-SCOPE-NOT-WORKSTREAM", result["error_code"])
+            self.assertFalse((project_root / "_bmad-output/adp/memory/workstreams/program").exists())
+
     def test_language_golden_localizes_patch_plan_without_changing_wdr_facts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)

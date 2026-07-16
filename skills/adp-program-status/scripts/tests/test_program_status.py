@@ -25,6 +25,7 @@ STABLE_INPUT_AUDIT_ID = AUDIT_GLOBALS["stable_input_audit_id"]
 AUDIT_CONTENT_HASH = AUDIT_GLOBALS["audit_content_hash"]
 ARTIFACT_METADATA = AUDIT_GLOBALS["artifact_metadata"]
 FLOW_STATE_SCHEMA_PATH = SCRIPT.parents[1] / "assets/program-status-flow-state-v1.schema.json"
+SCOPE_CONTRACT_GLOBALS = runpy.run_path(str(SCRIPT.parents[2] / "adp-plan-baseline/scripts/scope_contract.py"))
 
 
 def sha256(path: Path) -> str:
@@ -219,6 +220,12 @@ class ProgramStatusTests(unittest.TestCase):
         sources = [memory / "plans/program-baseline.md", root / "_bmad/bmb/config.yaml"]
         sources.extend(sorted((memory / "workstreams").glob("*/delivery-record.md")))
         fingerprints = {path.relative_to(root).as_posix(): sha256(path) for path in sources}
+        baseline = SCOPE_CONTRACT_GLOBALS["load_canonical_baseline"](memory / "plans/program-baseline.md")
+        registry = SCOPE_CONTRACT_GLOBALS["discover_wdr_registry"](memory)
+        scope_contract = SCOPE_CONTRACT_GLOBALS["resolve_scope_contract"](
+            baseline,
+            [item["scope_id"] for item in registry],
+        )
         audit = {
             "audit_type": "input",
             "audit_schema_version": 1,
@@ -238,6 +245,9 @@ class ProgramStatusTests(unittest.TestCase):
             "blocking_gaps": [],
             "warnings": [],
             "recommended_workflows": [],
+            "scope_contract": scope_contract,
+            "registered_workstreams": scope_contract["registered_workstreams"],
+            "virtual_scopes": scope_contract["virtual_scopes"],
         }
         audit["input_audit_id"] = STABLE_INPUT_AUDIT_ID(audit)
         audit["audit_content_hash"] = AUDIT_CONTENT_HASH(audit)
@@ -443,6 +453,28 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 1)
             self.assertEqual(result["status"], "blocked")
             self.assertIn("integrity validation failed", result["reason"])
+
+    def test_legacy_audit_without_scope_contract_requires_new_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            memory = self.scaffold(
+                root,
+                self.baseline(),
+                {"ws-one": [{"id": "MS-ONE", "forecast": "2026-07-20"}]},
+            )
+            audit = self.write_audit(root, memory)
+            payload = json.loads(audit.read_text(encoding="utf-8"))
+            payload.pop("scope_contract")
+            payload["input_audit_id"] = STABLE_INPUT_AUDIT_ID(payload)
+            payload["audit_content_hash"] = AUDIT_CONTENT_HASH(payload)
+            audit.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+            completed, result = self.generate(root, audit, check=False)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("blocked", result["status"])
+            self.assertIn("ADP-SCOPE-CONTRACT-MIGRATION-REQUIRED", result["reason"])
+            self.assertFalse((memory / "snapshots/program-status").exists())
             self.assertFalse((memory / "snapshots/program-status").exists())
 
     def test_snapshot_is_stable_idempotent_and_immutable(self) -> None:
@@ -741,7 +773,7 @@ class ProgramStatusTests(unittest.TestCase):
 
             self.assertEqual(model["progress"]["weighted_completion_percent"], 100.0)
             self.assertEqual([], validate_schema(model["progress"], load_contract_json(SCHEMA_PATH)))
-            self.assertEqual("2.0.0", model["progress"]["progress_schema_version"])
+            self.assertEqual("3.0.0", model["progress"]["progress_schema_version"])
             self.assertEqual(100.0, model["progress"]["overall"]["current"]["actual_completion_percent"])
             self.assertEqual(0.0, model["progress"]["overall"]["current"]["planned_completion_percent"])
             self.assertEqual(100.0, model["progress"]["overall"]["current"]["completion_gap_pp"])
@@ -1093,6 +1125,71 @@ class ProgramStatusTests(unittest.TestCase):
             validation = json.loads(validated.stdout)
             self.assertEqual(validated.returncode, 0, validation)
             self.assertTrue(validation["safe_to_publish"], validation)
+
+    def test_virtual_program_aggregation_never_reads_a_program_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = {"type": "approved-plan", "reference": "docs/plan.md", "confirmed_by": "Owner"}
+            milestones = [
+                {"id": "M-A", "name": "A", "workstream_id": "l1", "planned_date": "2026-07-10", "owner": "A", "confirmation_status": "approved", "source": source, "dependencies": [], "baseline_revision": 1, "completion_criteria": "A accepted", "weight": 30},
+                {"id": "M-B", "name": "B", "workstream_id": "l2", "planned_date": "2026-07-12", "owner": "B", "confirmation_status": "approved", "source": source, "dependencies": [], "baseline_revision": 1, "completion_criteria": "B accepted", "weight": 30},
+                {"id": "M-P", "name": "Program baseline", "workstream_id": "program", "planned_date": "2026-07-20", "owner": "P", "confirmation_status": "approved", "source": source, "dependencies": [
+                    {"edge_id": "E-A-P", "predecessor": "M-A", "relationship_type": "aggregation", "source": source, "baseline_revision": 1},
+                    {"edge_id": "E-B-P", "predecessor": "M-B", "relationship_type": "aggregation", "source": source, "baseline_revision": 1},
+                ], "predecessor_rule": "all", "baseline_revision": 1, "completion_criteria": "A and B accepted", "weight": 40},
+            ]
+            baseline = self.baseline(
+                milestones=milestones,
+                critical_path=[],
+                weighting={"enabled": True, "completion_measure": "accepted milestones", "source": source},
+            )
+            memory = self.scaffold(
+                root,
+                baseline,
+                {
+                    "l1": [{"id": "M-A", "status": "done", "actual": "2026-07-11", "source": "evidence/a.md"}],
+                    "l2": [{"id": "M-B", "status": "done", "actual": "2026-07-13", "source": "evidence/b.md"}],
+                },
+            )
+            (memory / "workstreams/program/delivery-record.md").unlink()
+            audit = self.write_audit(root, memory)
+
+            _, result = self.generate(root, audit)
+            model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+            program = next(item for item in model["milestones"] if item["id"] == "M-P")
+
+            self.assertEqual("virtual", program["scope_kind"])
+            self.assertEqual("2026-07-13", program["actual_date"])
+            self.assertEqual(["M-A", "M-B"], program["aggregation"]["predecessor_ids"])
+            self.assertTrue(any(model["snapshot_id"] in ref for ref in program["source_references"]))
+            self.assertFalse(any(item.get("code") == "actual.wdr_missing" and "program" in item.get("summary", "") for item in model["findings"]))
+            self.assertFalse(any(item["workstream_id"] == "program" for item in model["progress"]["by_workstream"]))
+            virtual = next(item for item in model["progress"]["by_scope"] if item["scope_id"] == "program")
+            self.assertEqual("virtual", virtual["scope_kind"])
+
+    def test_virtual_signal_conflict_blocks_instead_of_overwriting_aggregation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = {"type": "approved-plan", "reference": "docs/plan.md", "confirmed_by": "Owner"}
+            milestones = [
+                {"id": "M-A", "name": "A", "workstream_id": "l1", "planned_date": "2026-07-10", "owner": "A", "confirmation_status": "approved", "source": source, "dependencies": [], "baseline_revision": 1, "completion_criteria": "A accepted"},
+                {"id": "M-B", "name": "B", "workstream_id": "l2", "planned_date": "2026-07-12", "owner": "B", "confirmation_status": "approved", "source": source, "dependencies": [], "baseline_revision": 1, "completion_criteria": "B accepted"},
+                {"id": "M-P", "name": "Program baseline", "workstream_id": "program", "planned_date": "2026-07-20", "owner": "P", "confirmation_status": "approved", "source": source, "dependencies": [
+                    {"edge_id": "E-A-P", "predecessor": "M-A", "relationship_type": "aggregation", "source": source, "baseline_revision": 1},
+                    {"edge_id": "E-B-P", "predecessor": "M-B", "relationship_type": "aggregation", "source": source, "baseline_revision": 1},
+                ], "predecessor_rule": "all", "baseline_revision": 1},
+            ]
+            memory = self.scaffold(root, self.baseline(milestones=milestones, critical_path=[]))
+            (memory / "workstreams/program/delivery-record.md").unlink()
+            audit = self.write_audit(root, memory)
+            signals = root / "signals.json"
+            signals.write_text(json.dumps({"schema_version": "1.0", "signals": [{"id": "S-P", "constraint_type": "milestone", "constraint_id": "M-P", "status": "off-plan", "critical": True, "source": {"reference": "evidence/program.md"}}]}) + "\n", encoding="utf-8")
+
+            completed, result = self.generate(root, audit, signals=signals, check=False)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("blocked", result["status"])
+            self.assertEqual("ADP-VIRTUAL-SCOPE-SIGNAL-AGGREGATION-CONFLICT", result["error_code"])
 
 
 if __name__ == "__main__":

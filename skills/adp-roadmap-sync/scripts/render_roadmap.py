@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -37,7 +38,7 @@ VALID_TYPES = {
 VALID_STATUSES = {"planned", "at-risk", "done", "blocked"}
 PROGRAM_STATUSES = {"on-plan", "at-risk", "off-plan", "indeterminate"}
 PROGRAM_CONFIDENCE = {"high", "medium", "low", "unknown"}
-PROGRESS_SCHEMA_VERSION = "2.0.0"
+PROGRESS_SCHEMA_VERSION = "3.0.0"
 PROGRESS_MIGRATION_ERROR = "ADP-PROGRESS-MIGRATION-REQUIRED"
 VALID_CONFIDENCE = {"high", "medium", "low"}
 DECISION_COMPLETED_STATUSES = {"accepted", "closed", "done"}
@@ -52,6 +53,8 @@ AUDIT_MAX_AGE = timedelta(hours=24)
 AUDIT_FUTURE_TOLERANCE = timedelta(minutes=5)
 PREPASS_SCHEMA_VERSION = 2
 ROADMAP_CAPABILITY = "global-project-readout"
+SCOPE_CONTRACT_VERSION = "1.0.0"
+SCOPE_CONTRACT_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/scope_contract.py"
 RENDER_SOURCE_PATTERNS = (
     "workstreams/*/delivery-record.md",
     "intake/bmm-checkpoints/candidates/CHK-*.json",
@@ -106,6 +109,8 @@ class RoadmapItem:
     status_source: str = "TBD"
     status_rule_id: str = "TBD"
     source_references: list[str] = field(default_factory=list)
+    scope_kind: str = "physical"
+    source_fingerprints: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -117,6 +122,15 @@ class ExcludedItem:
     code: str
     risk: bool
     workstreams: list[str] = field(default_factory=list)
+
+
+def load_scope_contract_module() -> Any:
+    spec = importlib.util.spec_from_file_location("adp_scope_contract_roadmap", SCOPE_CONTRACT_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load shared scope contract: {SCOPE_CONTRACT_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,7 +192,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     as_of = date.fromisoformat(args.as_of_alt or args.as_of) if (args.as_of_alt or args.as_of) else date.today()
-    timeline_gate = load_canonical_timeline_inputs(project_root, memory_root, as_of)
+    scope_module = load_scope_contract_module()
+    selected = {normalize_id(item) for item in args.workstream if normalize_id(item)}
+    program_only = bool(args.workstream) and all(scope_module.is_virtual_cli_scope_id(item) for item in args.workstream)
+    timeline_gate = load_canonical_timeline_inputs(
+        project_root,
+        memory_root,
+        as_of,
+        skip_wdr_source_validation=program_only,
+    )
     if not timeline_gate.get("ok"):
         return {
             "ok": False,
@@ -190,26 +212,52 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "recommended_workflows", ["adp-plan-baseline", "adp-program-status"]
             ),
         }
-    selected = {normalize_id(item) for item in args.workstream if normalize_id(item)}
-    available_workstreams = discover_workstream_ids(memory_root) | {
-        normalize_id(str(item.get("workstream_id", "")))
-        for item in timeline_gate["baseline"].get("milestones", [])
-        if normalize_id(str(item.get("workstream_id", "")))
+    registry_entries = scope_module.discover_wdr_registry(
+        memory_root,
+        include_physical=not program_only,
+    )
+    scope_contract = scope_module.resolve_scope_contract(
+        timeline_gate["baseline"],
+        [item["scope_id"] for item in registry_entries],
+    )
+    status_scope_contract = timeline_gate["program_status"].get("scope_contract")
+    status_virtual_scopes = status_scope_contract.get("virtual_scopes") if isinstance(status_scope_contract, dict) else None
+    if (
+        not program_only
+        and status_scope_contract != scope_contract
+        or program_only
+        and status_virtual_scopes != scope_contract["virtual_scopes"]
+    ):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "program status scope contract is stale; rerun Audit and Program Status",
+            "recommended_workflows": ["adp-state-audit", "adp-program-status"],
+        }
+    available_physical = {normalize_id(value) for value in scope_contract["registered_workstreams"]}
+    available_virtual = {
+        normalize_id(str(item.get("scope_id")))
+        for item in scope_contract["virtual_scopes"]
+        if isinstance(item, dict)
     }
-    unknown_workstreams = sorted(selected - available_workstreams)
-    if unknown_workstreams:
+    unknown_scopes = sorted(selected - available_physical - available_virtual)
+    if unknown_scopes:
         return {
             "ok": False,
             "status": "blocked",
             "error": (
-                f"unknown workstream(s): {', '.join(unknown_workstreams)}; "
-                f"available: {', '.join(sorted(available_workstreams)) or '<none>'}"
+                f"unknown scope(s): {', '.join(unknown_scopes)}; "
+                f"available physical: {', '.join(sorted(available_physical)) or '<none>'}; "
+                f"available virtual: {', '.join(sorted(available_virtual)) or '<none>'}"
             ),
             "project_root": str(project_root),
             "memory_root": str(memory_root),
             "recommended_workflows": ["adp-workstream-register"],
         }
-    effective_workstreams = selected or available_workstreams
+    selected_physical = selected & available_physical
+    selected_virtual = selected & available_virtual
+    effective_workstreams = selected_physical if selected else available_physical
+    effective_virtual_scopes = selected_virtual if selected else available_virtual
     output_dir = resolve_output_dir(args.output_dir, memory_root, selected)
     audit_gate = load_or_run_audit_gate(
         args,
@@ -217,6 +265,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         memory_root,
         selected,
         effective_workstreams,
+        effective_virtual_scopes,
         as_of,
     )
     if not audit_gate.get("ok"):
@@ -235,6 +284,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         project_root,
         memory_root,
         selected,
+        selected_physical,
         as_of,
         args,
         audit_gate,
@@ -242,8 +292,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     refreshed_inventory = canonical_render_source_inventory(
         memory_root,
-        selected,
+        selected_physical,
         set(audit_gate["render_source_paths"]),
+        restrict_workstreams=bool(selected),
     )
     inventory_mismatch = compare_source_inventories(
         audit_gate["render_source_inventory"],
@@ -323,6 +374,7 @@ def load_or_run_audit_gate(
     memory_root: Path,
     selected_workstreams: set[str],
     effective_workstreams: set[str],
+    effective_virtual_scopes: set[str],
     as_of: date,
 ) -> dict[str, Any]:
     prepass_path = resolve_input_path(project_root, args.prepass_json) if args.prepass_json else None
@@ -364,6 +416,7 @@ def load_or_run_audit_gate(
         memory_root,
         selected_workstreams,
         effective_workstreams,
+        effective_virtual_scopes,
         as_of,
         prepass_path,
     )
@@ -420,6 +473,7 @@ def validate_audit_gate(
     memory_root: Path,
     selected_workstreams: set[str],
     effective_workstreams: set[str],
+    effective_virtual_scopes: set[str],
     as_of: date,
     prepass_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -439,6 +493,28 @@ def validate_audit_gate(
         return invalid("audit schema version fields audit_schema_version and schema_version must both be 1")
     if payload.get("scenario") != "roadmap":
         return invalid("scenario must be roadmap")
+    scope_contract = payload.get("scope_contract")
+    if not isinstance(scope_contract, dict) or scope_contract.get("scope_contract_version") != SCOPE_CONTRACT_VERSION:
+        return invalid("ADP-SCOPE-CONTRACT-MIGRATION-REQUIRED; rerun adp-state-audit")
+    audited_registered = normalized_id_array(payload.get("registered_workstreams"))
+    if audited_registered is None or audited_registered != effective_workstreams:
+        return invalid(
+            "registered_workstreams does not match the physical render scope "
+            f"(audit={sorted(audited_registered or set())}, render={sorted(effective_workstreams)})"
+        )
+    raw_virtual_scopes = payload.get("virtual_scopes")
+    if not isinstance(raw_virtual_scopes, list) or any(not isinstance(item, dict) for item in raw_virtual_scopes):
+        return invalid("virtual_scopes must be an array of scope objects")
+    audited_virtual = {
+        normalize_id(str(item.get("scope_id")))
+        for item in raw_virtual_scopes
+        if normalize_id(str(item.get("scope_id")))
+    }
+    if audited_virtual != effective_virtual_scopes:
+        return invalid(
+            "virtual_scopes does not match the virtual render scope "
+            f"(audit={sorted(audited_virtual)}, render={sorted(effective_virtual_scopes)})"
+        )
     raw_memory_root = payload.get("memory_root")
     if not isinstance(raw_memory_root, str) or not raw_memory_root.strip():
         return invalid("memory_root is missing")
@@ -500,8 +576,9 @@ def validate_audit_gate(
     audited_render_paths = {path for path in audited_inventory if is_render_source_path(path)}
     current_inventory = canonical_render_source_inventory(
         memory_root,
-        selected_workstreams,
+        effective_workstreams,
         audited_render_paths,
+        restrict_workstreams=bool(selected_workstreams),
     )
     audited_render_inventory = {
         path: fingerprint
@@ -689,9 +766,12 @@ def canonical_render_source_inventory(
     memory_root: Path,
     selected_workstreams: set[str],
     audited_paths: set[str] | None = None,
+    *,
+    restrict_workstreams: bool = False,
 ) -> dict[str, dict[str, Any]]:
     paths = {rel for rel in FIXED_RENDER_SOURCES}
-    paths.update(rel_to_memory(memory_root, path) for path in discover_wdrs(memory_root, selected_workstreams))
+    if not restrict_workstreams or selected_workstreams:
+        paths.update(rel_to_memory(memory_root, path) for path in discover_wdrs(memory_root, selected_workstreams))
     paths.update(
         rel_to_memory(memory_root, path)
         for path in (memory_root / "intake" / "bmm-checkpoints" / "candidates").glob("CHK-*.json")
@@ -705,7 +785,7 @@ def canonical_render_source_inventory(
         for path in (audited_paths or set())
         if is_render_source_path(path)
         and (
-            not selected_workstreams
+            not restrict_workstreams
             or not fnmatch.fnmatchcase(path, "workstreams/*/delivery-record.md")
             or normalize_id(Path(path).parent.name) in selected_workstreams
         )
@@ -822,7 +902,13 @@ def parse_audit_datetime(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def load_canonical_timeline_inputs(project_root: Path, memory_root: Path, as_of: date) -> dict[str, Any]:
+def load_canonical_timeline_inputs(
+    project_root: Path,
+    memory_root: Path,
+    as_of: date,
+    *,
+    skip_wdr_source_validation: bool = False,
+) -> dict[str, Any]:
     baseline_path = memory_root / "plans" / "program-baseline.md"
     if not baseline_path.is_file():
         return {"ok": False, "error": "approved program baseline is missing", "recommended_workflows": ["adp-plan-baseline"]}
@@ -837,7 +923,15 @@ def load_canonical_timeline_inputs(project_root: Path, memory_root: Path, as_of:
         return {"ok": False, "error": "canonical program status is missing", "recommended_workflows": ["adp-program-status"]}
     try:
         program_status = json.loads(read_text(status_path))
-        validate_program_status_for_roadmap(program_status, baseline, as_of, project_root, memory_root, baseline_path)
+        validate_program_status_for_roadmap(
+            program_status,
+            baseline,
+            as_of,
+            project_root,
+            memory_root,
+            baseline_path,
+            skip_wdr_source_validation=skip_wdr_source_validation,
+        )
         snapshot_path = memory_root / "snapshots" / "program-status" / f"{program_status['snapshot_id']}.json"
         if not snapshot_path.is_file():
             raise ValueError(f"immutable program-status snapshot is missing: {snapshot_path}")
@@ -931,6 +1025,8 @@ def validate_program_status_for_roadmap(
     project_root: Path,
     memory_root: Path,
     baseline_path: Path,
+    *,
+    skip_wdr_source_validation: bool = False,
 ) -> None:
     if not isinstance(status, dict) or status.get("schema_version") != "1.0":
         raise ValueError("program status schema_version must be '1.0'")
@@ -972,6 +1068,11 @@ def validate_program_status_for_roadmap(
     if baseline_hashes != [file_sha256(baseline_path)]:
         raise ValueError("program status baseline fingerprint does not match the approved baseline")
     for raw_path, raw_fingerprint in fingerprints.items():
+        if skip_wdr_source_validation and fnmatch.fnmatchcase(
+            normalize_source_path(raw_path),
+            "*workstreams/*/delivery-record.md",
+        ):
+            continue
         source_path = Path(str(raw_path))
         if not source_path.is_absolute():
             source_path = project_root / source_path
@@ -1010,7 +1111,7 @@ def validate_program_status_for_roadmap(
 def validate_canonical_progress(progress: Any, status: dict[str, Any], baseline: dict[str, Any]) -> None:
     if not isinstance(progress, dict) or progress.get("progress_schema_version") != PROGRESS_SCHEMA_VERSION:
         raise ValueError(f"{PROGRESS_MIGRATION_ERROR}: canonical progress schema {PROGRESS_SCHEMA_VERSION} is required")
-    required = {"basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "overall", "by_workstream", "eligibility", "compatibility", "recovery"}
+    required = {"basis", "as_of", "reporting_period", "scope_identity", "measurement_status", "overall", "by_scope", "by_workstream", "eligibility", "compatibility", "recovery"}
     missing = sorted(required - set(progress))
     if missing:
         raise ValueError("canonical progress is missing: " + ", ".join(missing))
@@ -1024,8 +1125,15 @@ def validate_canonical_progress(progress: Any, status: dict[str, Any], baseline:
     overall = progress.get("overall")
     if not isinstance(overall, dict) or not isinstance(overall.get("current"), dict):
         raise ValueError("canonical progress overall.current is required")
-    if not isinstance(progress.get("by_workstream"), list):
-        raise ValueError("canonical progress by_workstream must be an array")
+    if not isinstance(progress.get("by_scope"), list) or not isinstance(progress.get("by_workstream"), list):
+        raise ValueError("canonical progress by_scope and by_workstream must be arrays")
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in progress["by_scope"]
+        if isinstance(item, dict) and item.get("scope_kind") == "virtual"
+    }
+    if any(item.get("workstream_id") in virtual_scope_ids for item in progress["by_workstream"] if isinstance(item, dict)):
+        raise ValueError("canonical progress exposes a virtual scope as a delivery workstream")
     current = overall["current"]
     if progress.get("measurement_status") == "measurable" and progress.get("weighted_completion_percent") != current.get("actual_completion_percent"):
         raise ValueError("canonical progress legacy alias does not match overall actual completion")
@@ -1118,7 +1226,13 @@ def diff_baseline_constraints(previous: dict[str, Any], current: dict[str, Any])
     return changes
 
 
-def canonical_timeline_items(baseline: dict[str, Any], program_status: dict[str, Any], selected: set[str]) -> list[RoadmapItem]:
+def canonical_timeline_items(
+    baseline: dict[str, Any],
+    program_status: dict[str, Any],
+    selected: set[str],
+    timeline_fingerprints: dict[str, str] | None = None,
+    memory_root: Path | None = None,
+) -> list[RoadmapItem]:
     constraints: list[tuple[str, dict[str, Any], dict[str, Any], list[str]]] = [
         ("project-target", baseline["project"], program_status["project"]["target_assessment"], [])
     ]
@@ -1131,6 +1245,15 @@ def canonical_timeline_items(baseline: dict[str, Any], program_status: dict[str,
         if not selected or normalize_id(item["workstream_id"]) in selected
     )
     snapshot_id = program_status["snapshot_id"]
+    virtual_scope_ids = {
+        normalize_id(str(item.get("scope_id")))
+        for item in program_status.get("scope_contract", {}).get("virtual_scopes", [])
+        if isinstance(item, dict)
+    }
+    canonical_fingerprints = {
+        rel_to_memory(memory_root, Path(path)) if memory_root is not None else str(path): f"sha256:{fingerprint}"
+        for path, fingerprint in (timeline_fingerprints or {}).items()
+    }
     result: list[RoadmapItem] = []
     for kind, plan, status, workstreams in constraints:
         item_id = "PROJECT-TARGET" if kind == "project-target" else str(plan["id"])
@@ -1138,6 +1261,8 @@ def canonical_timeline_items(baseline: dict[str, Any], program_status: dict[str,
         source = plan["source"]
         status_ref = f"snapshots/program-status/{snapshot_id}.json#{item_id}"
         forecast, actual = status.get("forecast_date") or "TBD", status.get("actual_date") or "TBD"
+        normalized_workstreams = {normalize_id(value) for value in workstreams}
+        scope_kind = "virtual" if normalized_workstreams & virtual_scope_ids else ("program" if not workstreams else "physical")
         result.append(RoadmapItem(
             id=item_id,
             milestone=str(plan.get("name") or baseline["project"]["name"]),
@@ -1160,6 +1285,8 @@ def canonical_timeline_items(baseline: dict[str, Any], program_status: dict[str,
             status_source=status_ref,
             status_rule_id=str(status["rule_id"]),
             source_references=list(status.get("source_references", [])),
+            scope_kind=scope_kind,
+            source_fingerprints=canonical_fingerprints,
         ))
     return result
 
@@ -1182,6 +1309,7 @@ def build_roadmap(
     project_root: Path,
     memory_root: Path,
     selected_workstreams: set[str],
+    selected_physical_workstreams: set[str],
     as_of: date,
     args: argparse.Namespace,
     audit_gate: dict[str, Any],
@@ -1194,7 +1322,18 @@ def build_roadmap(
 
     baseline = timeline_gate["baseline"]
     program_status = timeline_gate["program_status"]
-    canonical_items = canonical_timeline_items(baseline, program_status, selected_workstreams)
+    registered_scope_workstreams = {
+        normalize_id(value)
+        for value in program_status.get("scope_contract", {}).get("registered_workstreams", [])
+        if normalize_id(value)
+    }
+    canonical_items = canonical_timeline_items(
+        baseline,
+        program_status,
+        selected_workstreams,
+        timeline_gate["source_fingerprints"],
+        memory_root,
+    )
     baseline_ids = {item.id for item in canonical_items}
     for path in [
         timeline_gate["baseline_path"],
@@ -1205,7 +1344,12 @@ def build_roadmap(
     if timeline_gate["baseline_changes"].get("from_path"):
         sources.append(file_item(memory_root / timeline_gate["baseline_changes"]["from_path"], memory_root))
 
-    for record in discover_wdrs(memory_root, selected_workstreams):
+    wdr_records = (
+        []
+        if selected_workstreams and not selected_physical_workstreams
+        else discover_wdrs(memory_root, selected_physical_workstreams)
+    )
+    for record in wdr_records:
         sources.append(file_item(record, memory_root))
         parsed_items, parsed_excluded = roadmap_items_from_wdr(memory_root, record)
         items.extend(parsed_items)
@@ -1214,6 +1358,7 @@ def build_roadmap(
     candidates, candidate_excluded, candidate_sources = roadmap_items_from_checkpoint_candidates(
         memory_root,
         selected_workstreams,
+        registered_scope_workstreams,
     )
     items.extend(candidates)
     excluded.extend(candidate_excluded)
@@ -1228,21 +1373,23 @@ def build_roadmap(
     sources.extend(decision_sources)
 
     readiness_items, readiness_excluded, readiness_sources = roadmap_items_from_readiness_views(
-        memory_root,
-        selected_workstreams,
+        memory_root, selected_workstreams, registered_scope_workstreams,
     )
     items.extend(readiness_items)
     excluded.extend(readiness_excluded)
     sources.extend(readiness_sources)
 
-    l0_items, l0_excluded, l0_sources = roadmap_items_from_l0(memory_root, selected_workstreams)
+    l0_items, l0_excluded, l0_sources = roadmap_items_from_l0(
+        memory_root, selected_workstreams, registered_scope_workstreams
+    )
     items.extend(l0_items)
     excluded.extend(l0_excluded)
     sources.extend(l0_sources)
 
-    dependency_excluded, dependency_sources = excluded_unstructured_dependencies(
-        memory_root,
-        selected_workstreams,
+    dependency_excluded, dependency_sources = (
+        ([], [])
+        if selected_workstreams and not selected_physical_workstreams
+        else excluded_unstructured_dependencies(memory_root, selected_physical_workstreams)
     )
     excluded.extend(dependency_excluded)
     sources.extend(dependency_sources)
@@ -1324,8 +1471,10 @@ def build_roadmap(
         },
         "progress": program_status["progress"],
         "scope": {
-            "kind": "workstreams" if selected_workstreams else "global",
-            "selected_workstreams": sorted(selected_workstreams),
+            "kind": "scopes" if selected_workstreams else "global",
+            "selected_scopes": sorted(selected_workstreams),
+            "selected_workstreams": sorted(selected_physical_workstreams),
+            "selected_virtual_scopes": sorted(selected_workstreams - selected_physical_workstreams),
         },
         "source_inventory": {
             "sources_read": persisted_sources,
@@ -1334,7 +1483,8 @@ def build_roadmap(
                 for path, fingerprint in audit_gate["render_source_inventory"].items()
                 if fingerprint["status"] == "missing"
             ),
-            "selected_workstreams": sorted(selected_workstreams),
+            "selected_workstreams": sorted(selected_physical_workstreams),
+            "selected_virtual_scopes": sorted(selected_workstreams - selected_physical_workstreams),
             "notes": [
                 "Action due dates are follow-up context only and are not promoted to milestones.",
                 "TBD dates mean the source did not provide a parseable date.",
@@ -1535,12 +1685,17 @@ def roadmap_items_from_wdr(memory_root: Path, record: Path) -> tuple[list[Roadma
 def roadmap_items_from_checkpoint_candidates(
     memory_root: Path,
     selected_workstreams: set[str],
+    registered_workstreams: set[str] | None = None,
 ) -> tuple[list[RoadmapItem], list[ExcludedItem], list[dict[str, Any]]]:
     candidates_root = memory_root / "intake" / "bmm-checkpoints" / "candidates"
     items: list[RoadmapItem] = []
     excluded: list[ExcludedItem] = []
     sources: list[dict[str, Any]] = []
-    registered_workstreams = discover_workstream_ids(memory_root)
+    registered_workstreams = (
+        discover_workstream_ids(memory_root)
+        if registered_workstreams is None
+        else registered_workstreams
+    )
     if not candidates_root.exists():
         return items, excluded, sources
     for path in sorted(candidates_root.glob("CHK-*.json")):
@@ -1818,11 +1973,16 @@ def roadmap_items_from_decisions(
 def roadmap_items_from_readiness_views(
     memory_root: Path,
     selected_workstreams: set[str],
+    registered_workstreams: set[str] | None = None,
 ) -> tuple[list[RoadmapItem], list[ExcludedItem], list[dict[str, Any]]]:
     items: list[RoadmapItem] = []
     excluded: list[ExcludedItem] = []
     sources: list[dict[str, Any]] = []
-    registered_workstreams = discover_workstream_ids(memory_root)
+    registered_workstreams = (
+        discover_workstream_ids(memory_root)
+        if registered_workstreams is None
+        else registered_workstreams
+    )
     for rel, label, item_type in [
         ("views/acceptance-readiness.md", "Acceptance readiness gate", "readiness-gate"),
         ("views/cutover-readiness.md", "Cutover readiness gate", "cutover-gate"),
@@ -1943,11 +2103,16 @@ def roadmap_items_from_readiness_views(
 def roadmap_items_from_l0(
     memory_root: Path,
     selected_workstreams: set[str],
+    registered_workstreams: set[str] | None = None,
 ) -> tuple[list[RoadmapItem], list[ExcludedItem], list[dict[str, Any]]]:
     items: list[RoadmapItem] = []
     excluded: list[ExcludedItem] = []
     sources: list[dict[str, Any]] = []
-    registered_workstreams = discover_workstream_ids(memory_root)
+    registered_workstreams = (
+        discover_workstream_ids(memory_root)
+        if registered_workstreams is None
+        else registered_workstreams
+    )
     for rel, identity_headers in [
         ("l0/extracted-gates.md", ("gate",)),
         ("l0/extracted-decision-gates.md", ("decision gate",)),
@@ -2319,10 +2484,12 @@ def roadmap_scope(payload: dict[str, Any]) -> set[str] | None:
     scope = payload.get("scope")
     if isinstance(scope, dict):
         kind = scope.get("kind")
-        selected = normalized_id_array(scope.get("selected_workstreams"))
+        selected = normalized_id_array(
+            scope.get("selected_scopes") if kind == "scopes" else scope.get("selected_workstreams")
+        )
         if selected is not None and (
             (kind == "global" and not selected)
-            or (kind == "workstreams" and bool(selected))
+            or (kind in {"workstreams", "scopes"} and bool(selected))
         ):
             return selected
     return None
@@ -2467,17 +2634,18 @@ def render_progress(progress: dict[str, Any]) -> list[str]:
         f"- Forecast coverage: {progress_value(forecast['forecast_coverage_percent'], '%')} (`{forecast['forecast_coverage_status']}`)",
         f"- Comparability: `{progress['overall']['comparability']['disposition']}`",
         "",
-        "| Workstream | Kind | Measurement | Actual | Planned | Gap | Project Weight | Contribution |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Scope | Scope Kind | Progress Kind | Measurement | Actual | Planned | Gap | Project Weight | Contribution |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for item in progress["by_workstream"]:
+    for item in progress["by_scope"]:
         values = item["current"]
         lines.append(
             "| "
             + " | ".join(
                 cell(value)
                 for value in [
-                    item["workstream_id"],
+                    item["scope_id"],
+                    item["scope_kind"],
                     item["progress_kind"],
                     item["measurement_status"],
                     progress_value(values["actual_completion_percent"], "%"),

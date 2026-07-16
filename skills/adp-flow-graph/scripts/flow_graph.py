@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -29,6 +30,7 @@ ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 ACTIVE_RISK_LIFECYCLES = {"open", "monitoring", "mitigating", "accepted"}
 COUNT_CATEGORIES = ("pending", "processed", "risk", "blocked")
 STABLE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
+SCOPE_CONTRACT_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/scope_contract.py"
 
 
 class ContractError(ValueError):
@@ -39,6 +41,15 @@ class TopologyBlocked(ContractError):
     def __init__(self, findings: list[dict[str, str]]) -> None:
         self.findings = findings
         super().__init__("baseline topology is blocked")
+
+
+def load_scope_contract_module() -> Any:
+    spec = importlib.util.spec_from_file_location("adp_scope_contract_flow", SCOPE_CONTRACT_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load shared scope contract: {SCOPE_CONTRACT_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -155,6 +166,12 @@ def topology_projection(baseline: dict[str, Any], baseline_path: str) -> dict[st
     nodes: list[dict[str, Any]] = []
     raw_by_id: dict[str, dict[str, Any]] = {}
     findings: list[dict[str, str]] = []
+    scope_contract = load_scope_contract_module().resolve_scope_contract(baseline, [])
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in scope_contract.get("virtual_scopes", [])
+        if isinstance(item, dict)
+    }
 
     for collection, node_type in (("gates", "gate"), ("milestones", "milestone")):
         rows = baseline.get(collection, [])
@@ -173,11 +190,15 @@ def topology_projection(baseline: dict[str, Any], baseline_path: str) -> dict[st
             if node_revision != revision:
                 findings.append(finding("flow.reference.cross-revision", "blocked", f"{path}.baseline_revision", f"Node {node_id} is not revision {revision}.", "Regenerate against one approved revision."))
             if node_type == "milestone":
-                lane = raw.get("lane") or {"lane_type": "workstream", "lane_id": raw.get("workstream_id")}
+                lane = (
+                    {"lane_type": "virtual", "lane_id": str(raw.get("workstream_id"))}
+                    if str(raw.get("workstream_id")) in virtual_scope_ids
+                    else raw.get("lane") or {"lane_type": "workstream", "lane_id": raw.get("workstream_id")}
+                )
             else:
                 lane = raw.get("lane") or {"lane_type": "program", "lane_id": "PROGRAM"}
-            if not isinstance(lane, dict) or lane.get("lane_type") not in {"program", "workstream"} or not STABLE_ID.fullmatch(str(lane.get("lane_id") or "")):
-                findings.append(finding("flow.reference.unknown", "blocked", f"{path}.lane", f"Node {node_id} has an invalid lane.", "Assign an explicit program or workstream lane."))
+            if not isinstance(lane, dict) or lane.get("lane_type") not in {"program", "virtual", "workstream"} or not STABLE_ID.fullmatch(str(lane.get("lane_id") or "")):
+                findings.append(finding("flow.reference.unknown", "blocked", f"{path}.lane", f"Node {node_id} has an invalid lane.", "Assign an explicit program, virtual, or workstream lane."))
                 continue
             node: dict[str, Any] = {
                 "node_id": node_id,

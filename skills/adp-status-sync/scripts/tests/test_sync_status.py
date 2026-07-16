@@ -893,7 +893,7 @@ class SyncStatusTests(unittest.TestCase):
                 )
                 self.assertIn(expected_error, json.loads(completed.stdout)["error"])
 
-    def test_updates_file_registers_actions_in_ledger_and_merges_wdr_next_actions(self) -> None:
+    def test_explicit_next_actions_do_not_merge_ledger_projection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             record = self.create_record(project_root)
@@ -965,8 +965,32 @@ class SyncStatusTests(unittest.TestCase):
             self.assertIn(f"| {first_result['actions_registered'][0]} | open |", ledger_text)
             updated = record.read_text(encoding="utf-8")
             self.assertIn("FDE-A send summary", updated)
-            self.assertIn("Add checkout validation evidence", updated)
-            self.assertIn("due: Friday", updated)
+            self.assertNotIn("Add checkout validation evidence", updated)
+
+    def test_explicit_empty_next_actions_clears_without_generated_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            updates = project_root / "updates.json"
+            updates.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "next_actions": []}]}),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+            updated = record.read_text(encoding="utf-8")
+
+            self.assertTrue(result["ok"])
+            self.assertIn("- Next actions: \n", updated)
+            self.assertNotIn("fill missing state", updated)
+            self.assertNotIn("Add checkout validation evidence", updated)
 
     def test_action_summary_always_renders_structured_owner_and_due(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -979,6 +1003,7 @@ class SyncStatusTests(unittest.TestCase):
                         "updates": [
                             {
                                 "id": "l1-checkout",
+                                "refresh_actions": True,
                                 "actions": [
                                     {
                                         "owner": "Ann",
@@ -1022,7 +1047,7 @@ class SyncStatusTests(unittest.TestCase):
                 "due": "Friday",
             }
             registration_file.write_text(
-                json.dumps({"updates": [{"id": "l1-checkout", "actions": [action]}]}),
+                json.dumps({"updates": [{"id": "l1-checkout", "refresh_actions": True, "actions": [action]}]}),
                 encoding="utf-8",
             )
             registered = subprocess.run(
@@ -1040,6 +1065,7 @@ class SyncStatusTests(unittest.TestCase):
                         "updates": [
                             {
                                 "id": "l1-checkout",
+                                "refresh_actions": True,
                                 "actions": [{**action, "action_id": "ACT-WRONG", "status": "done"}],
                             }
                         ]
@@ -1077,6 +1103,7 @@ class SyncStatusTests(unittest.TestCase):
                         "updates": [
                             {
                                 "id": "l1-checkout",
+                                "refresh_actions": True,
                                 "actions": [
                                     {
                                         "status": "cancelled",
@@ -1235,6 +1262,7 @@ class SyncStatusTests(unittest.TestCase):
                         "updates": [
                             {
                                 "id": "l1-checkout",
+                                "refresh_actions": True,
                                 "actions": [
                                     {
                                         "action_id": "ACT-20260701-001",
@@ -1266,9 +1294,97 @@ class SyncStatusTests(unittest.TestCase):
             updated = record.read_text(encoding="utf-8")
             self.assertNotIn("[action_id:ACT-20260701-001]", updated)
             self.assertIn("FDE-B: Add checkout validation evidence for production (due: Monday)", updated)
-            self.assertTrue(
-                any("legacy Next actions entries without action_id were preserved" in gap for gap in result["updates"][0]["unresolved_gaps"])
+
+    def test_dependency_only_preserves_next_actions_in_dry_run_and_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(
+                project_root,
+                text=RECORD.replace("- Next actions: fill missing state", "- Next actions: Human wording; punctuation stays!"),
             )
+            original = record.read_bytes()
+
+            dry = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--id", "l1-checkout", "--dependency", "l2 ready", "--dry-run"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(original, record.read_bytes())
+            dry_fields = {item["field"] for item in json.loads(dry.stdout)["updates"][0]["changed_fields"]}
+            self.assertEqual({"Dependencies", "Last status sync"}, dry_fields)
+
+            applied = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--id", "l1-checkout", "--dependency", "l2 ready"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            updated = record.read_text(encoding="utf-8")
+            self.assertIn("- Next actions: Human wording; punctuation stays!", updated)
+            fields = {item["field"] for item in json.loads(applied.stdout)["updates"][0]["changed_fields"]}
+            self.assertEqual({"Dependencies", "Last status sync"}, fields)
+
+    def test_structured_action_requires_refresh_to_change_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            record = self.create_record(project_root)
+            original = record.read_bytes()
+            updates_file = project_root / "action-only.json"
+            updates_file.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "actions": [{"owner": "Ann", "action": "Publish evidence", "source": "meeting#1"}]}]}),
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(original, record.read_bytes())
+            self.assertEqual([], result["updates"][0]["changed_fields"])
+            self.assertTrue(Path(result["updates"][0]["daily_log"]).is_file())
+            self.assertEqual(1, len(result["actions_registered"]))
+
+    def test_program_action_only_is_allowed_but_wdr_projection_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            updates_file = project_root / "program-action.json"
+            updates_file.write_text(
+                json.dumps({"updates": [{"id": "PROGRAM", "actions": [{"owner": "PMO", "action": "Publish program note", "source": "meeting#program"}]}]}),
+                encoding="utf-8",
+            )
+
+            allowed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            allowed_result = json.loads(allowed.stdout)
+            memory = project_root / "_bmad-output/adp/memory"
+            self.assertTrue(allowed_result["ok"])
+            self.assertTrue((memory / "actions/action-ledger.md").is_file())
+            self.assertTrue(any((memory / "daily").glob("*.md")))
+            self.assertFalse((memory / "workstreams/program/delivery-record.md").exists())
+
+            rejected = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--id", "program", "--refresh-actions"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            rejected_result = json.loads(rejected.stdout)
+            self.assertEqual(2, rejected.returncode)
+            self.assertEqual("ADP-VIRTUAL-SCOPE-NOT-WDR-TARGET", rejected_result["error_code"])
 
 
 if __name__ == "__main__":

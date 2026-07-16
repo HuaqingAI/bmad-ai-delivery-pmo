@@ -46,7 +46,7 @@ The audit is read-only: create audit artifacts and recommend owning workflows, b
 Use optional flags only when the user gives the scope:
 
 - `--scenario global|fde-morning|business-biweekly|weekly-report|project-lead|roadmap|management-panel` to tune the prepass capability and output name; management-panel routes to its scenario contract below.
-- `--workstream <id>` to limit the WDR scan; repeat as needed.
+- `--workstream <id>` to select physical or virtual scopes; repeat as needed. `--workstream program` scans no WDR, while mixed selection scans only the requested physical Workstreams.
 - `--memory-root <path>` when ADP memory is not at the default path.
 - `--prepass-json <path>` to audit an already captured prepass result.
 - `--as-of YYYY-MM-DD` and `--max-age-days <n>` for reproducible freshness checks.
@@ -71,6 +71,8 @@ Load `references/scenario-contracts.md` only when the audit encounters `intake/s
 ## Findings
 
 Treat `audit_state.py` output as the canonical finding set. `warning_findings` is the sole warning aggregation: its unique `finding_id` values drive `counts.warning_findings` and the Markdown warning table. The category groups remain compatibility projections and must not be re-counted or re-rendered. Report severity and `execution_disposition` independently: only disposition `blocked` prevents generation or publication; `degraded` requires lower confidence and a visibly risk-bearing readout. Baseline missing/invalid, unverified migration evidence, and unmapped actuals block; overdue missing actuals, stale artifacts, and explicit locale fallback degrade. Do not infer gaps from prose similarity.
+
+Every input audit publishes the complete shared `scope_contract` plus the selected `registered_workstreams` and `virtual_scopes`. Virtual scopes produce no WDR completeness, freshness, BMM phase/artifact, risk, dependency, or L0-reference gaps. Missing WDRs for non-virtual baseline scopes retain the existing warning or blocking rules. A consumer receiving an older audit without `scope_contract` must return `ADP-SCOPE-CONTRACT-MIGRATION-REQUIRED` and require a new Audit.
 
 ## Output Contract
 

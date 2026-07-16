@@ -28,6 +28,8 @@ from progress_projection import (
 
 GENERATOR_VERSION = "2.0.2"
 SCHEMA_VERSION = "1.0"
+SCOPE_CONTRACT_VERSION = "1.0.0"
+SCOPE_CONTRACT_MIGRATION_ERROR = "ADP-SCOPE-CONTRACT-MIGRATION-REQUIRED"
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_CONFIG_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/adp_effective_config.py"
 DEFAULT_BASELINE_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/baseline.py"
@@ -44,6 +46,10 @@ SNAPSHOT_FILE = re.compile(r"^ps-[0-9a-f]{16}\.json$")
 
 class ContractError(ValueError):
     """Raised when input cannot safely produce a canonical status."""
+
+
+class ConsistencyBlocked(ContractError):
+    """Raised when two explicit status sources contradict each other."""
 
 
 class DependencyError(ImportError):
@@ -132,6 +138,11 @@ def main() -> int:
         result = run(args)
     except DependencyError as exc:
         result = dependency_failure_result(args, exc)
+    except ConsistencyBlocked as exc:
+        result = failure_result(args, str(exc))
+        result["status"] = "blocked"
+        result["error_code"] = "ADP-VIRTUAL-SCOPE-SIGNAL-AGGREGATION-CONFLICT"
+        result["recommended_workflows"] = ["adp-state-audit", "adp-program-status"]
     except (ContractError, ProgressContractError, OSError, json.JSONDecodeError, ImportError) as exc:
         result = failure_result(args, str(exc))
     if args.headless:
@@ -171,7 +182,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not baseline_path.is_file():
         return blocked_result(project_root, memory_root, locale, config, "program baseline is missing", ["adp-plan-baseline"])
     baseline = baseline_module.parse_baseline(baseline_path)
-    validation = baseline_module.validate_model(baseline, execute=True, stored=True)
+    wdr_registry = baseline_module.current_wdr_registry(project_root, baseline_path)
+    scope_contract = baseline_module.resolve_scope_contract(baseline, wdr_registry)
+    validation = baseline_module.validate_model(
+        baseline,
+        execute=True,
+        stored=True,
+        registered_workstreams=wdr_registry,
+    )
     if not validation.get("valid"):
         return blocked_result(
             project_root,
@@ -204,6 +222,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     audit_issues = validate_audit(
         audit,
         baseline,
+        scope_contract,
         as_of,
         locale,
         "document_output_language" in config.get("fallbacks", []),
@@ -231,7 +250,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise DependencyError("ADP locale catalog", locale_catalog_path, ["adp-setup"])
     add_file_source(project_root, locale_catalog_path, "locale-catalog", source_inventory, source_fingerprints)
 
-    rows, row_sources, row_findings = collect_milestone_rows(project_root, memory_root, baseline)
+    rows, row_sources, row_findings = collect_milestone_rows(
+        project_root,
+        memory_root,
+        baseline,
+        scope_contract,
+    )
     findings.extend(row_findings)
     for path in row_sources:
         add_file_source(project_root, path, "workstream-delivery-record", source_inventory, source_fingerprints)
@@ -281,6 +305,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         project_root=project_root,
         memory_root=memory_root,
         baseline=baseline,
+        scope_contract=scope_contract,
         rows=rows,
         signals=signals,
         audit=audit,
@@ -365,6 +390,7 @@ def compute_model(
     project_root: Path,
     memory_root: Path,
     baseline: dict[str, Any],
+    scope_contract: dict[str, Any],
     rows: dict[str, dict[str, Any]],
     signals: list[dict[str, Any]],
     audit: dict[str, Any],
@@ -382,25 +408,65 @@ def compute_model(
     critical_ids = set(str(value) for value in baseline.get("critical_path", []))
     milestone_signals = index_target_signals(signals, "milestone")
     gate_signals = index_target_signals(signals, "gate")
-    milestones = [
-        assess_milestone(
-            item,
-            rows.get(str(item["id"])),
-            milestone_signals.get(str(item["id"]), []),
-            baseline,
-            critical_ids,
-            as_of,
-            locale,
-            config_module,
-            findings,
-            audit,
-        )
-        for item in baseline.get("milestones", [])
-    ]
+    fingerprints = dict(sorted(source_fingerprints.items()))
+    snapshot_id = stable_snapshot_id(period, as_of, int(baseline["revision"]), fingerprints, locale, previous)
     gates = [
         assess_gate(item, gate_signals.get(str(item["id"]), []), baseline, critical_ids, as_of, locale, config_module)
         for item in baseline.get("gates", [])
     ]
+    assessed_nodes = {str(item["id"]): item for item in gates}
+    baseline_milestones = {
+        str(item["id"]): item
+        for item in baseline.get("milestones", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in scope_contract.get("virtual_scopes", [])
+        if isinstance(item, dict)
+    }
+    visiting: set[str] = set()
+
+    def assess_one(milestone_id: str) -> dict[str, Any]:
+        if milestone_id in assessed_nodes:
+            return assessed_nodes[milestone_id]
+        if milestone_id in visiting:
+            raise ConsistencyBlocked(f"virtual aggregation cycle reaches {milestone_id}")
+        item = baseline_milestones[milestone_id]
+        visiting.add(milestone_id)
+        if str(item.get("workstream_id")) in virtual_scope_ids:
+            predecessor_ids = aggregation_predecessor_ids(item)
+            predecessors = [assess_one(value) for value in predecessor_ids]
+            assessed = assess_virtual_milestone(
+                item,
+                predecessors,
+                milestone_signals.get(milestone_id, []),
+                baseline,
+                critical_ids,
+                as_of,
+                locale,
+                config_module,
+                snapshot_id,
+            )
+        else:
+            assessed = assess_milestone(
+                item,
+                rows.get(milestone_id),
+                milestone_signals.get(milestone_id, []),
+                baseline,
+                critical_ids,
+                as_of,
+                locale,
+                config_module,
+                findings,
+                audit,
+            )
+            assessed["scope_kind"] = "workstream"
+        visiting.remove(milestone_id)
+        assessed_nodes[milestone_id] = assessed
+        return assessed
+
+    milestones = [assess_one(str(item["id"])) for item in baseline.get("milestones", [])]
     project_target = assess_project_target(baseline, signals, as_of, locale, config_module)
     standalone_signals = [signal_constraint(item, locale, config_module) for item in signals if item["constraint_type"] in {"dependency", "readiness"}]
     constraints = [*gates, *milestones, project_target, *standalone_signals]
@@ -409,9 +475,9 @@ def compute_model(
     variances = sorted_variances(constraints)
     rule_ids = sorted({overall_rule, *(str(item["rule_id"]) for item in constraints)})
     inventory = sorted(unique_dicts(source_inventory, "path"), key=lambda item: (str(item.get("type")), str(item.get("path"))))
-    fingerprints = dict(sorted(source_fingerprints.items()))
     progress = build_progress_projection(
         baseline=baseline,
+        scope_contract=scope_contract,
         assessed_milestones=milestones,
         assessed_gates=gates,
         rows=rows,
@@ -421,7 +487,6 @@ def compute_model(
         source_fingerprints=fingerprints,
         previous_snapshot=previous,
     )
-    snapshot_id = stable_snapshot_id(period, as_of, int(baseline["revision"]), fingerprints, locale, previous)
     flow_state = build_flow_state(
         baseline=baseline,
         assessed_milestones=milestones,
@@ -437,6 +502,7 @@ def compute_model(
         "reporting_period": period,
         "baseline_revision": int(baseline["revision"]),
         "baseline_id": baseline["baseline_id"],
+        "scope_contract": scope_contract,
         "source_inventory": inventory,
         "source_fingerprints": fingerprints,
         "input_audit_id": audit["input_audit_id"],
@@ -665,6 +731,199 @@ def assess_milestone(
     return result
 
 
+def aggregation_predecessor_ids(item: dict[str, Any]) -> list[str]:
+    return [
+        str(value.get("predecessor"))
+        for value in item.get("dependencies", [])
+        if isinstance(value, dict)
+        and value.get("relationship_type") == "aggregation"
+        and str(value.get("predecessor") or "").strip()
+    ]
+
+
+def milestone_status_from_dates(
+    planned: date,
+    tolerance: int,
+    forecast: date | None,
+    actual: date | None,
+    as_of: date,
+    *,
+    prefix: str,
+) -> tuple[str, str, int | None]:
+    allowed = planned + timedelta(days=tolerance)
+    if actual is not None:
+        return (
+            ("off-plan", f"{prefix}-ACTUAL-OVER-TOLERANCE", (actual - planned).days)
+            if actual > allowed
+            else ("on-plan", f"{prefix}-ACTUAL-WITHIN-TOLERANCE", (actual - planned).days)
+        )
+    if forecast is not None:
+        if forecast > allowed:
+            return "off-plan", f"{prefix}-FORECAST-OVER-TOLERANCE", (forecast - planned).days
+        if forecast > planned:
+            return "at-risk", f"{prefix}-FORECAST-WITHIN-TOLERANCE", (forecast - planned).days
+        return "on-plan", f"{prefix}-FORECAST-ON-TIME", (forecast - planned).days
+    if as_of > allowed:
+        return "indeterminate", f"{prefix}-PAST-DUE-WITHOUT-EVIDENCE", None
+    return "on-plan", f"{prefix}-FUTURE-EVIDENCE-NOT-APPLICABLE", None
+
+
+def one_signal_value(signals: list[dict[str, Any]], field_name: str, milestone_id: str) -> Any:
+    values = {signal.get(field_name) for signal in signals if signal.get(field_name) is not None}
+    if len(values) > 1:
+        raise ConsistencyBlocked(f"milestone {milestone_id} has conflicting signal {field_name} values")
+    return next(iter(values), None)
+
+
+def assess_virtual_milestone(
+    item: dict[str, Any],
+    predecessors: list[dict[str, Any]],
+    signals: list[dict[str, Any]],
+    baseline: dict[str, Any],
+    critical_ids: set[str],
+    as_of: date,
+    locale: str,
+    config_module: Any,
+    snapshot_id: str,
+) -> dict[str, Any]:
+    milestone_id = str(item["id"])
+    planned = parse_date(str(item["planned_date"]), f"milestone {milestone_id} planned date")
+    tolerance = int(item.get("tolerance_days", baseline.get("default_tolerance_days", 0)))
+    predecessor_ids = [str(value["id"]) for value in predecessors]
+    aggregation_enabled = bool(predecessors) and item.get("predecessor_rule") == "all"
+    actual: date | None = None
+    forecast: date | None = None
+    aggregation_status: str | None = None
+    aggregation_rule: str | None = None
+    variance: int | None = None
+
+    if aggregation_enabled:
+        predecessor_actuals = [optional_date(value.get("actual_date"), f"milestone {value['id']} actual") for value in predecessors]
+        unfinished = [
+            value
+            for value, actual_date in zip(predecessors, predecessor_actuals, strict=True)
+            if actual_date is None
+        ]
+        if predecessor_actuals and all(value is not None for value in predecessor_actuals):
+            actual = max(value for value in predecessor_actuals if value is not None)
+        elif unfinished:
+            unfinished_forecasts = [
+                optional_date(value.get("forecast_date"), f"milestone {value['id']} forecast")
+                for value in unfinished
+            ]
+            if all(value is not None for value in unfinished_forecasts):
+                forecast = max(value for value in unfinished_forecasts if value is not None)
+        aggregation_status, aggregation_rule, variance = milestone_status_from_dates(
+            planned,
+            tolerance,
+            forecast,
+            actual,
+            as_of,
+            prefix="PS-VIRTUAL-AGGREGATION",
+        )
+        if actual is None and forecast is None and predecessors:
+            worst = max((str(value["status"]) for value in predecessors), key=lambda value: STATUS_RANK[value])
+            if STATUS_RANK[worst] > STATUS_RANK[aggregation_status]:
+                aggregation_status = worst
+                aggregation_rule = "PS-VIRTUAL-AGGREGATION-PREDECESSOR-HEALTH"
+
+    signal_status = one_signal_value(signals, "status", milestone_id)
+    signal_actual_raw = one_signal_value(signals, "actual_date", milestone_id)
+    signal_forecast_raw = one_signal_value(signals, "forecast_date", milestone_id)
+    signal_actual = optional_date(signal_actual_raw, f"milestone {milestone_id} signal actual")
+    signal_forecast = optional_date(signal_forecast_raw, f"milestone {milestone_id} signal forecast")
+    if signal_actual is not None and signal_actual > as_of:
+        raise ConsistencyBlocked(f"milestone {milestone_id} signal actual date is after as-of")
+
+    if aggregation_enabled and signals:
+        conflicts = []
+        if signal_status is not None and signal_status != aggregation_status:
+            conflicts.append(f"status {signal_status!r} != {aggregation_status!r}")
+        if signal_actual is not None and signal_actual != actual:
+            conflicts.append(f"actual {signal_actual.isoformat()} != {actual.isoformat() if actual else None}")
+        if signal_forecast is not None and signal_forecast != forecast:
+            conflicts.append(f"forecast {signal_forecast.isoformat()} != {forecast.isoformat() if forecast else None}")
+        if conflicts:
+            raise ConsistencyBlocked(
+                f"milestone {milestone_id} signal conflicts with aggregation: " + "; ".join(conflicts)
+            )
+
+    if aggregation_enabled:
+        status = str(aggregation_status)
+        rule = str(aggregation_rule)
+    elif signals:
+        actual = signal_actual
+        forecast = signal_forecast
+        status, rule, variance = milestone_status_from_dates(
+            planned,
+            tolerance,
+            forecast,
+            actual,
+            as_of,
+            prefix="PS-VIRTUAL-SIGNAL",
+        )
+        if signal_status is not None:
+            status, rule = str(signal_status), "PS-SOURCE-BACKED-SIGNAL"
+    else:
+        status, rule, variance = milestone_status_from_dates(
+            planned,
+            tolerance,
+            None,
+            None,
+            as_of,
+            prefix="PS-VIRTUAL-BASELINE",
+        )
+
+    predecessor_lineage = [
+        {
+            "node_id": value["id"],
+            "status": value["status"],
+            "rule_id": value["rule_id"],
+            "forecast_date": value.get("forecast_date"),
+            "actual_date": value.get("actual_date"),
+            "source_references": list(value.get("source_references", [])),
+        }
+        for value in predecessors
+    ]
+    snapshot_refs = [f"snapshots/program-status/{snapshot_id}.json#{value}" for value in predecessor_ids]
+    signal_refs = [str(value["source"]["reference"]) for value in signals]
+    source_refs = [
+        source_reference(item.get("source")),
+        *snapshot_refs,
+        *signal_refs,
+        *(reference for value in predecessors for reference in value.get("source_references", [])),
+    ]
+    return {
+        "constraint_type": "milestone",
+        "id": item["id"],
+        "name": item["name"],
+        "workstream_id": item["workstream_id"],
+        "scope_kind": "virtual",
+        "critical": item["id"] in critical_ids or bool(item.get("critical_path")),
+        "planned_date": planned.isoformat(),
+        "forecast_date": forecast.isoformat() if forecast else None,
+        "actual_date": actual.isoformat() if actual else None,
+        "excluded_future_actual_date": None,
+        "excluded_actual_date": None,
+        "actual_exclusion_reason": None,
+        "tolerance_days": tolerance,
+        "variance_days": variance,
+        "source_status": "done" if actual else ("in-progress" if forecast else "planned"),
+        "status": status,
+        "status_label": config_module.display_label("program_status", status, locale),
+        "rule_id": rule,
+        "source_references": sorted(set(filter(None, source_refs))),
+        "program_status_snapshot_id": snapshot_id,
+        "aggregation": {
+            "predecessor_rule": "all",
+            "predecessor_ids": predecessor_ids,
+            "lineage": predecessor_lineage,
+        }
+        if aggregation_enabled
+        else None,
+    }
+
+
 def assess_gate(
     item: dict[str, Any],
     signals: list[dict[str, Any]],
@@ -886,12 +1145,26 @@ def constraint_index(model: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def collect_milestone_rows(
-    project_root: Path, memory_root: Path, baseline: dict[str, Any]
+    project_root: Path,
+    memory_root: Path,
+    baseline: dict[str, Any],
+    scope_contract: dict[str, Any],
 ) -> tuple[dict[str, dict[str, Any]], list[Path], list[dict[str, Any]]]:
     rows: dict[str, dict[str, Any]] = {}
     sources: list[Path] = []
     findings: list[dict[str, Any]] = []
-    workstreams = sorted({str(item["workstream_id"]) for item in baseline.get("milestones", [])})
+    virtual_scope_ids = {
+        str(item.get("scope_id"))
+        for item in scope_contract.get("virtual_scopes", [])
+        if isinstance(item, dict)
+    }
+    workstreams = sorted(
+        {
+            str(item["workstream_id"])
+            for item in baseline.get("milestones", [])
+            if str(item.get("workstream_id")) not in virtual_scope_ids
+        }
+    )
     revision = int(baseline["revision"])
     for workstream_id in workstreams:
         path = memory_root / "workstreams" / workstream_id / "delivery-record.md"
@@ -969,6 +1242,7 @@ def row_value(row: dict[str, str], name: str) -> str:
 def validate_audit(
     audit: dict[str, Any],
     baseline: dict[str, Any],
+    expected_scope_contract: dict[str, Any],
     as_of: date,
     locale: str,
     locale_fallback: bool,
@@ -976,6 +1250,17 @@ def validate_audit(
     issues: list[str] = []
     if not isinstance(audit, dict):
         return ["input audit must be a JSON object"]
+    audit_scope_contract = audit.get("scope_contract")
+    if not isinstance(audit_scope_contract, dict) or audit_scope_contract.get("scope_contract_version") != SCOPE_CONTRACT_VERSION:
+        issues.append(f"{SCOPE_CONTRACT_MIGRATION_ERROR}: rerun adp-state-audit")
+    elif {
+        "registered_workstreams": audit_scope_contract.get("registered_workstreams"),
+        "virtual_scopes": audit_scope_contract.get("virtual_scopes"),
+    } != {
+        "registered_workstreams": expected_scope_contract.get("registered_workstreams"),
+        "virtual_scopes": expected_scope_contract.get("virtual_scopes"),
+    }:
+        issues.append("input audit scope contract does not match the current baseline and WDR registry")
     if not audit.get("input_audit_id"):
         issues.append("input audit is missing input_audit_id")
     if audit.get("execution_disposition") not in {"ready", "degraded", "blocked"}:
@@ -1062,6 +1347,8 @@ def validate_signals(payload: dict[str, Any], baseline: dict[str, Any]) -> list[
             raise ContractError(f"signal {signal_id} references unknown baseline {kind} {raw.get('constraint_id')!r}")
         if raw.get("baseline_revision") not in {None, baseline_revision}:
             raise ContractError(f"signal {signal_id} baseline_revision does not match {baseline_revision}")
+        forecast_date = optional_date(raw.get("forecast_date"), f"signal {signal_id} forecast_date")
+        actual_date = optional_date(raw.get("actual_date"), f"signal {signal_id} actual_date")
         result.append(
             {
                 "id": signal_id,
@@ -1072,6 +1359,8 @@ def validate_signals(payload: dict[str, Any], baseline: dict[str, Any]) -> list[
                 "summary": str(raw.get("summary") or signal_id).strip(),
                 "source": {"reference": str(source["reference"]).strip(), "type": str(source.get("type") or "explicit-signal")},
                 "observed_at": raw.get("observed_at"),
+                "forecast_date": forecast_date.isoformat() if forecast_date else None,
+                "actual_date": actual_date.isoformat() if actual_date else None,
             }
         )
         seen.add(signal_id)
@@ -1943,6 +2232,12 @@ def load_module(
 
 def load_baseline_module(path: Path, config_module: Any) -> Any:
     sys.modules["adp_effective_config"] = config_module
+    load_module(
+        path.expanduser().resolve().parent / "scope_contract.py",
+        "scope_contract",
+        dependency_name="adp-plan-baseline scope contract",
+        recommended_workflows=["adp-setup", "adp-plan-baseline"],
+    )
     return load_module(
         path,
         "adp_program_status_baseline_contract",

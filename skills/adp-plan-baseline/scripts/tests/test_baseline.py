@@ -270,6 +270,24 @@ class BaselineValidationTests(unittest.TestCase):
 
         self.assertFalse(any(item["code"] == "workstream.unknown" for item in result["findings"]))
         self.assertTrue(result["valid"], result["findings"])
+        self.assertEqual(
+            [{"scope_id": "program", "scope_kind": "virtual", "requires_wdr": False, "owns_bmm_artifacts": False}],
+            result["scope_contract"]["virtual_scopes"],
+        )
+
+    def test_virtual_scope_is_exact_and_legacy_wdr_is_warning_only(self) -> None:
+        model = stamp_model(approved_model(), 1, "2026-07-13T00:00:00Z")
+        model["milestones"][0]["workstream_id"] = "Program"
+
+        wrong_case = validate_model(model, execute=True, registered_workstreams={"program"})
+        self.assertTrue(any(item["code"] == "workstream.unknown" for item in wrong_case["findings"]))
+        self.assertEqual([], wrong_case["scope_contract"]["virtual_scopes"])
+
+        model["milestones"][0]["workstream_id"] = "program"
+        exact = validate_model(model, execute=True, registered_workstreams={"program"})
+        self.assertTrue(exact["valid"], exact["findings"])
+        self.assertTrue(any(item["code"] == "ADP-LEGACY-VIRTUAL-SCOPE-WDR" for item in exact["findings"]))
+        self.assertEqual([], exact["scope_contract"]["registered_workstreams"])
 
 
 class BaselineCommandTests(unittest.TestCase):
@@ -308,6 +326,37 @@ class BaselineCommandTests(unittest.TestCase):
     def write_baseline(self, path: Path, model: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"{MARKER}\n\n```json\n{json.dumps(model, ensure_ascii=False)}\n```\n", encoding="utf-8")
+
+    def test_virtual_only_validate_does_not_open_any_wdr(self) -> None:
+        model = approved_model()
+        program_milestone = copy.deepcopy(model["milestones"][0])
+        program_milestone.update(
+            {
+                "id": "MS-PROGRAM",
+                "name": "Program launch",
+                "workstream_id": "program",
+                "dependencies": [],
+                "critical_path": False,
+            }
+        )
+        model["milestones"].append(program_milestone)
+        self.write_canonical(stamp_model(model, 1, "2026-07-13T00:00:00Z"))
+        (self.root / "_bmad-output/adp/memory/workstreams/checkout/delivery-record.md").write_bytes(b"\xff\xfe")
+        legacy = self.root / "_bmad-output/adp/memory/workstreams/program/delivery-record.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_bytes(b"\xff\xfe")
+
+        code, result = command_validate(
+            Namespace(baseline=None, skip_wdr_registry=True),
+            self.root,
+            self.config,
+        )
+
+        self.assertEqual(0, code)
+        self.assertTrue(result["valid"], result["findings"])
+        self.assertEqual([], result["scope_contract"]["registered_workstreams"])
+        self.assertEqual(["program"], [item["scope_id"] for item in result["scope_contract"]["virtual_scopes"]])
+        self.assertIn("ADP-LEGACY-VIRTUAL-SCOPE-WDR", {item["code"] for item in result["findings"]})
 
     def test_create_dry_run_is_non_mutating_then_execute_writes_chinese_view(self) -> None:
         code, dry_run = command_create(self.create_args(False), self.root, self.config)

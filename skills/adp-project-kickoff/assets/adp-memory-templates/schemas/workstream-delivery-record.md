@@ -2,6 +2,8 @@
 
 A Workstream Delivery Record is the minimum project-level status surface for one FDE workstream. It indexes BMM artifacts and summarizes coordination facts; it does not duplicate full PRD, architecture, story, code, or validation content.
 
+The reserved baseline scope `program` is virtual and never owns a Workstream Delivery Record, sidecar, BMM phase, or BMM artifact index. `workstreams/program/` is legacy migration input only and must not be created by kickoff or registration.
+
 ## Required Sections
 
 ### Identity
@@ -47,6 +49,8 @@ A Workstream Delivery Record is the minimum project-level status surface for one
 - Scope or change notes:
 - Next actions:
 
+`Next actions` is explicitly projected. `adp-status-sync` preserves it byte-for-byte when neither `next_actions` nor `refresh_actions` is requested. Explicit `next_actions` replaces it with only the supplied content. Explicit `refresh_actions: true` reconciles active ledger-backed entries for this physical Workstream by stable action ID while preserving manual entries without an action ID.
+
 ### Cross-Workstream Links
 
 - Depends on:
@@ -70,7 +74,7 @@ Optional source-backed milestones for `adp-roadmap-sync`. Use this only for veri
 
 Allowed `Type`: `checkpoint`, `business-decision`, `readiness-gate`, `cutover-gate`, `dependency-release`, `delivery-window`.
 
-Allowed `Status`: `planned`, `at-risk`, `done`, `blocked`.
+Allowed `Status`: `planned`, `in-progress`, `at-risk`, `done`, `blocked`.
 
 `Planned`, `Forecast`, and `Actual` must come from WDR owner updates, checkpoint evidence, decision closure, or another explicit source. If the source does not give a date, write `TBD`.
 

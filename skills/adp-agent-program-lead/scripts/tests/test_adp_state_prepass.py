@@ -124,6 +124,38 @@ class AdpStatePrepassTests(unittest.TestCase):
 
             self.assertEqual(result["actions"][0]["due_or_trigger"], "2026-07-05")
 
+    def test_program_only_scope_does_not_open_any_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            baseline = {
+                "milestones": [
+                    {"id": "M-P", "workstream_id": "program"},
+                    {"id": "M-L1", "workstream_id": "l1-checkout"},
+                ]
+            }
+            baseline_path = memory_root / "plans/program-baseline.md"
+            baseline_path.parent.mkdir(parents=True)
+            baseline_path.write_text(
+                "# Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps(baseline)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (memory_root / "workstreams/l1-checkout/delivery-record.md").write_bytes(b"\xff\xfe")
+            legacy = memory_root / "workstreams/program/delivery-record.md"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"\xff\xfe")
+
+            completed = self.run_script(project_root, "--workstream", "PROGRAM")
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual([], result["workstreams"])
+            self.assertEqual([], result["registered_workstreams"])
+            self.assertEqual(["program"], [item["scope_id"] for item in result["virtual_scopes"]])
+            self.assertFalse(any("delivery-record.md" in item["path"] for item in result["sources_read"]))
+
     def test_cross_workstream_ids_and_descriptive_facts_are_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)

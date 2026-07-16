@@ -31,9 +31,11 @@ Default to `{project-root}/_bmad-output/adp/memory` when `--memory-root` is abse
 
 Before rendering, require an approved baseline and a canonical program-status view whose baseline ID/revision, as-of date, source fingerprints, constraint IDs, and immutable snapshot agree. A missing or invalid baseline routes to `adp-plan-baseline`; a missing, stale, future-dated, or incompatible status routes to `adp-program-status` and `adp-state-audit`. Baseline revision 2+ also requires the immediately prior archived revision so the renderer can produce a traceable plan diff.
 
-The renderer owns the quality gate. Without `--audit`, it runs sibling `adp-state-audit --scenario roadmap`, forwarding the selected memory root, workstreams, date, and prepass. With `--audit`, it requires the complete audit/prepass schema, exact workstream/date scope, a source inventory whose file fingerprints and missing paths match the renderer inputs, and identity equivalence when `--prepass-json` is also supplied. Missing, malformed, stale, changed, or incompatible audit input blocks rendering.
+The renderer owns the quality gate. Without `--audit`, it runs sibling `adp-state-audit --scenario roadmap`, forwarding the selected memory root, scopes, date, and prepass. With `--audit`, it requires the complete audit/prepass schema, exact scope/date selection, a source inventory whose file fingerprints and missing paths match the renderer inputs, and identity equivalence when `--prepass-json` is also supplied. It compares physical `registered_workstreams` and `virtual_scopes` separately; it never treats `source_inventory.workstreams` as their union. An audit without the shared scope contract is incompatible and must be regenerated. Missing, malformed, stale, changed, or incompatible audit input blocks rendering.
 
 Scoped runs default to `views/roadmaps/<normalized-scope>/`; `--output-dir` overrides the destination.
+
+`--workstream program` is a virtual-only render and reads no WDR. Repeated mixed selectors retain virtual milestones while scanning only the requested physical Workstreams. The exact baseline ID remains case-sensitive, while CLI selection may normalize supplied casing through the shared resolver.
 
 `--dry-run` suppresses roadmap view writes, but an automatically generated audit may still persist its audit artifacts.
 
@@ -88,6 +90,8 @@ The Markdown and JSON contain:
 - `Excluded Items`
 
 Every formal timeline item carries `baseline_revision`, `planned_source`, `forecast_source`, `actual_source`, `status_source`, `status_rule_id`, `variance_days`, source references, and canonical confidence. Planned and forecast provenance remain distinct. Supplemental items retain their source and source type; items without a source are excluded.
+
+Virtual program milestones remain formal timeline items. Preserve their baseline source, Program Status snapshot reference, canonical status and rule ID, complete source-reference lineage, scope kind, and baseline/status/source fingerprints. Never look for a program WDR or derive aggregation from milestone names.
 
 Both outputs persist baseline identity/revision, the canonical program-status snapshot identity and overall status, per-source SHA-256 fingerprints, `audit_path`, `audit_status`, `report_confidence`, generator version, and a report-level risk marker. A valid `warning` or `blocked` audit may produce a triage roadmap, but the run status and Markdown must label it risk-bearing; it must never read as a green timeline.
 

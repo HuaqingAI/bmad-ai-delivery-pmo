@@ -40,7 +40,7 @@
       "additionalProperties": false,
       "required": ["lane_type", "lane_id"],
       "properties": {
-        "lane_type": {"enum": ["program", "workstream"]},
+        "lane_type": {"enum": ["program", "virtual", "workstream"]},
         "lane_id": {"$ref": "#/$defs/stableId"}
       }
     },

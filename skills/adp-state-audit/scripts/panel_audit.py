@@ -334,8 +334,10 @@ def audit_panel_inputs(
 
     if isinstance(status, dict):
         progress = status.get("progress")
-        if not isinstance(progress, dict) or progress.get("progress_schema_version") != "2.0.0":
-            findings.append(_finding("panel.input.progress.schema-mismatch", "blocking", "blocked", "program-status progress_schema_version must be 2.0.0", "program-status", "adp-program-status"))
+        if not isinstance(progress, dict) or progress.get("progress_schema_version") != "3.0.0":
+            findings.append(_finding("panel.input.progress.schema-mismatch", "blocking", "blocked", "program-status progress_schema_version must be 3.0.0", "program-status", "adp-program-status"))
+        elif not isinstance(progress.get("by_scope"), list):
+            findings.append(_finding("panel.input.progress.schema-mismatch", "blocking", "blocked", "program-status progress.by_scope must be an array", "program-status", "adp-program-status"))
         for error in _lineage_hash_errors("program-status", status.get("source_fingerprints")):
             findings.append(_finding("panel.input.source-lineage.invalid", "blocking", "blocked", error, "program-status", "adp-program-status"))
         for field in ("snapshot_id", "input_audit_id", "artifact_audit_id", "baseline_revision", "as_of"):
