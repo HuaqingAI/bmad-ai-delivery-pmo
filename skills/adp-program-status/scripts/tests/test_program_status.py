@@ -481,21 +481,29 @@ class ProgramStatusTests(unittest.TestCase):
     def test_immutable_snapshot_uses_path_chmod_when_fchmod_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "ps-windows.json"
-            model = {"snapshot_id": "ps-windows"}
+            model = {"snapshot_id": "ps-windows", "overall_status": "on-plan"}
+            text = json.dumps(model)
             real_chmod = program_status.os.chmod
 
             with (
                 patch.object(program_status.os, "fchmod", None, create=True),
                 patch("program_status.os.chmod", wraps=real_chmod) as chmod,
             ):
-                program_status.create_immutable(path, json.dumps(model), model)
+                program_status.create_immutable(path, text, model)
+                program_status.create_immutable(path, text, model)
+                conflicting_model = {**model, "overall_status": "off-plan"}
+                with self.assertRaises(program_status.ContractError):
+                    program_status.create_immutable(path, json.dumps(conflicting_model), conflicting_model)
 
-            chmod.assert_called_once()
-            chmod_path, chmod_mode = chmod.call_args.args
-            self.assertEqual(chmod_path.parent, path.parent)
-            self.assertTrue(chmod_path.name.startswith(f".{path.name}."))
-            self.assertEqual(chmod_mode, 0o644)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), model)
+            self.assertEqual(chmod.call_count, 3)
+            for call in chmod.call_args_list:
+                chmod_path, chmod_mode = call.args
+                self.assertEqual(chmod_path.parent, path.parent)
+                self.assertTrue(chmod_path.name.startswith(f".{path.name}."))
+                self.assertEqual(chmod_mode, 0o644)
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.read_text(encoding="utf-8"), text)
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
 
     def test_period_delta_reports_worsening(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

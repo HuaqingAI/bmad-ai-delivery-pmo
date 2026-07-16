@@ -1273,16 +1273,16 @@ def create_immutable(path: Path, text: str, model: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temp_path = Path(raw_temp)
+    fchmod = getattr(os, "fchmod", None)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            fchmod = getattr(os, "fchmod", None)
-            if fchmod is not None:
+            if callable(fchmod):
                 fchmod(handle.fileno(), 0o644)
-            else:
-                os.chmod(temp_path, 0o644)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        if not callable(fchmod):
+            os.chmod(temp_path, 0o644)
         try:
             os.link(temp_path, path)
         except FileExistsError:
