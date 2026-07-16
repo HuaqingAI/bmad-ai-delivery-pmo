@@ -84,7 +84,7 @@ class PanelAuditTests(unittest.TestCase):
             resource_path.write_text(json.dumps(source_resource), encoding="utf-8")
             bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
             license_bytes = source_license.read_bytes()
-            license_path.write_bytes(license_bytes)
+            license_path.write_bytes(license_bytes.replace(b"\n", b"\r\n"))
 
             _, errors, evidence = panel_audit._resource_validation(
                 inputs["request"], resource_path, panel_root

@@ -227,10 +227,16 @@ def _resource_validation(
     if not license_path.is_file():
         errors.append("ELK license is missing")
     else:
-        actual_license = bytes_hash(license_path.read_bytes())
-        evidence["elk_license_sha256"] = actual_license
-        if actual_license != resource.get("license_sha256"):
-            errors.append("ELK license checksum does not match resource metadata")
+        if resource.get("license_sha256_mode") != "utf8-lf":
+            errors.append("ELK license checksum mode is unsupported")
+        try:
+            actual_license = bytes_hash(canonical_utf8_lf_bytes(license_path.read_bytes()))
+        except UnicodeDecodeError:
+            errors.append("ELK license is not valid UTF-8")
+        else:
+            evidence["elk_license_sha256"] = actual_license
+            if actual_license != resource.get("license_sha256"):
+                errors.append("ELK license checksum does not match resource metadata")
     if resource.get("engine_license") != "EPL-2.0":
         errors.append("ELK resource engine_license must be EPL-2.0")
     layout = request.get("layout") if isinstance(request, dict) else None

@@ -282,8 +282,10 @@ class ManagementPanelTests(unittest.TestCase):
         self.assertEqual("utf8-lf", resource["engine_sha256_mode"])
         self.assertEqual("EPL-2.0", resource["engine_license"])
         license_path = panel_model.SKILL_ROOT / resource["license"]
-        license_hash = "sha256:" + hashlib.sha256(license_path.read_bytes()).hexdigest()
+        canonical_license = management_panel.canonical_utf8_lf_bytes(license_path.read_bytes(), license_path)
+        license_hash = "sha256:" + hashlib.sha256(canonical_license).hexdigest()
         self.assertEqual(resource["license_sha256"], license_hash)
+        self.assertEqual("utf8-lf", resource["license_sha256_mode"])
 
     def test_fixed_elk_accepts_windows_crlf_checkout_and_rejects_other_changes(self):
         source_resource = management_panel.load_json(management_panel.RESOURCE_PATH)
@@ -300,11 +302,12 @@ class ManagementPanelTests(unittest.TestCase):
             resource_path.write_text(json.dumps(source_resource), encoding="utf-8")
             bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
             license_bytes = source_license.read_bytes()
-            license_path.write_bytes(license_bytes)
+            license_path.write_bytes(license_bytes.replace(b"\n", b"\r\n"))
 
             resource, elk_js = management_panel.verify_layout_resource(resource_path, skill_root)
 
             self.assertEqual(source_resource["engine_sha256"], resource["engine_sha256"])
+            self.assertEqual(source_resource["license_sha256"], resource["license_sha256"])
             self.assertNotIn("\r\n", elk_js)
             bundle.write_bytes(bundle.read_bytes() + b"tampered")
             with self.assertRaisesRegex(management_panel.PanelError, "checksum mismatch"):

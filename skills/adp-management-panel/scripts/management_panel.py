@@ -106,7 +106,10 @@ def verify_layout_resource(
         raise PanelError(f"fixed ELK bundle checksum mismatch: expected {resource['engine_sha256']}, got {actual}")
     if resource.get("engine_license") != "EPL-2.0":
         raise PanelError("fixed ELK resource engine_license must be EPL-2.0")
-    actual_license = sha256_bytes(license_path.read_bytes())
+    if resource.get("license_sha256_mode") != "utf8-lf":
+        raise PanelError("fixed ELK license uses an unsupported checksum mode")
+    canonical_license = canonical_utf8_lf_bytes(license_path.read_bytes(), license_path)
+    actual_license = sha256_bytes(canonical_license)
     if actual_license != resource.get("license_sha256"):
         raise PanelError(
             f"fixed ELK license checksum mismatch: expected {resource.get('license_sha256')}, got {actual_license}"
