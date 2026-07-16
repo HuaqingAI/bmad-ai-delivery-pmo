@@ -32,7 +32,7 @@ DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 DEFAULT_CONFIG_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/adp_effective_config.py"
 DEFAULT_BASELINE_SCRIPT = Path(__file__).resolve().parents[2] / "adp-plan-baseline/scripts/baseline.py"
 DEFAULT_ARTIFACT_AUDIT_SCRIPT = Path(__file__).resolve().parents[2] / "adp-state-audit/scripts/audit_state.py"
-DEFAULT_MEMLOG_SCRIPT = Path(__file__).resolve().parents[3] / "_bmad/scripts/memlog.py"
+DEFAULT_MEMLOG_SCRIPT = Path(__file__).resolve().parents[4] / "_bmad/scripts/memlog.py"
 STATUS_VALUES = {"on-plan", "at-risk", "off-plan", "indeterminate"}
 STATUS_RANK = {"on-plan": 0, "indeterminate": 1, "at-risk": 2, "off-plan": 3}
 CONFIDENCE_RANK = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
@@ -1644,11 +1644,61 @@ def run_memlog(helper: Path, *arguments: str) -> None:
         raise RuntimeError(detail)
 
 
-def complete_memlog(helper: Path, memlog: Path) -> None:
-    try:
-        run_memlog(helper, "set-complete", "--path", str(memlog))
-    except RuntimeError:
-        run_memlog(helper, "set", "--path", str(memlog), "--key", "status", "--value", "complete")
+def set_memlog_status(helper: Path, memlog: Path, status: str) -> None:
+    if status == "complete":
+        try:
+            run_memlog(helper, "set-complete", "--path", str(memlog))
+            return
+        except RuntimeError:
+            pass
+    run_memlog(helper, "set", "--path", str(memlog), "--key", "status", "--value", status)
+
+
+def read_memlog_status(path: Path) -> str | None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        raise OSError(f"memlog has no frontmatter: {path}")
+    end = next((index for index, line in enumerate(lines[1:], start=1) if line == "---"), None)
+    if end is None:
+        raise OSError(f"memlog frontmatter is not terminated: {path}")
+    for line in lines[1:end]:
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "status":
+            return value.strip()
+    return None
+
+
+def set_fallback_memlog_status(path: Path, status: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        raise OSError(f"memlog has no frontmatter: {path}")
+    end = next((index for index, line in enumerate(lines[1:], start=1) if line == "---"), None)
+    if end is None:
+        raise OSError(f"memlog frontmatter is not terminated: {path}")
+    status_indexes = [
+        index
+        for index, line in enumerate(lines[1:end], start=1)
+        if line.partition(":")[1] and line.partition(":")[0].strip() == "status"
+    ]
+    if status_indexes:
+        lines[status_indexes[0]] = f"status: {status}"
+        for index in reversed(status_indexes[1:]):
+            del lines[index]
+    else:
+        lines.insert(end, f"status: {status}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def persist_memlog_status(args: argparse.Namespace, memlog: Path, status: str) -> None:
+    helper = memlog_helper(Path(args.project_root).expanduser().resolve())
+    if helper:
+        try:
+            set_memlog_status(helper, memlog, status)
+        except (OSError, RuntimeError):
+            pass
+    if read_memlog_status(memlog) != status:
+        set_fallback_memlog_status(memlog, status)
 
 
 def append_fallback_memlog(path: Path, entry_type: str, text: str) -> None:
@@ -1868,12 +1918,7 @@ def finalize_headless_result(args: argparse.Namespace, operation: dict[str, Any]
         "decision",
         f"Headless result is {result['status']}; safe_to_publish={str(result['safe_to_publish']).lower()}; reason={result.get('reason', 'none')}.",
     )
-    helper = memlog_helper(Path(args.project_root).expanduser().resolve())
-    if complete and helper:
-        try:
-            complete_memlog(helper, memlog)
-        except (OSError, RuntimeError):
-            append_fallback_memlog(memlog, "event", "Could not mark the memlog complete through the helper.")
+    persist_memlog_status(args, memlog, result["status"])
     return result
 
 

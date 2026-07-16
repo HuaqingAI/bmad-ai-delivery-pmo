@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "program_status.py"
 AUDIT_SCRIPT = Path(__file__).resolve().parents[3] / "adp-state-audit/scripts/audit_state.py"
+MEMLOG_HELPER = Path(__file__).resolve().parents[4] / "_bmad/scripts/memlog.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import program_status  # noqa: E402
 try:
@@ -28,6 +29,17 @@ FLOW_STATE_SCHEMA_PATH = SCRIPT.parents[1] / "assets/program-status-flow-state-v
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def frontmatter(path: Path) -> dict[str, str]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    end = next(index for index, line in enumerate(lines[1:], start=1) if line == "---")
+    return {
+        key.strip(): value.strip()
+        for line in lines[1:end]
+        for key, separator, value in [line.partition(":")]
+        if separator
+    }
 
 
 class ProgramStatusTests(unittest.TestCase):
@@ -906,6 +918,10 @@ class ProgramStatusTests(unittest.TestCase):
             root = Path(temp)
             memory = self.scaffold(root, self.baseline(), {"ws-one": [{"id": "MS-ONE", "forecast": "2026-07-20"}]})
             audit = self.write_real_audit(root, memory)
+            helper = root / "_bmad/scripts/memlog.py"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text(MEMLOG_HELPER.read_text(encoding="utf-8"), encoding="utf-8")
+            self.assertEqual(program_status.memlog_helper(root), helper.resolve())
             generate_memlog = root / "generate.memlog.md"
 
             completed, result = self.generate(
@@ -921,11 +937,13 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertIn("json", result["artifact_validation_reports"])
             self.assertEqual(result["input_audit_id"], json.loads(audit.read_text(encoding="utf-8"))["input_audit_id"])
             self.assertEqual(Path(result["memlog"]).resolve(), generate_memlog.resolve())
+            self.assertEqual(frontmatter(generate_memlog)["status"], "complete")
             memlog_text = generate_memlog.read_text(encoding="utf-8")
-            self.assertIn("status: complete", memlog_text)
             self.assertIn("(assumption)", memlog_text)
             self.assertIn("(decision)", memlog_text)
 
+            helper.unlink()
+            self.assertIsNone(program_status.memlog_helper(root))
             inspect_memlog = root / "inspect.memlog.md"
             inspected = self.run_script(
                 root,
@@ -941,6 +959,27 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertEqual(inspection["input_audit_id"], result["input_audit_id"])
             self.assertEqual(inspection["locale"], "en")
             self.assertIn("snapshot", inspection["outputs"])
+            self.assertEqual(frontmatter(inspect_memlog)["status"], "complete")
+
+            helper.write_text("raise SystemExit(9)\n", encoding="utf-8")
+            self.assertEqual(program_status.memlog_helper(root), helper.resolve())
+            failed_helper_memlog = root / "failed-helper.memlog.md"
+            failed_helper_inspection = self.run_script(
+                root,
+                "--mode",
+                "inspect",
+                "--headless",
+                "--memlog",
+                str(failed_helper_memlog),
+            )
+            failed_helper_result = json.loads(failed_helper_inspection.stdout)
+            self.assertEqual(failed_helper_result["status"], "complete")
+            self.assertTrue(failed_helper_result["safe_to_publish"])
+            self.assertEqual(frontmatter(failed_helper_memlog)["status"], "complete")
+            self.assertEqual(
+                program_status.DEFAULT_MEMLOG_SCRIPT,
+                SCRIPT.resolve().parents[4] / "_bmad/scripts/memlog.py",
+            )
 
     def test_headless_blocks_when_artifact_validation_cannot_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -962,7 +1001,9 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertEqual(result["dependency_name"], "adp-state-audit artifact validator")
             self.assertEqual(result["missing_path"], str(missing.resolve()))
             self.assertEqual(result["recommended_workflows"], ["adp-setup", "adp-state-audit"])
-            self.assertTrue(Path(result["memlog"]).is_file())
+            memlog = Path(result["memlog"])
+            self.assertTrue(memlog.is_file())
+            self.assertEqual(frontmatter(memlog)["status"], "blocked")
 
     def test_headless_returns_blocked_artifact_audit_disposition(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -978,6 +1019,9 @@ class ProgramStatusTests(unittest.TestCase):
                 "    print(json.dumps({'ok': True, 'safe_to_publish': False, 'artifact_validation_id': 'forced-block', 'outputs': {'json': 'forced-block.json'}, 'recommended_workflows': ['owning artifact workflow'], 'reason': 'forced artifact validation block'}))\n",
                 encoding="utf-8",
             )
+            helper = root / "_bmad/scripts/memlog.py"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text("raise SystemExit(9)\n", encoding="utf-8")
 
             completed, result = self.generate(
                 root,
@@ -996,6 +1040,7 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertIn("snapshot", result["staged_outputs"])
             self.assertFalse((memory / "snapshots/program-status").exists())
             self.assertFalse((memory / "views/program-status.json").exists())
+            self.assertEqual(frontmatter(Path(result["memlog"]))["status"], "blocked")
 
     def test_missing_sibling_script_returns_dependency_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
