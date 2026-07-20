@@ -1,2 +1,4 @@
 skills/adp-management-panel/assets/vendor/elk.bundled-0.9.3.js -text -whitespace
 skills/adp-management-panel/assets/vendor/ELK-LICENSE-EPL-2.0.md text eol=lf
+skills/adp-management-panel/assets/vendor/markdown-it-14.1.0.min.js -text -whitespace
+skills/adp-management-panel/assets/vendor/MARKDOWN-IT-LICENSE-MIT.md text eol=lf

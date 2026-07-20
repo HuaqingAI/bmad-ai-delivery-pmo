@@ -26,6 +26,7 @@ PANEL_ROOT = SKILLS_ROOT / "adp-management-panel"
 PANEL_MODEL_SCRIPT = PANEL_ROOT / "scripts/panel_model.py"
 FLOW_GRAPH_SCRIPT = SKILLS_ROOT / "adp-flow-graph/scripts/flow_graph.py"
 RESOURCE_PATH = PANEL_ROOT / "assets/elk-resource-v1.json"
+MARKDOWN_RESOURCE_PATH = PANEL_ROOT / "assets/markdown-resource-v1.json"
 PANEL_APP_PATH = PANEL_ROOT / "assets/panel.js"
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SUSPICIOUS_TEXT_RE = re.compile(
@@ -106,6 +107,7 @@ def _finding(
 def _public_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(inputs)
     result.pop("_panel_source_paths", None)
+    result.pop("_panel_source_previews", None)
     request = result.get("request")
     if isinstance(request, dict):
         for key in (
@@ -251,6 +253,41 @@ def _resource_validation(
     }
     if layout != expected_layout:
         errors.append("panel request ELK version/license/hash/config metadata does not match the fixed resource")
+    return resource, errors, evidence
+
+
+def _markdown_resource_validation(
+    resource_path: Path = MARKDOWN_RESOURCE_PATH, panel_root: Path = PANEL_ROOT
+) -> tuple[dict[str, Any] | None, list[str], dict[str, str]]:
+    errors: list[str] = []
+    evidence: dict[str, str] = {}
+    try:
+        resource = load_json(resource_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, [f"Markdown renderer metadata is unreadable: {exc}"], evidence
+    bundle = panel_root / str(resource.get("bundle") or "")
+    license_path = panel_root / str(resource.get("license") or "")
+    if resource.get("renderer") != "markdown-it" or resource.get("renderer_version") != "14.1.0":
+        errors.append("Markdown renderer identity is invalid")
+    if resource.get("renderer_license") != "MIT":
+        errors.append("Markdown renderer license must be MIT")
+    for label, path, mode_key, hash_key, evidence_key in (
+        ("bundle", bundle, "renderer_sha256_mode", "renderer_sha256", "markdown_renderer_sha256"),
+        ("license", license_path, "license_sha256_mode", "license_sha256", "markdown_license_sha256"),
+    ):
+        if not path.is_file():
+            errors.append(f"Markdown renderer {label} is missing")
+            continue
+        if resource.get(mode_key) != "utf8-lf":
+            errors.append(f"Markdown renderer {label} checksum mode is unsupported")
+        try:
+            actual = bytes_hash(canonical_utf8_lf_bytes(path.read_bytes()))
+        except UnicodeDecodeError:
+            errors.append(f"Markdown renderer {label} is not valid UTF-8")
+            continue
+        evidence[evidence_key] = actual
+        if actual != resource.get(hash_key):
+            errors.append(f"Markdown renderer {label} checksum does not match resource metadata")
     return resource, errors, evidence
 
 
@@ -674,6 +711,29 @@ def audit_panel_artifacts(
             if decoded != expected:
                 findings.append(_finding("panel.artifact.embedded-model.mismatch", "blocking", "blocked", f"{element_id} differs from the immutable bundle", "panel-html", "adp-management-panel"))
 
+    preview_raw = parser.script("adp-source-previews")
+    previews: Any = None
+    if preview_raw is None or parser.script_counts.get("adp-source-previews") != 1:
+        findings.append(_finding("panel.artifact.source-preview.missing", "blocking", "blocked", "HTML must contain exactly one adp-source-previews", "panel-html", "adp-management-panel"))
+    elif any(character in preview_raw for character in ("<", ">", "&", "\u2028", "\u2029")):
+        findings.append(_finding("panel.artifact.safe-embedding.invalid", "blocking", "blocked", "adp-source-previews contains an unescaped script-breaking codepoint", "panel-html", "adp-management-panel"))
+    else:
+        try:
+            previews = json.loads(preview_raw)
+        except json.JSONDecodeError as exc:
+            findings.append(_finding("panel.artifact.source-preview.invalid", "blocking", "blocked", f"adp-source-previews is invalid JSON: {exc}", "panel-html", "adp-management-panel"))
+        else:
+            if panel_model_module is not None:
+                for error in panel_model_module.source_preview_errors(previews, manifest):
+                    findings.append(_finding("panel.artifact.source-preview.invalid", "blocking", "blocked", error, "panel-html", "adp-management-panel"))
+            expected_previews = (
+                source_inputs.get("_panel_source_previews", [])
+                if isinstance(source_inputs, dict)
+                else None
+            )
+            if expected_previews is not None and previews != expected_previews:
+                findings.append(_finding("panel.artifact.source-preview.mismatch", "blocking", "blocked", "embedded source previews differ from sealed panel inputs", "panel-html", "adp-management-panel"))
+
     resource, resource_errors, resource_evidence = _resource_validation({"layout": manifest.get("layout")}, resource_path, panel_root)
     for error in resource_errors:
         findings.append(_finding("panel.artifact.elk-asset.mismatch", "blocking", "blocked", error, str(resource_path), "adp-setup"))
@@ -686,6 +746,21 @@ def audit_panel_artifacts(
             expected_elk = ""
         if parser.script_counts.get("adp-elk-runtime") != 1 or embedded_elk != expected_elk:
             findings.append(_finding("panel.artifact.elk-embedded.mismatch", "blocking", "blocked", "embedded ELK runtime does not match the pinned bundle", "panel-html", "adp-management-panel"))
+
+    markdown_resource, markdown_errors, markdown_evidence = _markdown_resource_validation(
+        panel_root=panel_root
+    )
+    for error in markdown_errors:
+        findings.append(_finding("panel.artifact.markdown-renderer.mismatch", "blocking", "blocked", error, "markdown-resource", "adp-setup"))
+    if markdown_resource is not None:
+        markdown_path = panel_root / markdown_resource["bundle"]
+        embedded_markdown = parser.script("adp-markdown-runtime")
+        try:
+            expected_markdown = canonical_utf8_lf_bytes(markdown_path.read_bytes()).decode("utf-8") if markdown_path.is_file() else ""
+        except UnicodeDecodeError:
+            expected_markdown = ""
+        if parser.script_counts.get("adp-markdown-runtime") != 1 or embedded_markdown != expected_markdown:
+            findings.append(_finding("panel.artifact.markdown-renderer.embedded-mismatch", "blocking", "blocked", "embedded Markdown runtime does not match the pinned bundle", "panel-html", "adp-management-panel"))
 
     embedded_app = parser.script("adp-panel-runtime")
     expected_app = (panel_root / "assets/panel.js").read_text(encoding="utf-8")
@@ -795,7 +870,7 @@ def audit_panel_artifacts(
             "panel_input_audit_id": input_audit.get("panel_input_audit_id") if input_audit else None,
             "safe_to_publish": not any(item["execution_disposition"] == "blocked" for item in findings),
             "artifact_hashes": artifact_hashes,
-            "resource_evidence": resource_evidence,
+            "resource_evidence": {**resource_evidence, **markdown_evidence},
             "meeting_trace": {
                 scenario: {
                     "meeting_pack_id": value.get("meeting_pack_id"),

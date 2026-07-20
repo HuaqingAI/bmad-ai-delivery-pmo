@@ -1,6 +1,5 @@
 import ast
 import unittest
-from pathlib import Path
 
 from panel_contract_testkit import SKILL_ROOT
 
@@ -29,6 +28,9 @@ class PanelContractDeliveryBoundaryTests(unittest.TestCase):
             "assets/panel-template.html",
             "assets/panel.css",
             "assets/panel.js",
+            "assets/markdown-resource-v1.json",
+            "assets/vendor/markdown-it-14.1.0.min.js",
+            "assets/vendor/MARKDOWN-IT-LICENSE-MIT.md",
             "assets/elk-resource-v1.json",
             "assets/vendor/elk.bundled-0.9.3.js",
             "assets/vendor/ELK-LICENSE-EPL-2.0.md",

@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import hashlib
 import html
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -30,6 +32,7 @@ ASSET_ROOT = SKILL_ROOT / "assets"
 FIXTURE_MEMORY_ROOT = ASSET_ROOT / "fixtures/panel-contract-v1/memory"
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 RESOURCE_PATH = ASSET_ROOT / "elk-resource-v1.json"
+MARKDOWN_RESOURCE_PATH = ASSET_ROOT / "markdown-resource-v1.json"
 TEMPLATE_PATH = ASSET_ROOT / "panel-template.html"
 STYLE_PATH = ASSET_ROOT / "panel.css"
 APP_PATH = ASSET_ROOT / "panel.js"
@@ -138,6 +141,93 @@ def canonical_utf8_lf_bytes(value: bytes, source: Path | str) -> bytes:
     return value.replace(b"\r\n", b"\n")
 
 
+def safe_source_path(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return safe_source_path(value.get("artifact_path") or value.get("path"))
+    if isinstance(value, list):
+        return next((path for item in value if (path := safe_source_path(item))), None)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text[:1] in {"{", "["}:
+        try:
+            return safe_source_path(ast.literal_eval(text))
+        except (SyntaxError, ValueError):
+            return None
+    normalized = text.replace("\\", "/")
+    if (
+        not normalized
+        or re.match(r"^[a-z][a-z0-9+.-]*:", normalized, re.IGNORECASE)
+        or normalized.startswith("/")
+        or re.match(r"^[a-z]:/", normalized, re.IGNORECASE)
+    ):
+        return None
+    source_path = normalized.split("#", 1)[0]
+    prefix = "_bmad-output/adp/memory/"
+    if source_path.startswith(prefix):
+        source_path = source_path[len(prefix):]
+    if not source_path or any(part in {"", ".", ".."} for part in source_path.split("/")):
+        return None
+    return source_path
+
+
+def meeting_item_source_path(item: Any) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    for key in ("source_path", "Source path", "artifact_path", "Artifact path", "source", "Source"):
+        if path := safe_source_path(item.get(key)):
+            return path
+    return None
+
+
+def build_source_previews(
+    inputs: dict[str, Any], memory_root: Path, profile: str
+) -> list[dict[str, Any]]:
+    if profile != "internal-full":
+        return []
+    paths: set[str] = {"actions/action-ledger.md", "views/risk-matrix.md"}
+    for pack in inputs.get("meeting_packs", {}).values():
+        for rows in pack.get("boards", {}).values():
+            if not isinstance(rows, list):
+                continue
+            for item in rows:
+                path = meeting_item_source_path(item)
+                if path and path.lower().endswith(".md"):
+                    paths.add(path)
+
+    previews: list[dict[str, Any]] = []
+    root = memory_root.resolve()
+    source_paths = inputs.setdefault("_panel_source_paths", {})
+    priority_paths = ["actions/action-ledger.md", "views/risk-matrix.md"]
+    ordered_paths = [*priority_paths, *sorted(paths - set(priority_paths))]
+    for path in ordered_paths[: panel_model.SOURCE_PREVIEW_MAX_FILES]:
+        target = (root / Path(*path.split("/"))).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        if not target.is_file():
+            continue
+        try:
+            canonical = canonical_utf8_lf_bytes(target.read_bytes(), target)
+        except PanelError:
+            continue
+        preview_bytes = canonical[: panel_model.SOURCE_PREVIEW_MAX_BYTES]
+        content = preview_bytes.decode("utf-8", errors="ignore")
+        previews.append(
+            {
+                "path": path,
+                "content": content,
+                "source_sha256": sha256_bytes(canonical),
+                "preview_sha256": sha256_bytes(content.encode("utf-8")),
+                "bytes": len(canonical),
+                "truncated": len(canonical) > len(preview_bytes),
+            }
+        )
+        source_paths[panel_model.SOURCE_PREVIEW_PREFIX + path] = str(target)
+    return previews
+
+
 def resolve_memory_root(project_root: Path, value: str) -> Path:
     candidate = Path(value).expanduser()
     return candidate.resolve() if candidate.is_absolute() else (project_root / candidate).resolve()
@@ -166,6 +256,38 @@ def verify_layout_resource(
     if actual_license != resource.get("license_sha256"):
         raise PanelError(
             f"fixed ELK license checksum mismatch: expected {resource.get('license_sha256')}, got {actual_license}"
+        )
+    return resource, canonical_bundle.decode("utf-8")
+
+
+def verify_markdown_resource(
+    resource_path: Path = MARKDOWN_RESOURCE_PATH, skill_root: Path = SKILL_ROOT
+) -> tuple[dict[str, Any], str]:
+    resource = load_json(resource_path)
+    bundle = skill_root / resource["bundle"]
+    license_path = skill_root / resource["license"]
+    if not bundle.is_file() or not license_path.is_file():
+        raise PanelError("fixed Markdown renderer bundle or license is missing")
+    if resource.get("renderer") != "markdown-it" or resource.get("renderer_version") != "14.1.0":
+        raise PanelError("fixed Markdown renderer identity is invalid")
+    if resource.get("renderer_license") != "MIT":
+        raise PanelError("fixed Markdown renderer license must be MIT")
+    if resource.get("renderer_sha256_mode") != "utf8-lf":
+        raise PanelError("fixed Markdown renderer uses an unsupported checksum mode")
+    canonical_bundle = canonical_utf8_lf_bytes(bundle.read_bytes(), bundle)
+    actual = sha256_bytes(canonical_bundle)
+    if actual != resource.get("renderer_sha256"):
+        raise PanelError(
+            f"fixed Markdown renderer checksum mismatch: expected {resource.get('renderer_sha256')}, got {actual}"
+        )
+    if resource.get("license_sha256_mode") != "utf8-lf":
+        raise PanelError("fixed Markdown renderer license uses an unsupported checksum mode")
+    canonical_license = canonical_utf8_lf_bytes(license_path.read_bytes(), license_path)
+    actual_license = sha256_bytes(canonical_license)
+    if actual_license != resource.get("license_sha256"):
+        raise PanelError(
+            "fixed Markdown renderer license checksum mismatch: "
+            f"expected {resource.get('license_sha256')}, got {actual_license}"
         )
     return resource, canonical_bundle.decode("utf-8")
 
@@ -676,6 +798,12 @@ def load_inputs(args: argparse.Namespace, resource: dict[str, Any], profile: str
     inputs = copy.deepcopy(inputs)
     inputs["shareable_policy"] = selection["shareable_policy"]
     inputs["request"] = build_request(inputs, resource, args, profile, selection)
+    previews = build_source_previews(inputs, memory_root, profile)
+    inputs["_panel_source_previews"] = previews
+    inputs["request"]["source_preview_fingerprints"] = {
+        panel_model.SOURCE_PREVIEW_PREFIX + item["path"]: item["source_sha256"]
+        for item in previews
+    }
     return inputs
 
 
@@ -842,14 +970,28 @@ def static_fallback(model: dict[str, Any]) -> str:
     return "".join(lines)
 
 
-def render_html(model: dict[str, Any], elk_js: str, default_view: str) -> bytes:
+def render_html(
+    model: dict[str, Any],
+    elk_js: str,
+    default_view: str,
+    source_previews: list[dict[str, Any]] | None = None,
+    markdown_js: str | None = None,
+) -> bytes:
+    source_previews = source_previews or []
+    preview_errors = panel_model.source_preview_errors(source_previews, model["manifest"])
+    if preview_errors:
+        raise PanelError("source preview projection is invalid: " + "; ".join(preview_errors))
+    if markdown_js is None:
+        _, markdown_js = verify_markdown_resource()
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     replacements = {
         "{{PANEL_CSS}}": STYLE_PATH.read_text(encoding="utf-8"),
         "{{PANEL_JS}}": APP_PATH.read_text(encoding="utf-8"),
         "{{ELK_JS}}": elk_js,
+        "{{MARKDOWN_JS}}": markdown_js,
         "{{MODEL_JSON}}": panel_model.safe_json_for_script(model),
         "{{MANIFEST_JSON}}": panel_model.safe_json_for_script(model["manifest"]),
+        "{{SOURCE_PREVIEWS_JSON}}": panel_model.safe_json_for_script(source_previews),
         "{{DEFAULT_VIEW}}": default_view,
         "{{STATIC_FALLBACK}}": static_fallback(model),
     }
@@ -944,6 +1086,7 @@ def compose(
     args: argparse.Namespace, memory_root: Path, profile: str
 ) -> tuple[dict[str, Any], bytes, bytes, dict[str, Any], dict[str, Any], Path]:
     resource, elk_js = verify_layout_resource()
+    _, markdown_js = verify_markdown_resource()
     inputs = load_inputs(args, resource, profile, memory_root)
     input_audit, input_audit_path = run_input_audit_gate(inputs, args, memory_root)
     model = panel_model.compose_panel(inputs)
@@ -952,11 +1095,17 @@ def compose(
     if model_errors or manifest_errors:
         raise PanelError("composed panel violates the panel schema: " + "; ".join([*model_errors, *manifest_errors]))
     bundle = canonical_json_bytes(model)
-    rendered = render_html(model, elk_js, args.default_view)
+    rendered = render_html(
+        model,
+        elk_js,
+        args.default_view,
+        inputs.get("_panel_source_previews", []),
+        markdown_js,
+    )
     return model, bundle, rendered, inputs, input_audit, input_audit_path
 
 
-def extract_script(html_text: str, element_id: str) -> dict[str, Any]:
+def extract_script(html_text: str, element_id: str) -> Any:
     opener = f'<script type="application/json" id="{element_id}">'
     start = html_text.find(opener)
     if start < 0:
@@ -970,14 +1119,19 @@ def extract_script(html_text: str, element_id: str) -> dict[str, Any]:
 
 def inspect_current(memory_root: Path, expected_panel_id: str | None = None) -> dict[str, Any]:
     resource, _ = verify_layout_resource()
+    markdown_resource, _ = verify_markdown_resource()
     current = memory_root / "views/management-panel/index.html"
     if not current.exists():
         raise PanelError(f"current panel is missing: {current}")
     text = current.read_text(encoding="utf-8")
     manifest = extract_script(text, "adp-panel-manifest")
     model = extract_script(text, "adp-panel-model")
+    source_previews = extract_script(text, "adp-source-previews")
     if manifest != model.get("manifest"):
         raise PanelError("embedded manifest differs from embedded panel bundle")
+    preview_errors = panel_model.source_preview_errors(source_previews, manifest)
+    if preview_errors:
+        raise PanelError("embedded source previews are invalid: " + "; ".join(preview_errors))
     if expected_panel_id and manifest.get("panel_id") != expected_panel_id:
         raise PanelError(f"panel id mismatch: expected {expected_panel_id}, got {manifest.get('panel_id')}")
     artifact_root = memory_root / "snapshots/management-panel"
@@ -1013,6 +1167,7 @@ def inspect_current(memory_root: Path, expected_panel_id: str | None = None) -> 
         "immutable_bundle": str(bundle_path),
         "html_sha256": sha256_bytes(current.read_bytes()),
         "elk_sha256": resource["engine_sha256"],
+        "markdown_renderer_sha256": markdown_resource["renderer_sha256"],
         "panel_artifact_audit_id": artifact_audit["panel_artifact_audit_id"],
         "panel_artifact_audit": str(artifact_audit_path),
     }
@@ -1037,7 +1192,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         bundle = existing_bundle
         inputs["request"]["generated_at"] = existing["manifest"]["generated_at"]
         _, elk_js = verify_layout_resource()
-        rendered = render_html(existing, elk_js, args.default_view)
+        _, markdown_js = verify_markdown_resource()
+        rendered = render_html(
+            existing,
+            elk_js,
+            args.default_view,
+            inputs.get("_panel_source_previews", []),
+            markdown_js,
+        )
     publication_targets = {"bundle": bundle_path}
     if args.operation == "archive":
         publication_targets["html"] = panel_model.panel_artifact_path(artifact_root, panel_id, ".html")

@@ -146,17 +146,20 @@ async function screenshot(page, name, fullPage = true) {
       await page.locator(".related-item[data-item-type='todo'] > summary").click();
       check((await page.locator(".related-item[data-item-type='todo']").innerText()).includes("Due / Trigger") && (await page.locator(".related-item[data-item-type='todo']").innerText()).includes("2026-07-13"), "related-item click did not reveal structured canonical content");
       const relatedSource = page.locator(".related-item[data-item-type='todo'] .source-link");
-      check(await relatedSource.getAttribute("target") === "_blank", "related-item source link does not open separately");
-      const relatedSourceHref = await relatedSource.evaluate(element => element.href);
+      check(await relatedSource.evaluate(element => element.tagName) === "BUTTON", "Markdown source did not use the internal preview control");
+      await relatedSource.click();
+      await page.waitForSelector("#source-preview-dialog[open]");
+      const sourcePreview = page.locator("#source-preview-dialog");
+      check((await sourcePreview.locator(".source-preview-content").innerText()).includes("A-OPEN"), "internal Markdown preview did not expose canonical source content");
+      check(await sourcePreview.locator(".source-preview-content h1", { hasText: "Action Ledger" }).count() === 1, "Markdown source was not rendered as a reading view");
+      check(await sourcePreview.locator(".source-preview-content > pre").count() === 0, "Markdown source remained a code-style preview");
+      check((await sourcePreview.locator(".source-preview-heading").innerText()).includes("actions/action-ledger.md"), "internal Markdown preview lost its source path");
+      const relatedSourceHref = await sourcePreview.locator(".source-external-link").evaluate(element => element.href);
       check(relatedSourceHref.endsWith("/memory/actions/action-ledger.md"), "related-item source link does not resolve from the panel to the canonical memory file");
       check(fs.existsSync(fileURLToPath(relatedSourceHref)), "related-item source link target does not exist");
-      const sourcePagePromise = context.waitForEvent("page");
-      await relatedSource.click();
-      const sourcePage = await sourcePagePromise;
-      await sourcePage.waitForLoadState("load");
-      check(sourcePage.url() === relatedSourceHref, "related-item source link did not open its canonical target");
-      check((await sourcePage.locator("body").innerText()).includes("A-OPEN"), "related-item source target did not expose canonical item content");
-      await sourcePage.close();
+      evidence.screenshots.push(await screenshot(page, "source-preview-1920x1080.png", false));
+      await sourcePreview.getByRole("button", { name: "关闭" }).click();
+      await page.waitForSelector("#source-preview-dialog", { state: "detached" });
       await page.getByRole("button", { name: /^风险 1$/ }).click();
       check(await page.locator(".related-item[data-item-type='risk']").count() === 1, "risk related-item filter is not functional");
       evidence.screenshots.push(await screenshot(page, "project-flow-node-detail-1920x1080.png", false));
@@ -180,14 +183,34 @@ async function screenshot(page, name, fullPage = true) {
       const transformBefore = await page.locator("#flow-viewport").getAttribute("transform");
       await page.getByRole("button", { name: "Zoom in" }).click();
       const transformAfter = await page.locator("#flow-viewport").getAttribute("transform");
-      check(transformBefore !== transformAfter && transformAfter.includes("scale(1.2"), "flow zoom control did not update transform");
+      check(transformBefore !== transformAfter && transformAfter.startsWith("matrix(1.35 0 0 1.35 "), "flow zoom control did not use the faster zoom step");
+      for (let index = 0; index < 8; index += 1) await page.getByRole("button", { name: "Zoom in" }).click();
+      const maximumScale = Number(await page.locator("#flow-frame svg").getAttribute("data-zoom-scale"));
+      check(maximumScale > 3 && maximumScale <= 8, "flow zoom limit did not expand beyond the former 3x cap");
+      const maximumZoomVisibility = await page.evaluate(() => {
+        const frame = document.querySelector("#flow-frame").getBoundingClientRect();
+        const nodeRects = Array.from(document.querySelectorAll("#flow-frame svg .flow-node")).map(node => {
+          const box = node.getBoundingClientRect();
+          return { id: node.dataset.nodeId, left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+        });
+        const visibleNodeIds = nodeRects.filter(box => box.right > frame.left && box.left < frame.right && box.bottom > frame.top && box.top < frame.bottom).map(box => box.id);
+        return {
+          visibleNodeIds,
+          frame: { left: frame.left, right: frame.right, top: frame.top, bottom: frame.bottom },
+          nodeRects,
+          transform: document.querySelector("#flow-viewport").getAttribute("transform")
+        };
+      });
+      check(maximumZoomVisibility.visibleNodeIds.length > 0, "maximum flow zoom moved every node outside the canvas: " + JSON.stringify(maximumZoomVisibility));
+      evidence.screenshots.push(await screenshot(page, "project-flow-max-zoom-1920x1080.png", false));
       await page.getByRole("button", { name: "Fit" }).click();
       const flowNodeBox = await page.locator(".flow-node[data-node-id='M-A']").boundingBox();
       await page.mouse.move(flowNodeBox.x + flowNodeBox.width / 2, flowNodeBox.y + flowNodeBox.height / 2);
       await page.mouse.down();
       await page.mouse.move(flowNodeBox.x + flowNodeBox.width / 2 + 30, flowNodeBox.y + flowNodeBox.height / 2 + 20);
       await page.mouse.up();
-      check((await page.locator("#flow-viewport").getAttribute("transform")).includes("translate(30 20)"), "flow node-area pan did not update transform");
+      check((await page.locator("#flow-viewport").getAttribute("transform")) !== "matrix(1 0 0 1 0 0)", "flow node-area pan did not update transform");
+      check(await page.locator("#flow-frame svg").getAttribute("data-pan-gain") === "1.35", "flow canvas did not expose the faster pointer pan gain");
       check(await page.locator("#source-drawer").count() === 0, "dragging a flow node accidentally opened its drawer");
       await page.getByRole("button", { name: "Reset" }).click();
       await page.getByRole("button", { name: "Collapse L1" }).click();
@@ -220,6 +243,17 @@ async function screenshot(page, name, fullPage = true) {
       const meetingContext = await page.locator("#fde-meeting-readiness").innerText();
       check(meetingContext.includes("Pack ID") && meetingContext.includes("2026-07-13-fde-morning"), "FDE view lacks meeting pack identity");
       check(meetingContext.includes("Meeting window") && meetingContext.includes("confirmed"), "FDE view lacks confirmed meeting window");
+      await page.locator("#fde-blockers-commitments .meeting-item > summary").click();
+      check(await page.getByRole("button", { name: /在风险清单中查看|View in risk register/ }).count() === 1, "structured Risk ID did not expose a risk-register jump");
+      await page.getByRole("button", { name: /在风险清单中查看|View in risk register/ }).click();
+      await page.waitForSelector("#risk-register-view");
+      check(new URL(page.url()).hash.includes("view=risk-register") && new URL(page.url()).hash.includes("risk=R-OPEN"), "risk-register jump did not preserve the structured Risk ID in the route");
+      check(await page.locator("#nav-risk-register").getAttribute("aria-current") === "page", "Risk register navigation did not become current");
+      check((await page.locator(".risk-register-document").innerText()).includes("Gate evidence is missing"), "Risk register view lost canonical Markdown content");
+      check(await page.locator("[data-risk-code='R-OPEN'].is-register-target").count() === 1, "risk-register jump did not locate the exact Risk ID");
+      evidence.screenshots.push(await screenshot(page, "risk-register-1280x720.png", false));
+      await open(page, htmlPath, "#v=1&view=fde-morning&mode=quantitative-progress");
+      await page.waitForSelector("#fde-window-delta");
       check(await page.getByText("Next-period forecast", { exact: true }).count() === 0, "FDE view keeps a resident long-range forecast");
       check(await page.locator("#fde-blockers-commitments .meeting-board-tabs").count() === 1, "FDE execution closure did not render category tabs");
       check((await page.locator("#fde-blockers-commitments .meeting-item-title").first().innerText()).includes("Gate evidence is missing"), "FDE blocker title is not human-readable");
@@ -228,7 +262,7 @@ async function screenshot(page, name, fullPage = true) {
       await page.locator("#fde-blockers-commitments .meeting-item > summary").click();
       const executionClosureText = await page.locator("#fde-blockers-commitments").innerText();
       check(executionClosureText.includes("Due / Trigger") && !executionClosureText.includes('{"'), "FDE execution closure retained raw JSON instead of structured fields");
-      check((await page.locator("#fde-blockers-commitments .source-link").evaluate(element => element.href)).endsWith("/memory/actions/action-ledger.md"), "FDE item did not link to its canonical source file");
+      check((await page.locator("#fde-blockers-commitments .source-external-link").evaluate(element => element.href)).endsWith("/memory/actions/action-ledger.md"), "FDE item did not retain its canonical source fallback");
       await page.locator("#fde-blockers-commitments").scrollIntoViewIfNeeded();
       evidence.screenshots.push(await screenshot(page, "fde-execution-closure-1280x720.png", false));
       const meetingControlHeight = await page.locator("#clear-filters").evaluate(element => parseFloat(getComputedStyle(element).height));
@@ -237,7 +271,17 @@ async function screenshot(page, name, fullPage = true) {
       await page.evaluate(() => window.scrollTo(0, 0));
       await layoutCheck(page, "fde-1280");
       evidence.screenshots.push(await screenshot(page, "fde-morning-1280x720.png", false));
-      await page.getByRole("button", { name: /流程图|Flow progress/ }).click();
+      await page.getByRole("tab", { name: /^Commitments 1$/ }).click();
+      await page.locator("#fde-blockers-commitments .meeting-item > summary").click();
+      check(await page.getByRole("button", { name: /在总账中查看|View in action ledger/ }).count() === 1, "structured Action ID did not expose a ledger jump");
+      await page.getByRole("button", { name: /在总账中查看|View in action ledger/ }).click();
+      await page.waitForSelector("#action-ledger-view");
+      check(new URL(page.url()).hash.includes("view=action-ledger") && new URL(page.url()).hash.includes("action=A-OPEN"), "ledger jump did not preserve the structured Action ID in the route");
+      check(await page.locator("#nav-action-ledger").getAttribute("aria-current") === "page", "Action ledger navigation did not become current");
+      check((await page.locator(".action-ledger-document").innerText()).includes("Confirm integration evidence"), "Action ledger view lost canonical Markdown content");
+      check(await page.locator("[data-action-code='A-OPEN'].is-register-target").count() === 1, "ledger jump did not locate the exact Action ID");
+      evidence.screenshots.push(await screenshot(page, "action-ledger-1280x720.png", false));
+      await open(page, htmlPath, "#v=1&view=fde-morning&mode=flow-progress");
       await page.waitForSelector("#flow-frame[data-layout-status='ready']");
       check(await page.locator("#flow-frame svg .flow-node").count() === 2, "FDE flow widened beyond meeting-pack window selection");
       check(errors.length === 0, "FDE Chrome console errors: " + errors.join(" | "));
@@ -300,9 +344,29 @@ async function screenshot(page, name, fullPage = true) {
       await page.locator("#fde-blockers-commitments").scrollIntoViewIfNeeded();
       await layoutCheck(page, "fde-mobile-320");
       check(await page.locator("#fde-blockers-commitments .meeting-item-title").count() === 1, "mobile FDE closure lost its active structured item");
+      await page.locator("#fde-blockers-commitments .meeting-item > summary").click();
+      await page.locator("#fde-blockers-commitments .source-link").click();
+      await page.waitForSelector("#source-preview-dialog[open]");
+      const mobilePreview = await page.locator("#source-preview-dialog").evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: window.innerWidth, height: window.innerHeight };
+      });
+      check(mobilePreview.left >= 0 && mobilePreview.right <= mobilePreview.width && mobilePreview.top >= 0 && mobilePreview.bottom <= mobilePreview.height, "mobile source preview escaped the viewport");
+      check((await page.locator("#source-preview-dialog .source-preview-content").innerText()).includes("Gate evidence"), "mobile source preview lost Markdown content");
       check(errors.length === 0, "mobile FDE console errors: " + errors.join(" | "));
-      evidence.screenshots.push(await screenshot(page, "fde-meeting-mobile-320x800.png", false));
-      evidence.checks.push("FDE meeting categories and structured items at 320 CSS pixels");
+      evidence.screenshots.push(await screenshot(page, "source-preview-mobile-320x800.png", false));
+      await page.getByRole("button", { name: /关闭|Close/ }).click();
+      await page.locator("#nav-action-ledger").click();
+      await page.waitForSelector("#action-ledger-view");
+      await layoutCheck(page, "action-ledger-mobile-320");
+      check(await page.locator("#action-ledger-search").isVisible(), "mobile Action ledger lost its ID lookup");
+      evidence.screenshots.push(await screenshot(page, "action-ledger-mobile-320x800.png", false));
+      await page.locator("#nav-risk-register").click();
+      await page.waitForSelector("#risk-register-view");
+      await layoutCheck(page, "risk-register-mobile-320");
+      check(await page.locator("#risk-register-search").isVisible(), "mobile Risk register lost its ID lookup");
+      evidence.screenshots.push(await screenshot(page, "risk-register-mobile-320x800.png", false));
+      evidence.checks.push("FDE meeting categories, rendered Markdown preview, Action ledger and Risk register at 320 CSS pixels");
       await context.close();
     }
 
@@ -389,8 +453,12 @@ async function screenshot(page, name, fullPage = true) {
       await open(page, shareablePath, "#v=1&view=project-lead&mode=flow-progress");
       check((await page.locator("#quality-banner").innerText()).includes("部分拓扑已隐藏"), "shareable archive does not disclose hidden topology");
       const embedded = await page.locator("#adp-panel-model").evaluate(element => JSON.parse(element.textContent));
+      const embeddedPreviews = await page.locator("#adp-source-previews").evaluate(element => JSON.parse(element.textContent));
       check(embedded.manifest.distribution_profile === "shareable-summary", "shareable archive lost distribution profile");
       check(embedded.manifest.redaction.topology_reconnected === false, "shareable archive reconnected hidden topology");
+      check(embeddedPreviews.length === 0, "shareable archive embedded Markdown source previews");
+      check(await page.locator("#nav-action-ledger").isHidden(), "shareable archive exposed the internal Action ledger route");
+      check(await page.locator("#nav-risk-register").isHidden(), "shareable archive exposed the internal Risk register route");
       const encoded = JSON.stringify(embedded.data);
       for (const secret of ["internal-owner@example.com", "views/program-status.json", '"allocations"', '"source_fingerprints"']) {
         check(!encoded.includes(secret), "shareable archive leaked " + secret);

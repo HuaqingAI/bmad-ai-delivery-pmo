@@ -91,6 +91,25 @@ shared_resources:
     path: assets/panel.js
     purpose: offline panel interaction runtime
   - owner_skill: adp-management-panel
+    path: assets/markdown-resource-v1.json
+    purpose: fixed offline Markdown renderer resource contract
+    contract:
+      resource_schema_version: 1.0.0
+      renderer: markdown-it
+      renderer_version: 14.1.0
+      renderer_license: MIT
+      renderer_sha256: sha256:38c70a1e7ca91ab40e2d9e6e60129851a717ed1c7d4acbbdd41bf9503791cf68
+      bundle: assets/vendor/markdown-it-14.1.0.min.js
+      license: assets/vendor/MARKDOWN-IT-LICENSE-MIT.md
+  - owner_skill: adp-management-panel
+    path: assets/vendor/markdown-it-14.1.0.min.js
+    purpose: fixed markdown-it 14.1.0 browser bundle
+    sha256: 38c70a1e7ca91ab40e2d9e6e60129851a717ed1c7d4acbbdd41bf9503791cf68
+  - owner_skill: adp-management-panel
+    path: assets/vendor/MARKDOWN-IT-LICENSE-MIT.md
+    purpose: markdown-it MIT license
+    sha256: 792c48c5a849a15fdf9e37e8bcf9e6d1dd13b32b46c642a748a0a46a9919d473
+  - owner_skill: adp-management-panel
     path: assets/elk-resource-v1.json
     purpose: fixed offline ELK layout resource contract
     contract:

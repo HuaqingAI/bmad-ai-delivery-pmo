@@ -23,8 +23,11 @@ from typing import Any
 
 
 PANEL_SCHEMA_VERSION = "1.0.0"
-PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.5"
+PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.8"
 PANEL_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+SOURCE_PREVIEW_PREFIX = "source-preview/"
+SOURCE_PREVIEW_MAX_FILES = 32
+SOURCE_PREVIEW_MAX_BYTES = 256 * 1024
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SKILLS = SKILL_ROOT.parent
 FIXTURE_ROOT = SKILL_ROOT / "assets/fixtures/panel-contract-v1"
@@ -90,6 +93,66 @@ def load_json(path: Path) -> Any:
 def canonical_hash(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def source_preview_errors(previews: Any, manifest: dict[str, Any]) -> list[str]:
+    if not isinstance(previews, list):
+        return ["source previews must be an array"]
+    errors: list[str] = []
+    if len(previews) > SOURCE_PREVIEW_MAX_FILES:
+        errors.append("source preview count exceeds the fixed limit")
+    expected = {
+        key.removeprefix(SOURCE_PREVIEW_PREFIX): value
+        for key, value in manifest.get("source_fingerprints", {}).items()
+        if key.startswith(SOURCE_PREVIEW_PREFIX)
+    }
+    seen: set[str] = set()
+    for index, preview in enumerate(previews):
+        label = f"source preview {index}"
+        if not isinstance(preview, dict) or set(preview) != {
+            "path", "content", "source_sha256", "preview_sha256", "bytes", "truncated"
+        }:
+            errors.append(f"{label} has an invalid shape")
+            continue
+        path = preview.get("path")
+        content = preview.get("content")
+        if (
+            not isinstance(path, str)
+            or not path.lower().endswith(".md")
+            or path.startswith("/")
+            or "\\" in path
+            or "#" in path
+            or re.match(r"^[a-z][a-z0-9+.-]*:", path, re.IGNORECASE)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
+            errors.append(f"{label} has an unsafe Markdown path")
+            continue
+        if path in seen:
+            errors.append(f"{label} duplicates {path}")
+        seen.add(path)
+        if not isinstance(content, str) or len(content.encode("utf-8")) > SOURCE_PREVIEW_MAX_BYTES:
+            errors.append(f"{label} content exceeds the fixed limit")
+            continue
+        preview_hash = "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if preview.get("preview_sha256") != preview_hash:
+            errors.append(f"{label} content hash does not match")
+        if not isinstance(preview.get("source_sha256"), str) or not PANEL_ID_RE.fullmatch(preview["source_sha256"]):
+            errors.append(f"{label} source hash is invalid")
+        if not isinstance(preview.get("bytes"), int) or preview["bytes"] < len(content.encode("utf-8")):
+            errors.append(f"{label} byte count is invalid")
+        if not isinstance(preview.get("truncated"), bool):
+            errors.append(f"{label} truncation flag is invalid")
+        elif preview["truncated"] != (preview.get("bytes") > len(content.encode("utf-8"))):
+            errors.append(f"{label} truncation metadata is inconsistent")
+        elif not preview["truncated"] and preview.get("source_sha256") != preview_hash:
+            errors.append(f"{label} complete content differs from its source hash")
+        if preview.get("source_sha256") != expected.get(path):
+            errors.append(f"{label} source hash is not sealed by the manifest")
+    if manifest.get("distribution_profile") == "shareable-summary" and previews:
+        errors.append("shareable panel must not embed source previews")
+    if set(expected) != seen:
+        errors.append("source preview paths differ from manifest fingerprints")
+    return errors
 
 
 def panel_artifact_basename(panel_id: str) -> str:
@@ -877,6 +940,18 @@ def compose_panel(inputs: dict[str, Any]) -> dict[str, Any]:
         all_fingerprints.update(source.get("source_fingerprints", {}))
     for item in selected_history:
         all_fingerprints[f"history/{item['snapshot_id']}"] = item["source_fingerprint"]
+    preview_fingerprints = request.get("source_preview_fingerprints", {})
+    if not isinstance(preview_fingerprints, dict) or any(
+        not isinstance(key, str)
+        or not key.startswith(SOURCE_PREVIEW_PREFIX)
+        or not isinstance(value, str)
+        or not PANEL_ID_RE.fullmatch(value)
+        for key, value in preview_fingerprints.items()
+    ):
+        raise ValueError("source preview fingerprints are invalid")
+    if profile == "shareable-summary" and preview_fingerprints:
+        raise ValueError("shareable panel must not carry source preview fingerprints")
+    all_fingerprints.update(preview_fingerprints)
     if profile == "shareable-summary":
         all_fingerprints = {f"source-{index:03d}": value for index, value in enumerate(sorted(all_fingerprints.values()), start=1)}
     input_audit_ids = {

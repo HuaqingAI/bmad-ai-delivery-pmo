@@ -194,6 +194,19 @@ class ManagementPanelTests(unittest.TestCase):
             self.assertTrue(current.is_file())
             self.assertIn("A-OPEN", (root / "memory/actions/action-ledger.md").read_text(encoding="utf-8"))
             self.assertIn("Gate evidence", (root / "memory/workstreams/L1/delivery-record.md").read_text(encoding="utf-8"))
+            previews = management_panel.extract_script(
+                current.read_text(encoding="utf-8"), "adp-source-previews"
+            )
+            self.assertEqual(
+                [
+                    "actions/action-ledger.md",
+                    "views/risk-matrix.md",
+                    "workstreams/L1/delivery-record.md",
+                ],
+                [item["path"] for item in previews],
+            )
+            self.assertIn("A-OPEN", previews[0]["content"])
+            self.assertIn("R-OPEN", previews[1]["content"])
             self.assertTrue(Path(first["panel_input_audit"]).is_file())
             self.assertTrue(Path(first["panel_artifact_audit"]).is_file())
             self.assertEqual(
@@ -563,6 +576,68 @@ class ManagementPanelTests(unittest.TestCase):
             model = json.loads(Path(result["immutable_bundle"]).read_text(encoding="utf-8"))
             self.assertGreater(model["manifest"]["redaction"]["hidden_nodes"], 0)
             self.assertFalse(model["manifest"]["redaction"]["topology_reconnected"])
+            archive_text = Path(result["archive_html"]).read_text(encoding="utf-8")
+            self.assertEqual([], management_panel.extract_script(archive_text, "adp-source-previews"))
+            self.assertNotIn("# Action Ledger", archive_text)
+
+    def test_source_preview_is_safe_identity_bound_and_shareable_redacted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "memory/actions/action-ledger.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# A-OPEN\n\n</script><script>alert('preview')</script>\n", encoding="utf-8")
+
+            first = management_panel.run(self.args(root))
+            first_html = Path(first["current_html"]).read_text(encoding="utf-8")
+            previews = management_panel.extract_script(first_html, "adp-source-previews")
+            action = next(item for item in previews if item["path"] == "actions/action-ledger.md")
+            self.assertIn("</script><script>", action["content"])
+            self.assertIn("\\u003c/script\\u003e", first_html)
+            self.assertEqual(
+                action["source_sha256"],
+                management_panel.extract_script(first_html, "adp-panel-manifest")[
+                    "source_fingerprints"
+                ]["source-preview/actions/action-ledger.md"],
+            )
+
+            source.write_text("# A-OPEN\n\nRevised source content.\n", encoding="utf-8")
+            second = management_panel.run(self.args(root))
+            self.assertNotEqual(first["panel_id"], second["panel_id"])
+
+            shareable = management_panel.run(
+                self.args(root, "archive", distribution_profile="shareable-summary")
+            )
+            shareable_html = Path(shareable["archive_html"]).read_text(encoding="utf-8")
+            self.assertEqual(
+                [], management_panel.extract_script(shareable_html, "adp-source-previews")
+            )
+            self.assertNotIn("Revised source content", shareable_html)
+
+    def test_source_preview_limit_keeps_action_ledger_first(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ledger = root / "actions/action-ledger.md"
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text("# Action Ledger\n", encoding="utf-8")
+            risk_matrix = root / "views/risk-matrix.md"
+            risk_matrix.parent.mkdir(parents=True)
+            risk_matrix.write_text("# Risk Matrix\n", encoding="utf-8")
+            items = []
+            for index in range(panel_model.SOURCE_PREVIEW_MAX_FILES + 2):
+                relative = f"00-sources/source-{index:02d}.md"
+                source = root / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(f"# Source {index}\n", encoding="utf-8")
+                items.append({"Source": relative})
+            inputs = {"meeting_packs": {"fde-morning": {"boards": {"items": items}}}}
+
+            previews = management_panel.build_source_previews(
+                inputs, root, "internal-full"
+            )
+
+            self.assertEqual(panel_model.SOURCE_PREVIEW_MAX_FILES, len(previews))
+            self.assertEqual("actions/action-ledger.md", previews[0]["path"])
+            self.assertEqual("views/risk-matrix.md", previews[1]["path"])
 
     def test_fixed_elk_metadata_matches_shipped_bytes_and_license(self):
         resource, _ = management_panel.verify_layout_resource()
@@ -577,6 +652,45 @@ class ManagementPanelTests(unittest.TestCase):
         license_hash = "sha256:" + hashlib.sha256(canonical_license).hexdigest()
         self.assertEqual(resource["license_sha256"], license_hash)
         self.assertEqual("utf8-lf", resource["license_sha256_mode"])
+
+    def test_fixed_markdown_renderer_matches_shipped_bytes_and_rejects_tampering(self):
+        resource, markdown_js = management_panel.verify_markdown_resource()
+        bundle = panel_model.SKILL_ROOT / resource["bundle"]
+        license_path = panel_model.SKILL_ROOT / resource["license"]
+        self.assertEqual("markdown-it", resource["renderer"])
+        self.assertEqual("14.1.0", resource["renderer_version"])
+        self.assertEqual("MIT", resource["renderer_license"])
+        self.assertEqual(
+            resource["renderer_sha256"],
+            management_panel.sha256_bytes(
+                management_panel.canonical_utf8_lf_bytes(bundle.read_bytes(), bundle)
+            ),
+        )
+        self.assertEqual(
+            resource["license_sha256"],
+            management_panel.sha256_bytes(
+                management_panel.canonical_utf8_lf_bytes(
+                    license_path.read_bytes(), license_path
+                )
+            ),
+        )
+        self.assertIn("markdownit", markdown_js)
+
+        with tempfile.TemporaryDirectory() as folder:
+            skill_root = Path(folder)
+            resource_path = skill_root / "assets/markdown-resource-v1.json"
+            copied_bundle = skill_root / resource["bundle"]
+            copied_license = skill_root / resource["license"]
+            resource_path.parent.mkdir(parents=True)
+            copied_bundle.parent.mkdir(parents=True)
+            copied_license.parent.mkdir(parents=True, exist_ok=True)
+            resource_path.write_text(json.dumps(resource), encoding="utf-8")
+            copied_bundle.write_bytes(bundle.read_bytes().replace(b"\n", b"\r\n"))
+            copied_license.write_bytes(license_path.read_bytes().replace(b"\n", b"\r\n"))
+            management_panel.verify_markdown_resource(resource_path, skill_root)
+            copied_bundle.write_bytes(copied_bundle.read_bytes() + b"tampered")
+            with self.assertRaisesRegex(management_panel.PanelError, "checksum mismatch"):
+                management_panel.verify_markdown_resource(resource_path, skill_root)
 
     def test_fixed_elk_accepts_windows_crlf_checkout_and_rejects_other_changes(self):
         source_resource = management_panel.load_json(management_panel.RESOURCE_PATH)

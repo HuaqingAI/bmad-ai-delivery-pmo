@@ -263,9 +263,14 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             self.assertGreaterEqual(result["counts"]["risk_entries"], 3)
             self.assertGreaterEqual(result["counts"]["dependency_entries"], 3)
             risk_text = (memory / "views" / "risk-matrix.md").read_text(encoding="utf-8")
+            risk_flow = json.loads(
+                (memory / "views" / "risk-flow.json").read_text(encoding="utf-8")
+            )
             dependency_text = (memory / "views" / "dependency-map.md").read_text(encoding="utf-8")
             self.assertIn("Payment API contract not baseline", risk_text)
             self.assertIn("critical", risk_text)
+            for risk in risk_flow["risks"]:
+                self.assertIn(f"| {risk['risk_id']} |", risk_text)
             self.assertNotIn("| high | current |", risk_text)
             self.assertTrue(any("blocker severity is missing" in gap for gap in result["review_gaps"]))
             self.assertTrue(any("risk escalation path is missing" in gap for gap in result["review_gaps"]))

@@ -210,6 +210,50 @@ body[data-view="business-biweekly"] .view-nav a { font-size: 16px; }
 .source-reference { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 8px 0 10px; }
 .source-reference code { color: var(--muted); font-size: 11px; }
 .source-link { font-weight: 650; }
+.source-external-link { color: var(--muted); font-size: 12px; }
+.source-preview-dialog { width: min(900px, calc(100vw - 28px)); height: min(84vh, 780px); max-width: none; max-height: none; border: 1px solid #9da6b0; border-radius: 6px; padding: 0; background: #fff; box-shadow: 0 16px 48px rgba(23,32,42,.28); }
+.source-preview-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.source-preview-dialog::backdrop { background: rgba(23,32,42,.48); }
+.source-preview-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 12px 14px; border-bottom: 1px solid var(--border); background: #fff; }
+.source-preview-heading { display: grid; min-width: 0; gap: 4px; }
+.source-preview-heading h2 { margin: 0; font-size: 17px; }
+.source-preview-heading code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.source-preview-body { min-height: 0; padding: 14px; overflow: auto; background: var(--surface-subtle); }
+.source-preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; color: var(--muted); }
+.source-preview-meta strong { color: var(--ink); }
+.source-preview-content { box-sizing: border-box; min-height: calc(100% - 34px); margin: 0; border: 1px solid var(--border); border-radius: 4px; padding: clamp(18px, 4vw, 36px); background: #fff; color: var(--ink); }
+.source-preview-dialog footer { display: flex; justify-content: flex-end; padding: 10px 14px; border-top: 1px solid var(--border); background: #fff; }
+.markdown-document { line-height: 1.7; letter-spacing: 0; overflow-wrap: anywhere; }
+.markdown-document > :first-child { margin-top: 0; }
+.markdown-document > :last-child { margin-bottom: 0; }
+.markdown-document h1, .markdown-document h2, .markdown-document h3, .markdown-document h4 { color: #17212b; line-height: 1.3; letter-spacing: 0; }
+.markdown-document h1 { margin: 0 0 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); font-size: 28px; }
+.markdown-document h2 { margin: 30px 0 12px; font-size: 21px; }
+.markdown-document h3 { margin: 24px 0 10px; font-size: 17px; }
+.markdown-document p, .markdown-document ul, .markdown-document ol, .markdown-document blockquote { margin: 10px 0; }
+.markdown-document li + li { margin-top: 5px; }
+.markdown-document code { border-radius: 3px; padding: 1px 4px; background: #edf1f4; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.markdown-document pre { overflow: auto; border: 1px solid var(--border); border-radius: 4px; padding: 12px; background: #f5f7f8; }
+.markdown-document pre code { padding: 0; background: transparent; }
+.markdown-document blockquote { border-left: 3px solid #9aa9b5; padding-left: 14px; color: var(--muted); }
+.markdown-document table { width: 100%; border-collapse: collapse; }
+.markdown-document th, .markdown-document td { border: 1px solid var(--border); padding: 7px 9px; text-align: left; vertical-align: top; }
+.markdown-document th { background: var(--surface-subtle); }
+.markdown-fallback { white-space: pre-wrap; }
+.action-ledger-link, .risk-register-link { margin: 0 8px 8px 0; font-weight: 650; }
+.register-controls { display: grid; grid-template-columns: minmax(180px, 340px) auto minmax(180px, 1fr); align-items: end; gap: 8px 12px; margin: 4px 0 18px; }
+.register-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.register-controls input { width: 100%; min-height: 38px; }
+.register-controls button { min-height: 38px; }
+.register-search-status { align-self: center; color: var(--muted); }
+.register-document { max-width: 1100px; border-top: 1px solid var(--border); padding-top: 22px; }
+.action-ledger-document h2, .action-ledger-document h3 { scroll-margin-top: 120px; border-left: 4px solid transparent; padding: 7px 10px; transition: background-color .15s ease, border-color .15s ease; }
+.action-ledger-document .is-register-target { border-left-color: #1769aa; background: #eaf4fb; outline: none; }
+.risk-register-document { overflow-x: auto; }
+.risk-register-document table { min-width: 960px; }
+.risk-register-document .is-register-target { outline: none; }
+.risk-register-document .is-register-target td { background: #eaf4fb; border-top-color: #1769aa; border-bottom-color: #1769aa; }
+body[data-view="action-ledger"] .tool-band, body[data-view="risk-register"] .tool-band { display: none; }
 .item-detail-list { display: grid; grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr); gap: 7px 12px; margin: 8px 0 0; }
 .item-detail-list dt { color: var(--muted); }
 .item-detail-list dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -283,6 +327,16 @@ body.flow-is-fullscreen { overflow: hidden; }
 }
 
 @media (max-width: 520px) {
+  .source-preview-dialog { width: calc(100vw - 12px); height: calc(100vh - 12px); }
+  .source-preview-dialog header, .source-preview-body, .source-preview-dialog footer { padding: 10px; }
+  .source-preview-content { padding: 16px; }
+  .markdown-document h1 { font-size: 23px; }
+  .markdown-document h2 { font-size: 19px; }
+  .register-controls { grid-template-columns: minmax(0, 1fr) auto; }
+  .register-search-status { grid-column: 1 / -1; }
+}
+
+@media (max-width: 520px) {
   :root { font-size: 16px; }
   .status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .view-nav { padding-left: 8px; padding-right: 8px; }
@@ -335,7 +389,7 @@ body.flow-is-fullscreen { overflow: hidden; }
 @media print {
   @page { margin: 12mm; }
   body { background: #fff; color: #000; }
-  .view-nav, .tool-band, .flow-toolbar, .skip-link, .drawer { display: none !important; }
+  .view-nav, .tool-band, .flow-toolbar, .skip-link, .drawer, .source-preview-dialog { display: none !important; }
   .status-shell { position: static; display: block; padding: 0 0 10px; border-bottom: 2px solid #000; }
   .status-strip { margin-top: 8px; }
   #panel-main { padding: 8px 0 0; }

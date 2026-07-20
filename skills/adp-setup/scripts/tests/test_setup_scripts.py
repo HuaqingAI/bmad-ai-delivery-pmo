@@ -232,6 +232,9 @@ class AdpSetupScriptTests(unittest.TestCase):
                 "adp-management-panel/assets/adp-management-panel-manifest-v1.schema.json",
                 "adp-management-panel/assets/panel-template.html",
                 "adp-management-panel/assets/panel-locale-catalog-v1.json",
+                "adp-management-panel/assets/markdown-resource-v1.json",
+                "adp-management-panel/assets/vendor/markdown-it-14.1.0.min.js",
+                "adp-management-panel/assets/vendor/MARKDOWN-IT-LICENSE-MIT.md",
                 "adp-management-panel/assets/elk-resource-v1.json",
                 "adp-management-panel/assets/vendor/elk.bundled-0.9.3.js",
                 "adp-management-panel/assets/vendor/ELK-LICENSE-EPL-2.0.md",
@@ -245,6 +248,10 @@ class AdpSetupScriptTests(unittest.TestCase):
                 elk["contract"]["engine_sha256"],
                 "sha256:b0745abd7f23cd91690a1587e377edbe19fd7233c783300290936720546216d4",
             )
+            markdown = resources["adp-management-panel/assets/markdown-resource-v1.json"]
+            self.assertEqual(markdown["integrity"], "verified")
+            self.assertEqual(markdown["contract"]["renderer_version"], "14.1.0")
+            self.assertEqual(markdown["contract"]["renderer_license"], "MIT")
 
     def test_inspect_reports_update_and_preserves_existing_team_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

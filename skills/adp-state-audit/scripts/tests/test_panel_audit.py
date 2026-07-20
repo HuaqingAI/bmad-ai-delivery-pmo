@@ -48,7 +48,9 @@ class PanelAuditTests(unittest.TestCase):
         model = panel_model.compose_panel(inputs)
         _, elk_js = management_panel.verify_layout_resource()
         bundle = management_panel.canonical_json_bytes(model)
-        rendered = management_panel.render_html(model, elk_js, "project-lead")
+        rendered = management_panel.render_html(
+            model, elk_js, "project-lead", inputs.get("_panel_source_previews", [])
+        )
         return input_audit, model, bundle, rendered
 
     def codes(self, audit: dict) -> set[str]:
@@ -220,6 +222,58 @@ class PanelAuditTests(unittest.TestCase):
                 )
                 self.assertEqual("blocked", audit["execution_disposition"])
                 self.assertIn(code, self.codes(audit))
+
+    def test_post_render_rejects_tampered_markdown_source_preview(self):
+        inputs = self.inputs()
+        content = "# Source preview\n"
+        source_hash = panel_audit.bytes_hash(content.encode("utf-8"))
+        inputs["_panel_source_previews"] = [
+            {
+                "path": "actions/action-ledger.md",
+                "content": content,
+                "source_sha256": source_hash,
+                "preview_sha256": source_hash,
+                "bytes": len(content.encode("utf-8")),
+                "truncated": False,
+            }
+        ]
+        inputs["request"]["source_preview_fingerprints"] = {
+            "source-preview/actions/action-ledger.md": source_hash
+        }
+        input_audit, model, bundle, rendered = self.candidate(inputs)
+
+        tampered = rendered.replace(b"# Source preview", b"# Altered preview", 1)
+        audit = panel_audit.audit_panel_artifacts(
+            model,
+            bundle,
+            tampered,
+            input_audit=input_audit,
+            source_inputs=inputs,
+        )
+
+        self.assertEqual("blocked", audit["execution_disposition"])
+        self.assertTrue(
+            {"panel.artifact.source-preview.invalid", "panel.artifact.source-preview.mismatch"}
+            & self.codes(audit)
+        )
+
+    def test_post_render_rejects_tampered_markdown_runtime(self):
+        inputs = self.inputs()
+        input_audit, model, bundle, rendered = self.candidate(inputs)
+        tampered = rendered.replace(b"/*! markdown-it 14.1.0", b"/*! markdown-it altered", 1)
+
+        audit = panel_audit.audit_panel_artifacts(
+            model,
+            bundle,
+            tampered,
+            input_audit=input_audit,
+            source_inputs=inputs,
+        )
+
+        self.assertEqual("blocked", audit["execution_disposition"])
+        self.assertIn(
+            "panel.artifact.markdown-renderer.embedded-mismatch", self.codes(audit)
+        )
 
     def test_unsafe_source_remains_inert_and_traceable_after_render(self):
         inputs = self.inputs()

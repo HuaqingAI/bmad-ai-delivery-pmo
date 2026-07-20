@@ -1129,12 +1129,12 @@ def render_risk_matrix(entries: list[dict[str, str]], gaps: list[str], generated
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     if entries:
-        for index, entry in enumerate(entries, start=1):
+        for entry in entries:
             rows.append(
                 "| "
                 + " | ".join(
                     [
-                        f"R-{index:03d}",
+                        md(entry["risk_id"]),
                         md(entry["workstream"]),
                         md(entry["type"]),
                         md(entry["description"]),

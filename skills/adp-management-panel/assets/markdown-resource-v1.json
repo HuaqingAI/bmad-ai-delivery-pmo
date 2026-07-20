@@ -1,0 +1,12 @@
+{
+  "resource_schema_version": "1.0.0",
+  "renderer": "markdown-it",
+  "renderer_version": "14.1.0",
+  "renderer_license": "MIT",
+  "renderer_sha256_mode": "utf8-lf",
+  "renderer_sha256": "sha256:38c70a1e7ca91ab40e2d9e6e60129851a717ed1c7d4acbbdd41bf9503791cf68",
+  "bundle": "assets/vendor/markdown-it-14.1.0.min.js",
+  "license": "assets/vendor/MARKDOWN-IT-LICENSE-MIT.md",
+  "license_sha256_mode": "utf8-lf",
+  "license_sha256": "sha256:792c48c5a849a15fdf9e37e8bcf9e6d1dd13b32b46c642a748a0a46a9919d473"
+}

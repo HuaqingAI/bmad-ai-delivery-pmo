@@ -3,18 +3,37 @@
 
   var model = JSON.parse(document.getElementById("adp-panel-model").textContent);
   var manifest = JSON.parse(document.getElementById("adp-panel-manifest").textContent);
-  var viewIds = ["project-lead", "fde-morning", "business-biweekly"];
+  var sourcePreviews = JSON.parse(document.getElementById("adp-source-previews").textContent);
+  var sourcePreviewByPath = new Map(sourcePreviews.map(function (item) { return [item.path, item]; }));
+  var actionLedgerPreview = sourcePreviewByPath.get("actions/action-ledger.md") || null;
+  var riskRegisterPreview = sourcePreviewByPath.get("views/risk-matrix.md") || null;
+  var canonicalViewIds = ["project-lead", "fde-morning", "business-biweekly"];
+  var utilityViewIds = ["action-ledger", "risk-register"];
+  var viewIds = canonicalViewIds.concat(manifest.distribution_profile === "internal-full" ? utilityViewIds : []);
   var modeIds = ["quantitative-progress", "flow-progress"];
   var statusValues = ["on-plan", "at-risk", "blocked", "off-plan", "indeterminate", "complete", "in-progress", "not-started", "ready", "planned", "not-applicable"];
   var state = parseHash();
   var sortState = { key: "scope_id", direction: "ascending" };
   var collapsedLanes = new Set();
   var flowTransform = { scale: 1, x: 0, y: 0 };
+  var flowZoomLimits = { min: .35, max: 8 };
+  var flowPanGain = 1.35;
   var flowFullscreen = false;
   var flowInteractionMode = "pan";
   var spacePan = false;
   var activeFlowNodeId = null;
   var svgNamespace = "http://www.w3.org/2000/svg";
+  var markdownRenderer = typeof window.markdownit === "function"
+    ? window.markdownit({ html: false, linkify: false, typographer: false })
+    : null;
+
+  if (markdownRenderer) {
+    markdownRenderer.renderer.rules.link_open = function () { return "<span>"; };
+    markdownRenderer.renderer.rules.link_close = function () { return "</span>"; };
+    markdownRenderer.renderer.rules.image = function (tokens, index) {
+      return markdownRenderer.utils.escapeHtml(tokens[index].content || "");
+    };
+  }
 
   document.documentElement.classList.add("js");
   document.documentElement.lang = model.catalog.locale;
@@ -54,7 +73,9 @@
       workstream: params.get("workstream") || "all",
       status: params.get("status") || "all",
       owner: params.get("owner") || "all",
-      period: params.get("period") || "current"
+      period: params.get("period") || "current",
+      action: params.get("action") || "",
+      risk: params.get("risk") || ""
     };
   }
 
@@ -67,6 +88,8 @@
     if (state.status !== "all") params.set("status", state.status);
     if (state.owner !== "all") params.set("owner", state.owner);
     if (state.period !== "current") params.set("period", state.period);
+    if (state.view === "action-ledger" && state.action) params.set("action", state.action);
+    if (state.view === "risk-register" && state.risk) params.set("risk", state.risk);
     var target = "#" + params.toString();
     if (window.location.hash === target) return;
     if (replace) history.replaceState(null, "", target); else history.pushState(null, "", target);
@@ -223,6 +246,8 @@
   }
 
   function renderNav() {
+    document.getElementById("nav-action-ledger").hidden = viewIds.indexOf("action-ledger") < 0;
+    document.getElementById("nav-risk-register").hidden = viewIds.indexOf("risk-register") < 0;
     viewIds.forEach(function (viewId) {
       var link = document.getElementById("nav-" + viewId);
       link.textContent = message("view." + viewId, viewId);
@@ -250,7 +275,12 @@
     text.appendChild(create("h1", "", title));
     text.appendChild(create("p", "", subtitle));
     heading.appendChild(text);
-    heading.appendChild(create("span", "identity-chip", "panel " + manifest.panel_id + " / scope " + model.selection.flow_scopes[state.view].layout_scope_id));
+    var scope = model.selection.flow_scopes[state.view];
+    var utilitySource = state.view === "risk-register" ? "views/risk-matrix.md" : "actions/action-ledger.md";
+    var identity = scope
+      ? "panel " + manifest.panel_id + " / scope " + scope.layout_scope_id
+      : "panel " + manifest.panel_id + " / source " + utilitySource;
+    heading.appendChild(create("span", "identity-chip", identity));
     root.appendChild(heading);
   }
 
@@ -506,22 +536,151 @@
     return null;
   }
 
+  function sourceHref(reference) {
+    var encodedPath = reference.path.split("/").map(encodeURIComponent).join("/");
+    return "../../" + encodedPath + (reference.fragment ? "#" + encodeURIComponent(reference.fragment) : "");
+  }
+
+  function markdownDocument(content, className) {
+    var root = create("article", className || "markdown-document");
+    if (!markdownRenderer) {
+      root.appendChild(create("pre", "markdown-fallback", content));
+      return root;
+    }
+    var parsed = new DOMParser().parseFromString(markdownRenderer.render(content), "text/html");
+    var allowed = new Set([
+      "P", "H1", "H2", "H3", "H4", "H5", "H6", "UL", "OL", "LI", "BLOCKQUOTE",
+      "PRE", "CODE", "EM", "STRONG", "S", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD",
+      "HR", "BR", "SPAN"
+    ]);
+    Array.from(parsed.body.querySelectorAll("*")).forEach(function (node) {
+      if (!allowed.has(node.tagName)) {
+        node.parentNode.replaceChild(document.createTextNode(node.textContent || ""), node);
+        return;
+      }
+      Array.from(node.attributes).forEach(function (attribute) { node.removeAttribute(attribute.name); });
+    });
+    while (parsed.body.firstChild) root.appendChild(parsed.body.firstChild);
+    return root;
+  }
+
+  function openSourcePreview(reference, preview, trigger) {
+    var current = document.getElementById("source-preview-dialog");
+    if (current) current.close();
+    var dialog = create("dialog", "source-preview-dialog");
+    dialog.id = "source-preview-dialog";
+    dialog.setAttribute("aria-labelledby", "source-preview-title");
+    var header = create("header");
+    var heading = create("div", "source-preview-heading");
+    var title = create("h2", "", message("source.preview.title", "Source file preview"));
+    title.id = "source-preview-title";
+    heading.appendChild(title);
+    heading.appendChild(create("code", "", reference.path));
+    header.appendChild(heading);
+    var close = create("button", "", message("common.close", "Close"));
+    close.type = "button";
+    close.addEventListener("click", function () { dialog.close(); });
+    header.appendChild(close);
+    dialog.appendChild(header);
+    var body = create("div", "source-preview-body");
+    var meta = create("div", "source-preview-meta");
+    meta.appendChild(create("strong", "", message("source.preview.markdown", "Markdown preview")));
+    meta.appendChild(create("span", "", String(preview.bytes) + " bytes"));
+    body.appendChild(meta);
+    if (preview.truncated) body.appendChild(create("p", "warning", message("source.preview.truncated", "This file is large; only the first 256 KiB is shown.")));
+    var content = markdownDocument(preview.content, "source-preview-content markdown-document");
+    content.tabIndex = 0;
+    body.appendChild(content);
+    dialog.appendChild(body);
+    var footer = create("footer");
+    var external = create("a", "source-external-link", message("source.preview.open-external", "Open in a new tab"));
+    external.href = sourceHref(reference);
+    external.target = "_blank";
+    external.rel = "noopener";
+    footer.appendChild(external);
+    dialog.appendChild(footer);
+    document.body.appendChild(dialog);
+    dialog.addEventListener("click", function (event) {
+      if (event.target !== dialog) return;
+      var bounds = dialog.getBoundingClientRect();
+      var outside = event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+      if (outside) dialog.close();
+    });
+    dialog.addEventListener("close", function () {
+      dialog.remove();
+      if (trigger && trigger.isConnected) trigger.focus();
+    });
+    dialog.showModal();
+    close.focus();
+  }
+
   function sourceReferenceLink(reference) {
     if (!reference) return null;
     var row = create("div", "source-reference");
-    var link = create("a", "source-link", message("common.view-source", "View source file"));
-    var encodedPath = reference.path.split("/").map(encodeURIComponent).join("/");
-    link.href = "../../" + encodedPath + (reference.fragment ? "#" + encodeURIComponent(reference.fragment) : "");
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.title = reference.path + (reference.fragment ? "#" + reference.fragment : "");
-    row.appendChild(link);
+    var preview = sourcePreviewByPath.get(reference.path);
+    if (preview) {
+      var button = create("button", "source-link", message("common.view-source", "View source file"));
+      button.type = "button";
+      button.addEventListener("click", function () { openSourcePreview(reference, preview, button); });
+      row.appendChild(button);
+      var external = create("a", "source-external-link", message("source.preview.open-external", "Open in a new tab"));
+      external.href = sourceHref(reference);
+      external.target = "_blank";
+      external.rel = "noopener";
+      row.appendChild(external);
+    } else {
+      var link = create("a", "source-link", message("common.view-source", "View source file"));
+      link.href = sourceHref(reference);
+      link.target = "_blank";
+      link.rel = "noopener";
+      row.appendChild(link);
+    }
     row.appendChild(create("code", "", reference.path));
     return row;
   }
 
   function meetingItemId(item) {
     return firstItemField(item, ["action_id", "Action ID", "risk_id", "Risk ID", "decision_id", "Decision ID", "question_id", "Question ID", "id", "ID"]);
+  }
+
+  function structuredActionId(item) {
+    return firstItemField(item, ["action_id", "Action ID"]);
+  }
+
+  function structuredRiskId(item) {
+    return firstItemField(item, ["risk_id", "Risk ID"]);
+  }
+
+  function openActionLedger(actionId) {
+    state.view = "action-ledger";
+    state.mode = "quantitative-progress";
+    state.action = actionId || "";
+    writeHash(false);
+    render();
+  }
+
+  function actionLedgerButton(actionId) {
+    if (!actionId || !actionLedgerPreview || manifest.distribution_profile !== "internal-full") return null;
+    var button = create("button", "action-ledger-link", message("action.ledger.open", "View in action ledger"));
+    button.type = "button";
+    button.addEventListener("click", function () { openActionLedger(actionId); });
+    return button;
+  }
+
+  function openRiskRegister(riskId) {
+    state.view = "risk-register";
+    state.mode = "quantitative-progress";
+    state.risk = riskId || "";
+    writeHash(false);
+    render();
+  }
+
+  function riskRegisterButton(riskId) {
+    if (!riskId || !riskRegisterPreview || manifest.distribution_profile !== "internal-full") return null;
+    var button = create("button", "risk-register-link", message("risk.register.open", "View in risk register"));
+    button.type = "button";
+    button.addEventListener("click", function () { openRiskRegister(riskId); });
+    return button;
   }
 
   function meetingItemTitle(item, boardTitle, id) {
@@ -556,6 +715,8 @@
       status: status,
       workstream: workstream,
       due: due,
+      actionId: structuredActionId(record),
+      riskId: structuredRiskId(record),
       details: meetingItemDetails(record),
       sourceReference: meetingItemSource(record),
       raw: record
@@ -589,6 +750,10 @@
     summary.appendChild(metadata);
     item.appendChild(summary);
     var content = create("div", "meeting-item-content");
+    var ledgerButton = actionLedgerButton(record.actionId);
+    if (ledgerButton) content.appendChild(ledgerButton);
+    var riskButton = riskRegisterButton(record.riskId);
+    if (riskButton) content.appendChild(riskButton);
     var source = sourceReferenceLink(record.sourceReference);
     if (source) content.appendChild(source);
     appendDetailList(content, record.details);
@@ -686,6 +851,140 @@
     document.getElementById("result-count").textContent = (meeting.boards.business_decisions || []).length + " decisions";
   }
 
+  function renderRegisterView(root, options) {
+    renderViewHeading(
+      root,
+      message(options.viewMessage, options.viewFallback),
+      message(options.subtitleMessage, options.subtitleFallback)
+    );
+    var register = create("section", "band");
+    register.id = options.viewId + "-view";
+    if (!options.preview) {
+      register.appendChild(create("p", "meeting-empty muted", message(options.unavailableMessage, options.unavailableFallback)));
+      root.appendChild(register);
+      document.getElementById("result-count").textContent = "0 " + options.countLabel;
+      return;
+    }
+
+    var search = create("form", "register-controls " + options.viewId + "-controls");
+    search.setAttribute("role", "search");
+    var label = create("label", "", message(options.searchMessage, options.searchFallback));
+    var input = create("input");
+    input.id = options.viewId + "-search";
+    input.type = "search";
+    input.autocomplete = "off";
+    input.value = state[options.stateKey] || "";
+    label.appendChild(input);
+    search.appendChild(label);
+    var locate = create("button", "", message(options.locateMessage, "Locate"));
+    locate.type = "submit";
+    search.appendChild(locate);
+    var status = create("output", "register-search-status " + options.viewId + "-search-status");
+    status.setAttribute("aria-live", "polite");
+    search.appendChild(status);
+    register.appendChild(search);
+
+    var documentView = markdownDocument(options.preview.content, "register-document " + options.viewId + "-document markdown-document");
+    var documentTitle = documentView.querySelector("h1");
+    if (documentTitle) documentTitle.remove();
+    var targets = options.targets(documentView).filter(function (target) { return target.code; });
+    targets.forEach(function (target, index) {
+      target.element.dataset.registerCode = target.code;
+      target.element.dataset[options.datasetKey] = target.code;
+      target.element.id = options.viewId + "-entry-" + String(index + 1);
+      target.element.tabIndex = -1;
+    });
+    register.appendChild(documentView);
+    root.appendChild(register);
+
+    function findItem(value) {
+      var query = value.trim().toLocaleLowerCase();
+      documentView.querySelectorAll(".is-register-target").forEach(function (item) { item.classList.remove("is-register-target"); });
+      if (!query) {
+        status.textContent = "";
+        return null;
+      }
+      var target = targets.find(function (item) { return item.code.toLocaleLowerCase() === query; })
+        || targets.find(function (item) { return item.code.toLocaleLowerCase().indexOf(query) >= 0; });
+      if (!target) {
+        status.textContent = message(options.notFoundMessage, options.notFoundFallback) + ": " + value.trim();
+        return null;
+      }
+      target.element.classList.add("is-register-target");
+      status.textContent = message(options.foundMessage, "Located") + ": " + target.code;
+      target.element.scrollIntoView({ block: "center" });
+      target.element.focus({ preventScroll: true });
+      return target.element;
+    }
+
+    search.addEventListener("submit", function (event) {
+      event.preventDefault();
+      state[options.stateKey] = input.value.trim();
+      writeHash(false);
+      findItem(state[options.stateKey]);
+    });
+    input.addEventListener("input", function () {
+      if (!input.value) findItem("");
+    });
+    document.getElementById("result-count").textContent = targets.length + " " + options.countLabel;
+    if (state[options.stateKey]) window.requestAnimationFrame(function () { findItem(state[options.stateKey]); });
+  }
+
+  function renderActionLedger(root) {
+    renderRegisterView(root, {
+      viewId: "action-ledger",
+      viewMessage: "view.action-ledger",
+      viewFallback: "Action ledger",
+      subtitleMessage: "action.ledger.subtitle",
+      subtitleFallback: "Canonical actions from the sealed memory snapshot.",
+      preview: actionLedgerPreview,
+      unavailableMessage: "action.ledger.unavailable",
+      unavailableFallback: "The action ledger is unavailable in this panel snapshot.",
+      searchMessage: "action.ledger.search",
+      searchFallback: "Action ID",
+      locateMessage: "action.ledger.locate",
+      foundMessage: "action.ledger.found",
+      notFoundMessage: "action.ledger.not-found",
+      notFoundFallback: "Action not found",
+      stateKey: "action",
+      datasetKey: "actionCode",
+      countLabel: "actions",
+      targets: function (documentView) {
+        return Array.from(documentView.querySelectorAll("h2, h3")).map(function (heading) {
+          return { element: heading, code: heading.textContent.trim() };
+        });
+      }
+    });
+  }
+
+  function renderRiskRegister(root) {
+    renderRegisterView(root, {
+      viewId: "risk-register",
+      viewMessage: "view.risk-register",
+      viewFallback: "Risk register",
+      subtitleMessage: "risk.register.subtitle",
+      subtitleFallback: "Canonical risks from the sealed memory snapshot.",
+      preview: riskRegisterPreview,
+      unavailableMessage: "risk.register.unavailable",
+      unavailableFallback: "The risk register is unavailable in this panel snapshot.",
+      searchMessage: "risk.register.search",
+      searchFallback: "Risk ID",
+      locateMessage: "risk.register.locate",
+      foundMessage: "risk.register.found",
+      notFoundMessage: "risk.register.not-found",
+      notFoundFallback: "Risk not found",
+      stateKey: "risk",
+      datasetKey: "riskCode",
+      countLabel: "risks",
+      targets: function (documentView) {
+        return Array.from(documentView.querySelectorAll("tbody tr")).map(function (row) {
+          var idCell = row.querySelector("td");
+          return { element: row, code: idCell ? idCell.textContent.trim() : "" };
+        });
+      }
+    });
+  }
+
   function filteredFlow() {
     var source = model.data.flows[state.view] || {};
     var states = new Map((source.node_states || []).map(function (item) { return [item.node_id, item]; }));
@@ -780,6 +1079,8 @@
         existing.details = item.details;
       }
       if (!existing.sourceReference && item.sourceReference) existing.sourceReference = item.sourceReference;
+      if (!existing.actionId && item.actionId) existing.actionId = item.actionId;
+      if (!existing.riskId && item.riskId) existing.riskId = item.riskId;
       return;
     }
     items.set(key, item);
@@ -798,6 +1099,8 @@
           id: source.source_id,
           title: record ? record.title : relatedTypeTitle(type) + " · " + source.source_id,
           states: [category],
+          actionId: record ? record.actionId : null,
+          riskId: record ? record.riskId : null,
           sourceReference: record ? record.sourceReference : null,
           details: record ? record.details : [
             { label: "Canonical ID", value: source.source_id },
@@ -826,6 +1129,8 @@
               id: String(id),
               title: record.title,
               states: firstItemField(item, ["status", "Status"]) ? [firstItemField(item, ["status", "Status"])] : [],
+              actionId: record.actionId,
+              riskId: record.riskId,
               sourceReference: record.sourceReference,
               details: record.details
             });
@@ -1043,7 +1348,7 @@
       button.addEventListener("click", function () { if (collapsedLanes.has(lane)) collapsedLanes.delete(lane); else collapsedLanes.add(lane); render(); });
       toolbar.appendChild(button);
     });
-    [["Fit", fitFlow], ["Zoom in", function () { zoomFlow(1.2); }], ["Zoom out", function () { zoomFlow(.8); }], ["Reset", resetFlow]].forEach(function (item) {
+    [["Fit", fitFlow], ["Zoom in", function () { zoomFlow(1.35); }], ["Zoom out", function () { zoomFlow(.74); }], ["Reset", resetFlow]].forEach(function (item) {
       var button = create("button", "", item[0]);
       button.type = "button";
       button.addEventListener("click", item[1]);
@@ -1241,39 +1546,96 @@
 
   function applyFlowTransform() {
     var viewport = document.getElementById("flow-viewport");
-    if (viewport) viewport.setAttribute("transform", "translate(" + flowTransform.x + " " + flowTransform.y + ") scale(" + flowTransform.scale + ")");
+    if (viewport) {
+      viewport.setAttribute("transform", "matrix(" + flowTransform.scale + " 0 0 " + flowTransform.scale + " " + flowTransform.x + " " + flowTransform.y + ")");
+      if (viewport.ownerSVGElement) viewport.ownerSVGElement.dataset.zoomScale = String(flowTransform.scale);
+    }
   }
 
   function fitFlow() { flowTransform = { scale: 1, x: 0, y: 0 }; applyFlowTransform(); }
   function resetFlow() { flowTransform = { scale: 1, x: 0, y: 0 }; applyFlowTransform(); }
-  function zoomFlow(factor) { flowTransform.scale = Math.max(.5, Math.min(3, flowTransform.scale * factor)); applyFlowTransform(); }
+  function svgClientPoint(svg, clientX, clientY) {
+    var point = svg.createSVGPoint();
+    point.x = clientX;
+    point.y = clientY;
+    var matrix = svg.getScreenCTM();
+    return matrix ? point.matrixTransform(matrix.inverse()) : { x: clientX, y: clientY };
+  }
+
+  function flowCenterPoint() {
+    var svg = document.querySelector("#flow-frame svg");
+    if (!svg) return null;
+    var svgBounds = svg.getBoundingClientRect();
+    var visibleNodes = Array.prototype.map.call(svg.querySelectorAll(".flow-node"), function (node) {
+      var bounds = node.getBoundingClientRect();
+      var left = Math.max(svgBounds.left, bounds.left);
+      var top = Math.max(svgBounds.top, bounds.top);
+      var right = Math.min(svgBounds.right, bounds.right);
+      var bottom = Math.min(svgBounds.bottom, bounds.bottom);
+      return { node: node, bounds: bounds, visibleArea: Math.max(0, right - left) * Math.max(0, bottom - top) };
+    }).filter(function (item) { return item.visibleArea > 0; });
+    var target = visibleNodes.find(function (item) { return item.node.dataset.nodeId === activeFlowNodeId; });
+    if (!target) {
+      visibleNodes.sort(function (left, right) { return right.visibleArea - left.visibleArea; });
+      target = visibleNodes[0];
+    }
+    if (target) {
+      return svgClientPoint(svg, target.bounds.left + target.bounds.width / 2, target.bounds.top + target.bounds.height / 2);
+    }
+    return svgClientPoint(svg, svgBounds.left + svgBounds.width / 2, svgBounds.top + svgBounds.height / 2);
+  }
+
+  function zoomFlow(factor, anchor) {
+    var previous = flowTransform.scale;
+    var next = Math.max(flowZoomLimits.min, Math.min(flowZoomLimits.max, previous * factor));
+    if (next === previous) return;
+    var point = anchor || flowCenterPoint();
+    if (point) {
+      var ratio = next / previous;
+      flowTransform.x = point.x - (point.x - flowTransform.x) * ratio;
+      flowTransform.y = point.y - (point.y - flowTransform.y) * ratio;
+    }
+    flowTransform.scale = next;
+    applyFlowTransform();
+  }
 
   function enablePan(svg, viewport) {
     var pointerId = null;
     var start = null;
     var origin = null;
     var moved = false;
-    svg.addEventListener("wheel", function (event) { event.preventDefault(); zoomFlow(event.deltaY < 0 ? 1.1 : .9); }, { passive: false });
+    svg.dataset.panGain = String(flowPanGain);
+    svg.dataset.zoomMin = String(flowZoomLimits.min);
+    svg.dataset.zoomMax = String(flowZoomLimits.max);
+    svg.addEventListener("wheel", function (event) {
+      event.preventDefault();
+      zoomFlow(event.deltaY < 0 ? 1.22 : .82, svgClientPoint(svg, event.clientX, event.clientY));
+    }, { passive: false });
     svg.addEventListener("pointerdown", function (event) {
       if (event.button !== 0 && event.button !== 1) return;
       var overNode = event.target.closest && event.target.closest(".flow-node");
       if (flowInteractionMode !== "pan" && event.button !== 1 && !spacePan && overNode) return;
       pointerId = event.pointerId;
-      start = { x: event.clientX, y: event.clientY };
+      start = {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        point: svgClientPoint(svg, event.clientX, event.clientY)
+      };
       origin = { x: flowTransform.x, y: flowTransform.y };
       moved = false;
     });
     svg.addEventListener("pointermove", function (event) {
       if (pointerId !== event.pointerId) return;
-      var deltaX = event.clientX - start.x;
-      var deltaY = event.clientY - start.y;
-      if (!moved && Math.hypot(deltaX, deltaY) < 4) return;
+      var clientDeltaX = event.clientX - start.clientX;
+      var clientDeltaY = event.clientY - start.clientY;
+      if (!moved && Math.hypot(clientDeltaX, clientDeltaY) < 4) return;
       if (!moved && !svg.hasPointerCapture(event.pointerId)) svg.setPointerCapture(event.pointerId);
       moved = true;
       svg.classList.add("is-panning");
       event.preventDefault();
-      flowTransform.x = origin.x + deltaX;
-      flowTransform.y = origin.y + deltaY;
+      var current = svgClientPoint(svg, event.clientX, event.clientY);
+      flowTransform.x = origin.x + (current.x - start.point.x) * flowPanGain;
+      flowTransform.y = origin.y + (current.y - start.point.y) * flowPanGain;
       applyFlowTransform();
     });
     function finish(event) {
@@ -1337,6 +1699,10 @@
         }
         disclosure.appendChild(head);
         var content = create("div", "related-item-content");
+        var ledgerButton = actionLedgerButton(item.actionId);
+        if (ledgerButton) content.appendChild(ledgerButton);
+        var riskButton = riskRegisterButton(item.riskId);
+        if (riskButton) content.appendChild(riskButton);
         var source = sourceReferenceLink(item.sourceReference);
         if (source) content.appendChild(source);
         appendDetailList(content, item.details);
@@ -1428,13 +1794,15 @@
   }
 
   function render() {
-    if (state.mode !== "flow-progress" && flowFullscreen) setFlowFullscreen(false);
+    if ((utilityViewIds.indexOf(state.view) >= 0 || state.mode !== "flow-progress") && flowFullscreen) setFlowFullscreen(false);
     document.body.dataset.view = state.view;
     renderHeader();
     renderNav();
     var root = document.getElementById("dynamic-view");
     root.replaceChildren();
-    if (state.mode === "flow-progress") renderFlow(root);
+    if (state.view === "action-ledger") renderActionLedger(root);
+    else if (state.view === "risk-register") renderRiskRegister(root);
+    else if (state.mode === "flow-progress") renderFlow(root);
     else if (state.view === "project-lead") renderProject(root);
     else if (state.view === "fde-morning") renderFde(root);
     else renderBusiness(root);
