@@ -24,7 +24,7 @@ DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 LOCALE_CATALOG_PATH = Path(__file__).resolve().parents[2] / "adp-plan-baseline/assets/locale-catalog.json"
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 ROADMAP_SCHEMA_VERSION = 2
-GENERATOR_VERSION = "2.0.0"
+GENERATOR_VERSION = "2.0.1"
 PLACEHOLDERS = {"", "-", "tbd", "todo", "none", "n/a", "na", "unknown"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 VALID_TYPES = {
@@ -35,7 +35,7 @@ VALID_TYPES = {
     "dependency-release",
     "delivery-window",
 }
-VALID_STATUSES = {"planned", "at-risk", "done", "blocked"}
+VALID_STATUSES = {"planned", "in-progress", "at-risk", "done", "blocked"}
 PROGRAM_STATUSES = {"on-plan", "at-risk", "off-plan", "indeterminate"}
 PROGRAM_CONFIDENCE = {"high", "medium", "low", "unknown"}
 PROGRESS_SCHEMA_VERSION = "3.0.0"

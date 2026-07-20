@@ -14,6 +14,7 @@ KICKOFF_TEMPLATE_ROOT = SCRIPT.parents[2] / "adp-project-kickoff" / "assets" / "
 PROGRESS_GOLDEN = SCRIPT.parents[2] / "adp-program-status" / "assets" / "fixtures" / "progress-v3" / "golden-measurable-boundary.json"
 SCRIPT_GLOBALS = runpy.run_path(str(SCRIPT))
 NORMALIZE_DATE_FIELD = SCRIPT_GLOBALS["normalize_date_field"]
+NORMALIZE_ROADMAP_STATUS = SCRIPT_GLOBALS["normalize_roadmap_status"]
 ROADMAP_ITEM = SCRIPT_GLOBALS["RoadmapItem"]
 DEDUPE_ITEMS = SCRIPT_GLOBALS["dedupe_items"]
 CANONICAL_RENDER_SOURCE_INVENTORY = SCRIPT_GLOBALS["canonical_render_source_inventory"]
@@ -75,6 +76,9 @@ L0 references:
 
 
 class RenderRoadmapTests(unittest.TestCase):
+    def test_wdr_roadmap_accepts_status_sync_in_progress_state(self) -> None:
+        self.assertEqual("in-progress", NORMALIZE_ROADMAP_STATUS("in-progress"))
+
     def test_date_normalization_requires_complete_iso_value(self) -> None:
         cases = [
             ("2026-07-15", ("2026-07-15", "")),
