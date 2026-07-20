@@ -11,6 +11,8 @@
   var collapsedLanes = new Set();
   var flowTransform = { scale: 1, x: 0, y: 0 };
   var flowFullscreen = false;
+  var flowInteractionMode = "pan";
+  var spacePan = false;
   var activeFlowNodeId = null;
   var svgNamespace = "http://www.w3.org/2000/svg";
 
@@ -211,6 +213,7 @@
         if (recoveryMessages.indexOf(item.message) < 0) recoveryMessages.push(item.message);
       });
       quality.textContent = model.recovery.status.toUpperCase() + ": " + recoveryMessages.join(" ");
+      if (hiddenTopology) quality.textContent += " " + message("redaction.hidden-topology", "Part of the topology is hidden") + ": " + manifest.redaction.hidden_nodes + " nodes / " + manifest.redaction.hidden_edges + " edges; topology_reconnected=false.";
     } else if (hiddenTopology) {
       quality.dataset.level = "degraded";
       quality.textContent = message("redaction.hidden-topology", "Part of the topology is hidden") + ": " + manifest.redaction.hidden_nodes + " nodes / " + manifest.redaction.hidden_edges + " edges; topology_reconnected=false.";
@@ -445,18 +448,188 @@
     return root;
   }
 
-  function board(title, items) {
-    var root = create("section", "board");
-    root.appendChild(create("h3", "", title));
-    var list = create("ul");
-    if (!items || !items.length) list.appendChild(create("li", "muted", "None in canonical meeting pack"));
-    (items || []).forEach(function (item) {
-      var value = item.summary || item.Item || item.id || item.workstream || JSON.stringify(item);
-      var line = create("li", "", value);
-      if (item.owner) line.appendChild(create("div", "muted", "Owner: " + item.owner));
-      list.appendChild(line);
+  function detailText(value) {
+    if (value === null || value === undefined || value === "") return "";
+    if (Array.isArray(value)) return value.map(detailText).filter(Boolean).join("; ");
+    if (typeof value === "object") {
+      return Object.keys(value).sort().map(function (key) {
+        var nested = detailText(value[key]);
+        return nested ? key + ": " + nested : "";
+      }).filter(Boolean).join(" · ");
+    }
+    return String(value);
+  }
+
+  function firstItemField(item, names) {
+    for (var index = 0; index < names.length; index += 1) {
+      var value = detailText((item || {})[names[index]]);
+      if (value && value !== "TBD") return value;
+    }
+    return "";
+  }
+
+  function safeSourceReference(value) {
+    if (typeof value !== "string") return null;
+    var normalized = value.trim().replace(/\\/g, "/");
+    if (!normalized || /^[a-z][a-z0-9+.-]*:/i.test(normalized) || normalized.charAt(0) === "/" || /^[a-z]:\//i.test(normalized)) return null;
+    var hashAt = normalized.indexOf("#");
+    var fragment = hashAt >= 0 ? normalized.slice(hashAt + 1) : "";
+    var sourcePath = hashAt >= 0 ? normalized.slice(0, hashAt) : normalized;
+    var memoryPrefix = "_bmad-output/adp/memory/";
+    if (sourcePath.indexOf(memoryPrefix) === 0) sourcePath = sourcePath.slice(memoryPrefix.length);
+    var segments = sourcePath.split("/");
+    if (!sourcePath || segments.some(function (segment) { return !segment || segment === "." || segment === ".."; })) return null;
+    return { path: sourcePath, fragment: fragment };
+  }
+
+  function legacyStructuredSourcePath(value) {
+    if (typeof value !== "string") return null;
+    var text = value.trim();
+    if (text.length > 4096 || (text.charAt(0) !== "{" && text.charAt(0) !== "[")) return null;
+    var match = text.match(/(?:^|[\[,{]\s*)['"]artifact_path['"]\s*:\s*(['"])([^'"\\\r\n]+)\1/);
+    return match ? match[2] : null;
+  }
+
+  function meetingItemSource(item) {
+    var structured = [item && item.source, item && item.Source].filter(function (value) { return value && typeof value === "object" && !Array.isArray(value); });
+    var candidates = [
+      item && item.source_path, item && item["Source path"], item && item.artifact_path, item && item["Artifact path"]
+    ];
+    structured.forEach(function (value) { candidates.push(value.artifact_path, value.path); });
+    candidates.push(legacyStructuredSourcePath(item && item.source), legacyStructuredSourcePath(item && item.Source));
+    if (item && typeof item.source === "string" && "[{".indexOf(item.source.trim().charAt(0)) < 0) candidates.push(item.source);
+    if (item && typeof item.Source === "string" && "[{".indexOf(item.Source.trim().charAt(0)) < 0) candidates.push(item.Source);
+    for (var index = 0; index < candidates.length; index += 1) {
+      var reference = safeSourceReference(candidates[index]);
+      if (reference) return reference;
+    }
+    return null;
+  }
+
+  function sourceReferenceLink(reference) {
+    if (!reference) return null;
+    var row = create("div", "source-reference");
+    var link = create("a", "source-link", message("common.view-source", "View source file"));
+    var encodedPath = reference.path.split("/").map(encodeURIComponent).join("/");
+    link.href = "../../" + encodedPath + (reference.fragment ? "#" + encodeURIComponent(reference.fragment) : "");
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.title = reference.path + (reference.fragment ? "#" + reference.fragment : "");
+    row.appendChild(link);
+    row.appendChild(create("code", "", reference.path));
+    return row;
+  }
+
+  function meetingItemId(item) {
+    return firstItemField(item, ["action_id", "Action ID", "risk_id", "Risk ID", "decision_id", "Decision ID", "question_id", "Question ID", "id", "ID"]);
+  }
+
+  function meetingItemTitle(item, boardTitle, id) {
+    var title = firstItemField(item, ["summary", "title", "Title", "Action", "Decision", "Question", "Risk", "Item", "Gap", "Dependency / Blocker", "Business Impact", "Gate"]);
+    if (title && title !== id) return title;
+    var node = Object.keys(model.data.flows || {}).reduce(function (found, viewId) {
+      return found || ((model.data.flows[viewId].nodes || []).find(function (candidate) { return candidate.node_id === id; }));
+    }, null);
+    if (node) return node.name || id;
+    return id ? boardTitle + " · " + id : boardTitle;
+  }
+
+  function meetingItemDetails(item) {
+    var hidden = new Set(["source", "Source", "source_fingerprint", "related_plan_item_ids", "related_flow_edge_ids", "plan_item_ids"]);
+    return Object.keys(item || {}).filter(function (key) {
+      return !hidden.has(key) && detailText(item[key]);
+    }).map(function (key) { return { label: key.replace(/_/g, " "), value: detailText(item[key]) }; });
+  }
+
+  function normalizeMeetingItem(item, boardTitle, index) {
+    var record = item && typeof item === "object" ? item : { Item: item };
+    var id = meetingItemId(record);
+    var title = meetingItemTitle(record, boardTitle, id);
+    var owner = firstItemField(record, ["owner", "Owner"]);
+    var status = firstItemField(record, ["status", "Status", "readiness", "Readiness", "severity", "Severity"]);
+    var workstream = firstItemField(record, ["workstream", "Workstream", "workstreams", "Workstreams"]);
+    var due = firstItemField(record, ["due", "Due", "Due / Trigger", "Deadline / Trigger", "forecast", "Forecast"]);
+    return {
+      id: id || boardTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + String(index + 1),
+      title: title,
+      owner: owner,
+      status: status,
+      workstream: workstream,
+      due: due,
+      details: meetingItemDetails(record),
+      sourceReference: meetingItemSource(record),
+      raw: record
+    };
+  }
+
+  function appendDetailList(root, details) {
+    var list = create("dl", "item-detail-list");
+    (details || []).forEach(function (item) {
+      list.appendChild(create("dt", "", item.label));
+      list.appendChild(create("dd", "", item.value));
     });
+    if (!details || !details.length) {
+      list.appendChild(create("dt", "", message("common.details", "Details")));
+      list.appendChild(create("dd", "muted", message("flow.item.content-unavailable", "No additional canonical content is available in this panel snapshot.")));
+    }
     root.appendChild(list);
+  }
+
+  function meetingItemDisclosure(record) {
+    var item = create("details", "meeting-item");
+    var summary = create("summary");
+    var heading = create("span", "meeting-item-heading");
+    heading.appendChild(create("strong", "meeting-item-title", record.title));
+    if (record.id && record.title.indexOf(record.id) < 0) heading.appendChild(create("span", "meeting-item-id", record.id));
+    summary.appendChild(heading);
+    var metadata = create("span", "meeting-item-metadata");
+    [record.status, record.owner, record.due, record.workstream].filter(Boolean).slice(0, 3).forEach(function (value) {
+      metadata.appendChild(create("span", "", value));
+    });
+    summary.appendChild(metadata);
+    item.appendChild(summary);
+    var content = create("div", "meeting-item-content");
+    var source = sourceReferenceLink(record.sourceReference);
+    if (source) content.appendChild(source);
+    appendDetailList(content, record.details);
+    item.appendChild(content);
+    return item;
+  }
+
+  function meetingBoards(groups) {
+    var root = create("div", "meeting-boards");
+    var controls = create("div", "meeting-board-tabs");
+    controls.setAttribute("role", "tablist");
+    var panel = create("div", "meeting-board-panel");
+    panel.setAttribute("role", "tabpanel");
+    var active = groups.find(function (group) { return (group.items || []).length; }) || groups[0];
+
+    function renderGroup(group) {
+      active = group;
+      controls.querySelectorAll("button").forEach(function (button) {
+        var selected = button.dataset.boardKey === group.key;
+        button.setAttribute("aria-selected", String(selected));
+        button.setAttribute("tabindex", selected ? "0" : "-1");
+      });
+      panel.replaceChildren();
+      panel.setAttribute("aria-label", group.label);
+      var list = create("div", "meeting-item-list");
+      if (!group.items || !group.items.length) list.appendChild(create("p", "meeting-empty muted", message("meeting.empty", "None in the canonical meeting pack.")));
+      (group.items || []).forEach(function (item, index) { list.appendChild(meetingItemDisclosure(normalizeMeetingItem(item, group.label, index))); });
+      panel.appendChild(list);
+    }
+
+    groups.forEach(function (group) {
+      var button = create("button", "", group.label + " " + (group.items || []).length);
+      button.type = "button";
+      button.dataset.boardKey = group.key;
+      button.setAttribute("role", "tab");
+      button.addEventListener("click", function () { renderGroup(group); });
+      controls.appendChild(button);
+    });
+    root.appendChild(controls);
+    root.appendChild(panel);
+    renderGroup(active);
     return root;
   }
 
@@ -476,12 +649,12 @@
     delta.appendChild(create("p", "muted", "Long-range forecast is intentionally not resident in the FDE morning view."));
     root.appendChild(delta);
     var boards = section("Execution closure", "fde-blockers-commitments");
-    var grid = create("div", "board-grid");
-    grid.appendChild(board("Blockers", meeting.boards.fde_blockers));
-    grid.appendChild(board("Commitments", meeting.boards.fde_commitments));
-    grid.appendChild(board("Due today", meeting.boards.fde_due));
-    grid.appendChild(board("Escalations", meeting.boards.fde_escalations || meeting.boards.escalations));
-    boards.appendChild(grid);
+    boards.appendChild(meetingBoards([
+      { key: "blockers", label: "Blockers", items: meeting.boards.fde_blockers || [] },
+      { key: "commitments", label: "Commitments", items: meeting.boards.fde_commitments || [] },
+      { key: "due", label: "Due today", items: meeting.boards.fde_due || [] },
+      { key: "escalations", label: "Escalations", items: meeting.boards.fde_escalations || meeting.boards.escalations || [] }
+    ]));
     root.appendChild(boards);
     document.getElementById("result-count").textContent = deltaRows.length + " window deltas";
   }
@@ -503,12 +676,12 @@
     renderBullet(next, { current: progress.current, forecast: progress.forecast_summary });
     root.appendChild(next);
     var decisions = section("Exceptions and decisions", "biz-decisions");
-    var grid = create("div", "board-grid");
-    grid.appendChild(board("Decisions", meeting.boards.business_decisions));
-    grid.appendChild(board("Top variances", meeting.boards.top_variances));
-    grid.appendChild(board("Readiness", meeting.boards.business_readiness));
-    grid.appendChild(board("Business impact", meeting.boards.cross_line_business_impact));
-    decisions.appendChild(grid);
+    decisions.appendChild(meetingBoards([
+      { key: "decisions", label: "Decisions", items: meeting.boards.business_decisions || [] },
+      { key: "variances", label: "Top variances", items: meeting.boards.top_variances || [] },
+      { key: "readiness", label: "Readiness", items: meeting.boards.business_readiness || [] },
+      { key: "impact", label: "Business impact", items: meeting.boards.cross_line_business_impact || [] }
+    ]));
     root.appendChild(decisions);
     document.getElementById("result-count").textContent = (meeting.boards.business_decisions || []).length + " decisions";
   }
@@ -565,11 +738,48 @@
     return null;
   }
 
+  function relatedTypeTitle(type) {
+    return {
+      decision: message("flow.action.decision", "Decision"),
+      todo: message("flow.action.todo", "To-do"),
+      "open-question": message("flow.action.open-question", "Open question"),
+      risk: message("flow.action.risk", "Risk")
+    }[type] || type;
+  }
+
+  function relatedItemCatalog() {
+    var catalog = new Map();
+    Object.keys(model.data.meetings || {}).forEach(function (meetingId) {
+      var boards = (model.data.meetings[meetingId] || {}).boards || {};
+      Object.keys(boards).forEach(function (boardName) {
+        var type = boardItemType(boardName);
+        if (!type || !Array.isArray(boards[boardName])) return;
+        var boardTitle = boardName.replace(/_/g, " ").replace(/\b\w/g, function (letter) { return letter.toUpperCase(); });
+        boards[boardName].forEach(function (item, index) {
+          if (!item || typeof item !== "object") return;
+          var id = meetingItemId(item);
+          if (!id) return;
+          var record = normalizeMeetingItem(item, boardTitle, index);
+          record.type = type;
+          var key = type + ":" + id;
+          var existing = catalog.get(key);
+          if (!existing || record.details.length > existing.details.length) catalog.set(key, record);
+        });
+      });
+    });
+    return catalog;
+  }
+
   function appendRelatedItem(items, item) {
     var key = item.type + ":" + item.id;
     var existing = items.get(key);
     if (existing) {
       item.states.forEach(function (value) { if (existing.states.indexOf(value) < 0) existing.states.push(value); });
+      if ((item.details || []).length > (existing.details || []).length) {
+        existing.title = item.title;
+        existing.details = item.details;
+      }
+      if (!existing.sourceReference && item.sourceReference) existing.sourceReference = item.sourceReference;
       return;
     }
     items.set(key, item);
@@ -577,15 +787,23 @@
 
   function relatedNodeItems(node, flow) {
     var items = new Map();
+    var catalog = relatedItemCatalog();
     var allocation = nodeAllocation(flow, node.node_id);
     Object.keys((allocation || {}).counts || {}).forEach(function (category) {
       (((allocation || {}).counts[category] || {}).source_refs || []).forEach(function (source) {
+        var type = relatedItemType(source.source_kind);
+        var record = catalog.get(type + ":" + source.source_id);
         appendRelatedItem(items, {
-          type: relatedItemType(source.source_kind),
+          type: type,
           id: source.source_id,
-          summary: source.source_id,
+          title: record ? record.title : relatedTypeTitle(type) + " · " + source.source_id,
           states: [category],
-          sourceFingerprint: source.source_fingerprint || ""
+          sourceReference: record ? record.sourceReference : null,
+          details: record ? record.details : [
+            { label: "Canonical ID", value: source.source_id },
+            { label: "Flow state", value: category },
+            { label: "Source fingerprint", value: source.source_fingerprint || message("flow.item.content-unavailable", "Unavailable") }
+          ]
         });
       });
     });
@@ -600,16 +818,36 @@
             if (!item || typeof item !== "object") return;
             var related = item.related_plan_item_ids || item.plan_item_ids;
             if (!Array.isArray(related) || related.indexOf(node.node_id) < 0) return;
-            var id = item.action_id || item.risk_id || item.decision_id || item.question_id || item.id;
+            var id = meetingItemId(item);
             if (!id) return;
+            var record = catalog.get(type + ":" + id) || normalizeMeetingItem(item, relatedTypeTitle(type), 0);
             appendRelatedItem(items, {
               type: type,
               id: String(id),
-              summary: item.summary || item.action || item.decision || item.question || item.item || String(id),
-              states: item.status ? [String(item.status)] : [],
-              sourceFingerprint: ""
+              title: record.title,
+              states: firstItemField(item, ["status", "Status"]) ? [firstItemField(item, ["status", "Status"])] : [],
+              sourceReference: record.sourceReference,
+              details: record.details
             });
           });
+        });
+      });
+
+      (model.data.roadmap.blocked_by_decisions || []).forEach(function (relation) {
+        if (!relation || relation.target !== node.node_id) return;
+        var id = relation.decision_id || relation.id;
+        if (!id) return;
+        var record = catalog.get("decision:" + id);
+        appendRelatedItem(items, {
+          type: "decision",
+          id: String(id),
+          title: record ? record.title : relatedTypeTitle("decision") + " · " + id,
+          states: ["blocks node"],
+          sourceReference: record ? record.sourceReference : null,
+          details: record ? record.details : [
+            { label: "Canonical ID", value: String(id) },
+            { label: "Related node", value: node.node_id }
+          ]
         });
       });
     }
@@ -778,6 +1016,25 @@
     }
     sectionRoot.appendChild(renderFlowOverview(flow));
     var toolbar = create("div", "flow-toolbar");
+    var interaction = create("div", "segmented flow-interaction-modes");
+    interaction.setAttribute("role", "group");
+    interaction.setAttribute("aria-label", message("flow.interaction.label", "Canvas interaction"));
+    [["pan", "flow.interaction.pan", "Pan"], ["select", "flow.interaction.select", "Select"]].forEach(function (item) {
+      var button = create("button", "", message(item[1], item[2]));
+      button.type = "button";
+      button.dataset.interactionMode = item[0];
+      button.setAttribute("aria-pressed", String(flowInteractionMode === item[0]));
+      button.addEventListener("click", function () {
+        flowInteractionMode = item[0];
+        interaction.querySelectorAll("button").forEach(function (candidate) {
+          candidate.setAttribute("aria-pressed", String(candidate === button));
+        });
+        var svg = document.querySelector("#flow-frame svg");
+        if (svg) svg.dataset.interactionMode = flowInteractionMode;
+      });
+      interaction.appendChild(button);
+    });
+    toolbar.appendChild(interaction);
     var lanes = Array.from(new Set((model.data.flows[state.view].nodes || []).map(function (node) { return (node.lane || {}).lane_id || "PROGRAM"; }))).sort();
     lanes.forEach(function (lane) {
       var button = create("button", "", (collapsedLanes.has(lane) ? "Expand " : "Collapse ") + lane);
@@ -870,6 +1127,7 @@
     frame.replaceChildren();
     frame.dataset.layoutStatus = "ready";
     var svg = createSvg("svg", { role: "img", "aria-labelledby": "flow-title flow-desc", viewBox: "0 0 " + Math.max(600, layout.width || 600) + " " + Math.max(360, layout.height || 360) });
+    svg.dataset.interactionMode = flowInteractionMode;
     svg.appendChild(createSvg("title", { id: "flow-title" }, "ADP progress flow"));
     svg.appendChild(createSvg("desc", { id: "flow-desc" }, "Approved milestone and gate topology with canonical execution, health, relationship, and overlay states."));
     var defs = createSvg("defs");
@@ -991,18 +1249,52 @@
   function zoomFlow(factor) { flowTransform.scale = Math.max(.5, Math.min(3, flowTransform.scale * factor)); applyFlowTransform(); }
 
   function enablePan(svg, viewport) {
-    var dragging = false;
+    var pointerId = null;
+    var start = null;
     var origin = null;
+    var moved = false;
     svg.addEventListener("wheel", function (event) { event.preventDefault(); zoomFlow(event.deltaY < 0 ? 1.1 : .9); }, { passive: false });
     svg.addEventListener("pointerdown", function (event) {
-      if (event.target.closest && event.target.closest(".flow-node")) return;
-      dragging = true;
-      origin = { x: event.clientX - flowTransform.x, y: event.clientY - flowTransform.y };
-      svg.setPointerCapture(event.pointerId);
+      if (event.button !== 0 && event.button !== 1) return;
+      var overNode = event.target.closest && event.target.closest(".flow-node");
+      if (flowInteractionMode !== "pan" && event.button !== 1 && !spacePan && overNode) return;
+      pointerId = event.pointerId;
+      start = { x: event.clientX, y: event.clientY };
+      origin = { x: flowTransform.x, y: flowTransform.y };
+      moved = false;
     });
-    svg.addEventListener("pointermove", function (event) { if (!dragging) return; flowTransform.x = event.clientX - origin.x; flowTransform.y = event.clientY - origin.y; applyFlowTransform(); });
-    svg.addEventListener("pointerup", function () { dragging = false; });
-    svg.addEventListener("pointercancel", function () { dragging = false; });
+    svg.addEventListener("pointermove", function (event) {
+      if (pointerId !== event.pointerId) return;
+      var deltaX = event.clientX - start.x;
+      var deltaY = event.clientY - start.y;
+      if (!moved && Math.hypot(deltaX, deltaY) < 4) return;
+      if (!moved && !svg.hasPointerCapture(event.pointerId)) svg.setPointerCapture(event.pointerId);
+      moved = true;
+      svg.classList.add("is-panning");
+      event.preventDefault();
+      flowTransform.x = origin.x + deltaX;
+      flowTransform.y = origin.y + deltaY;
+      applyFlowTransform();
+    });
+    function finish(event) {
+      if (pointerId !== event.pointerId) return;
+      if (moved) {
+        svg.dataset.suppressClick = "true";
+        window.setTimeout(function () { delete svg.dataset.suppressClick; }, 0);
+      }
+      svg.classList.remove("is-panning");
+      if (svg.hasPointerCapture(pointerId)) svg.releasePointerCapture(pointerId);
+      pointerId = null;
+      start = null;
+      origin = null;
+    }
+    svg.addEventListener("pointerup", finish);
+    svg.addEventListener("pointercancel", finish);
+    svg.addEventListener("click", function (event) {
+      if (svg.dataset.suppressClick !== "true") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
   }
 
   function relatedItemsPanel(node, flow) {
@@ -1029,18 +1321,27 @@
         return;
       }
       visible.forEach(function (item) {
-        var row = create("li", "related-item");
-        row.dataset.itemType = item.type;
-        var head = create("div", "related-item-heading");
-        head.appendChild(create("span", "related-item-kind", labels[item.type]));
-        head.appendChild(create("strong", "", item.id));
-        row.appendChild(head);
-        if (item.summary !== item.id) row.appendChild(create("p", "", item.summary));
+        var row = create("li");
+        var disclosure = create("details", "related-item");
+        disclosure.dataset.itemType = item.type;
+        var head = create("summary", "related-item-heading");
+        var title = create("span", "related-item-title");
+        title.appendChild(create("span", "related-item-kind", labels[item.type]));
+        title.appendChild(create("strong", "", item.title));
+        title.appendChild(create("span", "related-item-id", item.id));
+        head.appendChild(title);
         if (item.states.length) {
           var states = create("div", "related-item-states");
           item.states.forEach(function (value) { states.appendChild(create("span", "", value)); });
-          row.appendChild(states);
+          head.appendChild(states);
         }
+        disclosure.appendChild(head);
+        var content = create("div", "related-item-content");
+        var source = sourceReferenceLink(item.sourceReference);
+        if (source) content.appendChild(source);
+        appendDetailList(content, item.details);
+        disclosure.appendChild(content);
+        row.appendChild(disclosure);
         list.appendChild(row);
       });
     }
@@ -1115,6 +1416,12 @@
     body.appendChild(manual);
     dialog.appendChild(body);
     document.body.appendChild(dialog);
+    dialog.addEventListener("click", function (event) {
+      if (event.target !== dialog) return;
+      var bounds = dialog.getBoundingClientRect();
+      var outside = event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+      if (outside) dialog.close();
+    });
     dialog.addEventListener("close", function () { dialog.remove(); });
     dialog.showModal();
     close.focus();
@@ -1136,6 +1443,20 @@
   initControls();
   writeHash(true);
   render();
+  window.addEventListener("keydown", function (event) {
+    if (event.code !== "Space" || event.repeat || ["INPUT", "SELECT", "TEXTAREA", "BUTTON", "SUMMARY"].indexOf((event.target || {}).tagName) >= 0) return;
+    if (!document.querySelector("#flow-frame svg")) return;
+    spacePan = true;
+    document.querySelector("#flow-frame svg").classList.add("is-space-pan");
+    event.preventDefault();
+  });
+  window.addEventListener("keyup", function (event) {
+    if (event.code !== "Space") return;
+    spacePan = false;
+    var svg = document.querySelector("#flow-frame svg");
+    if (svg) svg.classList.remove("is-space-pan");
+  });
+  window.addEventListener("blur", function () { spacePan = false; });
   window.addEventListener("keydown", function (event) {
     if (!flowFullscreen) return;
     if (event.key === "Escape") {

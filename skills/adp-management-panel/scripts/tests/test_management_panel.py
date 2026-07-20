@@ -192,6 +192,8 @@ class ManagementPanelTests(unittest.TestCase):
             current = Path(first["current_html"])
             self.assertTrue(bundle.is_file())
             self.assertTrue(current.is_file())
+            self.assertIn("A-OPEN", (root / "memory/actions/action-ledger.md").read_text(encoding="utf-8"))
+            self.assertIn("Gate evidence", (root / "memory/workstreams/L1/delivery-record.md").read_text(encoding="utf-8"))
             self.assertTrue(Path(first["panel_input_audit"]).is_file())
             self.assertTrue(Path(first["panel_artifact_audit"]).is_file())
             self.assertEqual(

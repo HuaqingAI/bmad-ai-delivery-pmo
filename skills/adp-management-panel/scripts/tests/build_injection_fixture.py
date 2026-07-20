@@ -18,6 +18,9 @@ def main() -> int:
     inputs["flow_graph"]["topology"]["nodes"][0]["name"] = labels[0]
     inputs["flow_graph"]["topology"]["nodes"][1]["name"] = labels[1]
     inputs["meeting_packs"]["business-biweekly"]["boards"]["business_decisions"][0]["summary"] = labels[-1]
+    inputs["meeting_packs"]["business-biweekly"]["boards"]["business_decisions"][0]["Source"] = (
+        "{'artifact_path': '../../outside.md'}"
+    )
     Path(sys.argv[1]).write_text(json.dumps(inputs, ensure_ascii=False), encoding="utf-8")
     return 0
 

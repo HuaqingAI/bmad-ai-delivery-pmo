@@ -494,6 +494,13 @@ def _selected_meeting(pack: dict[str, Any]) -> dict[str, Any]:
     return {key: copy.deepcopy(pack[key]) for key in keys}
 
 
+def _sensitive_key(key: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+    if normalized in {"action_id", "risk_id", "decision_id", "question_id"}:
+        return "id"
+    return normalized
+
+
 def _remove_sensitive(value: Any, removed: set[str]) -> tuple[Any, int]:
     if isinstance(value, list):
         items = [_remove_sensitive(item, removed) for item in value]
@@ -503,7 +510,7 @@ def _remove_sensitive(value: Any, removed: set[str]) -> tuple[Any, int]:
     output: dict[str, Any] = {}
     count = 0
     for key, item in value.items():
-        if key in removed:
+        if _sensitive_key(key) in removed:
             count += 1
             continue
         clean, nested = _remove_sensitive(item, removed)

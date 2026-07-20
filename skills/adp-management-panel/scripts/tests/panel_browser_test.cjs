@@ -3,7 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { pathToFileURL } = require("url");
+const { fileURLToPath, pathToFileURL } = require("url");
 const playwright = require(process.env.PLAYWRIGHT_CORE || "playwright-core");
 
 const htmlPath = path.resolve(process.argv[2]);
@@ -139,13 +139,30 @@ async function screenshot(page, name, fullPage = true) {
       const relatedControls = await page.locator(".related-item-filters").innerText();
       for (const label of ["全部", "决策", "待办", "Open question", "风险"]) check(relatedControls.includes(label), "node related-item filters omit " + label);
       check((await page.locator(".related-item-list").innerText()).includes("A-OPEN") && (await page.locator(".related-item-list").innerText()).includes("R-OPEN"), "node drawer did not expose canonical to-do and risk source references");
+      const relatedTitles = await page.locator(".related-item-title strong").allInnerTexts();
+      check(relatedTitles.includes("Confirm integration evidence") && relatedTitles.includes("Gate evidence is missing"), "node related items did not resolve exact-ID titles from canonical meeting content");
       await page.getByRole("button", { name: /^待办 1$/ }).click();
       check(await page.locator(".related-item[data-item-type='todo']").count() === 1, "to-do related-item filter is not functional");
+      await page.locator(".related-item[data-item-type='todo'] > summary").click();
+      check((await page.locator(".related-item[data-item-type='todo']").innerText()).includes("Due / Trigger") && (await page.locator(".related-item[data-item-type='todo']").innerText()).includes("2026-07-13"), "related-item click did not reveal structured canonical content");
+      const relatedSource = page.locator(".related-item[data-item-type='todo'] .source-link");
+      check(await relatedSource.getAttribute("target") === "_blank", "related-item source link does not open separately");
+      const relatedSourceHref = await relatedSource.evaluate(element => element.href);
+      check(relatedSourceHref.endsWith("/memory/actions/action-ledger.md"), "related-item source link does not resolve from the panel to the canonical memory file");
+      check(fs.existsSync(fileURLToPath(relatedSourceHref)), "related-item source link target does not exist");
+      const sourcePagePromise = context.waitForEvent("page");
+      await relatedSource.click();
+      const sourcePage = await sourcePagePromise;
+      await sourcePage.waitForLoadState("load");
+      check(sourcePage.url() === relatedSourceHref, "related-item source link did not open its canonical target");
+      check((await sourcePage.locator("body").innerText()).includes("A-OPEN"), "related-item source target did not expose canonical item content");
+      await sourcePage.close();
       await page.getByRole("button", { name: /^风险 1$/ }).click();
       check(await page.locator(".related-item[data-item-type='risk']").count() === 1, "risk related-item filter is not functional");
       evidence.screenshots.push(await screenshot(page, "project-flow-node-detail-1920x1080.png", false));
-      await page.keyboard.press("Escape");
+      await page.mouse.click(20, 500);
       await page.waitForSelector("#source-drawer", { state: "detached" });
+      check(await page.locator(".flow-interaction-modes button[aria-pressed='true']").innerText() === "拖动画布", "flow canvas did not default to the pan interaction mode");
       await page.getByRole("button", { name: /全屏|Full screen/ }).click();
       check(await page.locator("body").evaluate(element => element.classList.contains("flow-is-fullscreen")), "full-screen mode did not activate");
       check(await page.locator(".flow-band").getAttribute("data-fullscreen") === "true", "flow work surface does not expose full-screen state");
@@ -165,12 +182,13 @@ async function screenshot(page, name, fullPage = true) {
       const transformAfter = await page.locator("#flow-viewport").getAttribute("transform");
       check(transformBefore !== transformAfter && transformAfter.includes("scale(1.2"), "flow zoom control did not update transform");
       await page.getByRole("button", { name: "Fit" }).click();
-      const flowBox = await page.locator("#flow-frame svg").boundingBox();
-      await page.mouse.move(flowBox.x + flowBox.width / 2, flowBox.y + flowBox.height / 2);
+      const flowNodeBox = await page.locator(".flow-node[data-node-id='M-A']").boundingBox();
+      await page.mouse.move(flowNodeBox.x + flowNodeBox.width / 2, flowNodeBox.y + flowNodeBox.height / 2);
       await page.mouse.down();
-      await page.mouse.move(flowBox.x + flowBox.width / 2 + 30, flowBox.y + flowBox.height / 2 + 20);
+      await page.mouse.move(flowNodeBox.x + flowNodeBox.width / 2 + 30, flowNodeBox.y + flowNodeBox.height / 2 + 20);
       await page.mouse.up();
-      check((await page.locator("#flow-viewport").getAttribute("transform")).includes("translate(30 20)"), "flow pointer pan did not update transform");
+      check((await page.locator("#flow-viewport").getAttribute("transform")).includes("translate(30 20)"), "flow node-area pan did not update transform");
+      check(await page.locator("#source-drawer").count() === 0, "dragging a flow node accidentally opened its drawer");
       await page.getByRole("button", { name: "Reset" }).click();
       await page.getByRole("button", { name: "Collapse L1" }).click();
       await page.waitForTimeout(100);
@@ -203,9 +221,20 @@ async function screenshot(page, name, fullPage = true) {
       check(meetingContext.includes("Pack ID") && meetingContext.includes("2026-07-13-fde-morning"), "FDE view lacks meeting pack identity");
       check(meetingContext.includes("Meeting window") && meetingContext.includes("confirmed"), "FDE view lacks confirmed meeting window");
       check(await page.getByText("Next-period forecast", { exact: true }).count() === 0, "FDE view keeps a resident long-range forecast");
+      check(await page.locator("#fde-blockers-commitments .meeting-board-tabs").count() === 1, "FDE execution closure did not render category tabs");
+      check((await page.locator("#fde-blockers-commitments .meeting-item-title").first().innerText()).includes("Gate evidence is missing"), "FDE blocker title is not human-readable");
+      await page.getByRole("tab", { name: /^Commitments 1$/ }).click();
+      check((await page.locator("#fde-blockers-commitments .meeting-item-title").innerText()).includes("Confirm integration evidence"), "FDE commitments did not render semantic action content");
+      await page.locator("#fde-blockers-commitments .meeting-item > summary").click();
+      const executionClosureText = await page.locator("#fde-blockers-commitments").innerText();
+      check(executionClosureText.includes("Due / Trigger") && !executionClosureText.includes('{"'), "FDE execution closure retained raw JSON instead of structured fields");
+      check((await page.locator("#fde-blockers-commitments .source-link").evaluate(element => element.href)).endsWith("/memory/actions/action-ledger.md"), "FDE item did not link to its canonical source file");
+      await page.locator("#fde-blockers-commitments").scrollIntoViewIfNeeded();
+      evidence.screenshots.push(await screenshot(page, "fde-execution-closure-1280x720.png", false));
       const meetingControlHeight = await page.locator("#clear-filters").evaluate(element => parseFloat(getComputedStyle(element).height));
       const meetingBodySize = await page.locator("#dynamic-view").evaluate(element => parseFloat(getComputedStyle(element).fontSize));
       check(meetingControlHeight >= 44 && meetingBodySize >= 16, "meeting presentation density did not override workbench tokens");
+      await page.evaluate(() => window.scrollTo(0, 0));
       await layoutCheck(page, "fde-1280");
       evidence.screenshots.push(await screenshot(page, "fde-morning-1280x720.png", false));
       await page.getByRole("button", { name: /流程图|Flow progress/ }).click();
@@ -237,6 +266,10 @@ async function screenshot(page, name, fullPage = true) {
       await page.waitForSelector("#biz-next-period-progress");
       check((await page.locator("#biz-next-period-progress").innerText()).includes("60%"), "business first screen does not lead with next-period forecast");
       check((await page.locator("#biz-decisions").innerText()).includes("Approve gate exception"), "business decisions were not copied from meeting pack");
+      await page.locator("#biz-decisions .meeting-item > summary").click();
+      check((await page.locator("#biz-decisions").innerText()).includes("summary") && !(await page.locator("#biz-decisions").innerText()).includes('{"'), "business decisions did not expose structured detail without raw JSON");
+      await page.getByRole("tab", { name: /^Top variances 1$/ }).click();
+      check((await page.locator("#biz-decisions .meeting-item-title").innerText()).includes("Program integration gate"), "business variance did not resolve its canonical flow-node title");
       evidence.screenshots.push(await screenshot(page, "business-biweekly-1920x1080.png", false));
       await page.getByRole("button", { name: /流程图|Flow progress/ }).click();
       await page.waitForSelector("#flow-frame[data-layout-status='ready']");
@@ -257,6 +290,19 @@ async function screenshot(page, name, fullPage = true) {
       check(await page.locator("#flow-frame .stage-list").count() >= 1, "narrow reflow fallback is absent");
       check(errors.length === 0, "mobile Chrome console errors: " + errors.join(" | "));
       evidence.checks.push("320 CSS pixel and 400 percent-equivalent reflow");
+      await context.close();
+    }
+
+    {
+      const { context, page, errors } = await pageSession(browser, { viewport: { width: 320, height: 800 } });
+      await open(page, htmlPath, "#v=1&view=fde-morning&mode=quantitative-progress");
+      await page.waitForSelector("#fde-blockers-commitments .meeting-board-tabs");
+      await page.locator("#fde-blockers-commitments").scrollIntoViewIfNeeded();
+      await layoutCheck(page, "fde-mobile-320");
+      check(await page.locator("#fde-blockers-commitments .meeting-item-title").count() === 1, "mobile FDE closure lost its active structured item");
+      check(errors.length === 0, "mobile FDE console errors: " + errors.join(" | "));
+      evidence.screenshots.push(await screenshot(page, "fde-meeting-mobile-320x800.png", false));
+      evidence.checks.push("FDE meeting categories and structured items at 320 CSS pixels");
       await context.close();
     }
 
@@ -332,6 +378,7 @@ async function screenshot(page, name, fullPage = true) {
       const { context, page, errors } = await pageSession(browser, { viewport: { width: 1280, height: 720 } });
       await open(page, injectionPath, "#v=1&view=business-biweekly&mode=quantitative-progress");
       check(await page.locator("script script, img[src='x'], foreignObject, [onerror], [onload]").count() === 0, "malicious source created executable DOM/SVG");
+      check(await page.locator("#biz-decisions .source-link").count() === 0, "unsafe legacy source path became a link");
       check(await page.evaluate(() => window.__ADP_INJECTION_EXECUTED__ === undefined), "malicious source script executed");
       check(errors.length === 0, "injection page console errors: " + errors.join(" | "));
       evidence.checks.push("HTML/SVG injection fixture remained inert in Chrome");

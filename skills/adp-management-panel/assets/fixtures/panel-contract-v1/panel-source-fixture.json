@@ -58,8 +58,8 @@
       "selected_edge_ids": ["E-A-MERGE"],
       "boards": {
         "fde_period_delta": [{"workstream": "L1", "actual_delta_pp": 20}],
-        "fde_blockers": [{"id": "A-BLOCK", "owner": "internal-owner@example.com", "summary": "Gate evidence is missing"}],
-        "fde_commitments": [{"id": "A-COMMIT", "owner": "internal-owner@example.com", "due": "2026-07-13"}],
+        "fde_blockers": [{"Risk ID": "R-OPEN", "Risk": "Gate evidence is missing", "Owner": "internal-owner@example.com", "Severity": "at-risk", "Source": "workstreams/L1/delivery-record.md"}],
+        "fde_commitments": [{"Action ID": "A-OPEN", "Action": "Confirm integration evidence", "Owner": "internal-owner@example.com", "Status": "open", "Due / Trigger": "2026-07-13", "Source": "{'artifact_id': 'ACTION-LEDGER', 'artifact_path': 'actions/action-ledger.md', 'source_fingerprint': 'sha256:3333333333333333333333333333333333333333333333333333333333333333'}"}],
         "fde_due": [],
         "escalations": []
       },

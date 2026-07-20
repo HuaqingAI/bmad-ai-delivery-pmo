@@ -27,6 +27,7 @@ import panel_model
 SCRIPT_ROOT = Path(__file__).resolve().parent
 SKILL_ROOT = SCRIPT_ROOT.parent
 ASSET_ROOT = SKILL_ROOT / "assets"
+FIXTURE_MEMORY_ROOT = ASSET_ROOT / "fixtures/panel-contract-v1/memory"
 DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 RESOURCE_PATH = ASSET_ROOT / "elk-resource-v1.json"
 TEMPLATE_PATH = ASSET_ROOT / "panel-template.html"
@@ -649,6 +650,7 @@ def build_request(
 
 def load_inputs(args: argparse.Namespace, resource: dict[str, Any], profile: str, memory_root: Path) -> dict[str, Any]:
     if args.fixture:
+        materialize_fixture_sources(memory_root)
         inputs = panel_model.load_source_fixture()
         selection = embedded_selection_policy(inputs)
     elif args.input_bundle:
@@ -675,6 +677,13 @@ def load_inputs(args: argparse.Namespace, resource: dict[str, Any], profile: str
     inputs["shareable_policy"] = selection["shareable_policy"]
     inputs["request"] = build_request(inputs, resource, args, profile, selection)
     return inputs
+
+
+def materialize_fixture_sources(memory_root: Path) -> None:
+    for source in sorted(path for path in FIXTURE_MEMORY_ROOT.rglob("*") if path.is_file()):
+        target = memory_root / source.relative_to(FIXTURE_MEMORY_ROOT)
+        if not target.exists():
+            atomic_replace(target, source.read_bytes())
 
 
 def run_input_audit_gate(

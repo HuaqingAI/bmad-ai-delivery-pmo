@@ -23,7 +23,7 @@ from typing import Any
 
 
 PANEL_SCHEMA_VERSION = "1.0.0"
-PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.4"
+PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.5"
 PANEL_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SKILLS = SKILL_ROOT.parent
@@ -610,6 +610,13 @@ def _manifest_reporting_period(status: dict[str, Any]) -> dict[str, str]:
     return {"start": str(period["start"]), "end": str(period["end"])}
 
 
+def _sensitive_key(key: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+    if normalized in {"action_id", "risk_id", "decision_id", "question_id"}:
+        return "id"
+    return normalized
+
+
 def _remove_sensitive(value: Any, removed: set[str]) -> tuple[Any, int]:
     if isinstance(value, list):
         items = [_remove_sensitive(item, removed) for item in value]
@@ -619,7 +626,7 @@ def _remove_sensitive(value: Any, removed: set[str]) -> tuple[Any, int]:
     output: dict[str, Any] = {}
     count = 0
     for key, item in value.items():
-        if key in removed:
+        if _sensitive_key(key) in removed:
             count += 1
             continue
         clean, nested = _remove_sensitive(item, removed)
