@@ -700,7 +700,7 @@
     }).map(function (key) { return { label: key.replace(/_/g, " "), value: detailText(item[key]) }; });
   }
 
-  function normalizeMeetingItem(item, boardTitle, index) {
+  function normalizeMeetingItem(item, boardTitle, index, itemType) {
     var record = item && typeof item === "object" ? item : { Item: item };
     var id = meetingItemId(record);
     var title = meetingItemTitle(record, boardTitle, id);
@@ -716,7 +716,7 @@
       workstream: workstream,
       due: due,
       actionId: structuredActionId(record),
-      riskId: structuredRiskId(record),
+      riskId: structuredRiskId(record) || (itemType === "risk" ? id : ""),
       details: meetingItemDetails(record),
       sourceReference: meetingItemSource(record),
       raw: record
@@ -780,7 +780,8 @@
       panel.setAttribute("aria-label", group.label);
       var list = create("div", "meeting-item-list");
       if (!group.items || !group.items.length) list.appendChild(create("p", "meeting-empty muted", message("meeting.empty", "None in the canonical meeting pack.")));
-      (group.items || []).forEach(function (item, index) { list.appendChild(meetingItemDisclosure(normalizeMeetingItem(item, group.label, index))); });
+      var itemType = boardItemType(group.key);
+      (group.items || []).forEach(function (item, index) { list.appendChild(meetingItemDisclosure(normalizeMeetingItem(item, group.label, index, itemType))); });
       panel.appendChild(list);
     }
 
@@ -930,6 +931,35 @@
     if (state[options.stateKey]) window.requestAnimationFrame(function () { findItem(state[options.stateKey]); });
   }
 
+  function normalizeRegisterHeader(value) {
+    return value.toLocaleLowerCase().replace(/[\s_-]+/g, "");
+  }
+
+  function registerTableTargets(documentView, headerNames) {
+    var expected = new Set(headerNames.map(normalizeRegisterHeader));
+    return Array.from(documentView.querySelectorAll("table")).reduce(function (targets, table) {
+      var headers = Array.from(table.querySelectorAll("thead th"));
+      var columnIndex = headers.findIndex(function (header) {
+        return expected.has(normalizeRegisterHeader(header.textContent.trim()));
+      });
+      if (columnIndex < 0) return targets;
+      Array.from(table.querySelectorAll("tbody tr")).forEach(function (row) {
+        var cell = row.children[columnIndex];
+        if (!cell || cell.tagName !== "TD") return;
+        targets.push({ element: row, code: cell.textContent.replace(/\s+/g, " ").trim() });
+      });
+      return targets;
+    }, []);
+  }
+
+  function registerHeadingTargets(documentView) {
+    return Array.from(documentView.querySelectorAll("h2, h3")).map(function (heading) {
+      return { element: heading, code: heading.textContent.trim() };
+    }).filter(function (target) {
+      return /^[A-Za-z0-9][A-Za-z0-9._:/-]{1,95}$/.test(target.code) && (/\d/.test(target.code) || /[-_:/]/.test(target.code));
+    });
+  }
+
   function renderActionLedger(root) {
     renderRegisterView(root, {
       viewId: "action-ledger",
@@ -950,9 +980,7 @@
       datasetKey: "actionCode",
       countLabel: "actions",
       targets: function (documentView) {
-        return Array.from(documentView.querySelectorAll("h2, h3")).map(function (heading) {
-          return { element: heading, code: heading.textContent.trim() };
-        });
+        return registerHeadingTargets(documentView).concat(registerTableTargets(documentView, ["Action ID", "action_id", "行动项编号", "行动编号"]));
       }
     });
   }
@@ -977,10 +1005,7 @@
       datasetKey: "riskCode",
       countLabel: "risks",
       targets: function (documentView) {
-        return Array.from(documentView.querySelectorAll("tbody tr")).map(function (row) {
-          var idCell = row.querySelector("td");
-          return { element: row, code: idCell ? idCell.textContent.trim() : "" };
-        });
+        return registerTableTargets(documentView, ["Risk ID", "risk_id", "ID", "风险 ID", "风险编号"]);
       }
     });
   }
@@ -1058,7 +1083,7 @@
           if (!item || typeof item !== "object") return;
           var id = meetingItemId(item);
           if (!id) return;
-          var record = normalizeMeetingItem(item, boardTitle, index);
+          var record = normalizeMeetingItem(item, boardTitle, index, type);
           record.type = type;
           var key = type + ":" + id;
           var existing = catalog.get(key);
@@ -1099,8 +1124,8 @@
           id: source.source_id,
           title: record ? record.title : relatedTypeTitle(type) + " · " + source.source_id,
           states: [category],
-          actionId: record ? record.actionId : null,
-          riskId: record ? record.riskId : null,
+          actionId: record ? record.actionId : (source.source_kind === "action" ? source.source_id : null),
+          riskId: record ? (record.riskId || (type === "risk" ? source.source_id : null)) : (source.source_kind === "risk" ? source.source_id : null),
           sourceReference: record ? record.sourceReference : null,
           details: record ? record.details : [
             { label: "Canonical ID", value: source.source_id },
@@ -1123,14 +1148,14 @@
             if (!Array.isArray(related) || related.indexOf(node.node_id) < 0) return;
             var id = meetingItemId(item);
             if (!id) return;
-            var record = catalog.get(type + ":" + id) || normalizeMeetingItem(item, relatedTypeTitle(type), 0);
+            var record = catalog.get(type + ":" + id) || normalizeMeetingItem(item, relatedTypeTitle(type), 0, type);
             appendRelatedItem(items, {
               type: type,
               id: String(id),
               title: record.title,
               states: firstItemField(item, ["status", "Status"]) ? [firstItemField(item, ["status", "Status"])] : [],
               actionId: record.actionId,
-              riskId: record.riskId,
+              riskId: record.riskId || (type === "risk" ? String(id) : null),
               sourceReference: record.sourceReference,
               details: record.details
             });

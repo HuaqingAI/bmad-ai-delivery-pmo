@@ -246,11 +246,12 @@ body[data-view="business-biweekly"] .view-nav a { font-size: 16px; }
 .register-controls input { width: 100%; min-height: 38px; }
 .register-controls button { min-height: 38px; }
 .register-search-status { align-self: center; color: var(--muted); }
-.register-document { max-width: 1100px; border-top: 1px solid var(--border); padding-top: 22px; }
+.register-document { box-sizing: border-box; width: 100%; max-width: none; overflow-x: auto; border-top: 1px solid var(--border); padding-top: 22px; }
+.register-document table { width: max-content; min-width: 100%; table-layout: auto; }
+.register-document th, .register-document td { min-width: 112px; max-width: 340px; overflow-wrap: anywhere; word-break: normal; }
+.register-document th:first-child, .register-document td:first-child { min-width: 150px; white-space: nowrap; }
 .action-ledger-document h2, .action-ledger-document h3 { scroll-margin-top: 120px; border-left: 4px solid transparent; padding: 7px 10px; transition: background-color .15s ease, border-color .15s ease; }
 .action-ledger-document .is-register-target { border-left-color: #1769aa; background: #eaf4fb; outline: none; }
-.risk-register-document { overflow-x: auto; }
-.risk-register-document table { min-width: 960px; }
 .risk-register-document .is-register-target { outline: none; }
 .risk-register-document .is-register-target td { background: #eaf4fb; border-top-color: #1769aa; border-bottom-color: #1769aa; }
 body[data-view="action-ledger"] .tool-band, body[data-view="risk-register"] .tool-band { display: none; }

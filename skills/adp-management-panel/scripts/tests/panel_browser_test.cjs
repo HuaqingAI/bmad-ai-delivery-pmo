@@ -141,6 +141,7 @@ async function screenshot(page, name, fullPage = true) {
       check((await page.locator(".related-item-list").innerText()).includes("A-OPEN") && (await page.locator(".related-item-list").innerText()).includes("R-OPEN"), "node drawer did not expose canonical to-do and risk source references");
       const relatedTitles = await page.locator(".related-item-title strong").allInnerTexts();
       check(relatedTitles.includes("Confirm integration evidence") && relatedTitles.includes("Gate evidence is missing"), "node related items did not resolve exact-ID titles from canonical meeting content");
+      check(await page.locator(".related-item[data-item-type='risk'] .risk-register-link").count() === 1, "flow risk item did not expose the same register shortcut as an action item");
       await page.getByRole("button", { name: /^待办 1$/ }).click();
       check(await page.locator(".related-item[data-item-type='todo']").count() === 1, "to-do related-item filter is not functional");
       await page.locator(".related-item[data-item-type='todo'] > summary").click();
@@ -162,6 +163,8 @@ async function screenshot(page, name, fullPage = true) {
       await page.waitForSelector("#source-preview-dialog", { state: "detached" });
       await page.getByRole("button", { name: /^风险 1$/ }).click();
       check(await page.locator(".related-item[data-item-type='risk']").count() === 1, "risk related-item filter is not functional");
+      await page.locator(".related-item[data-item-type='risk'] > summary").click();
+      check(await page.locator(".related-item[data-item-type='risk'] .risk-register-link").isVisible(), "expanded flow risk item did not show its risk-register shortcut");
       evidence.screenshots.push(await screenshot(page, "project-flow-node-detail-1920x1080.png", false));
       await page.mouse.click(20, 500);
       await page.waitForSelector("#source-drawer", { state: "detached" });
@@ -251,6 +254,17 @@ async function screenshot(page, name, fullPage = true) {
       check(await page.locator("#nav-risk-register").getAttribute("aria-current") === "page", "Risk register navigation did not become current");
       check((await page.locator(".risk-register-document").innerText()).includes("Gate evidence is missing"), "Risk register view lost canonical Markdown content");
       check(await page.locator("[data-risk-code='R-OPEN'].is-register-target").count() === 1, "risk-register jump did not locate the exact Risk ID");
+      const riskRegisterWidth = await page.evaluate(() => {
+        const view = document.querySelector("#risk-register-view").getBoundingClientRect();
+        const documentView = document.querySelector(".risk-register-document").getBoundingClientRect();
+        return { view: view.width, documentView: documentView.width };
+      });
+      check(riskRegisterWidth.documentView >= riskRegisterWidth.view * .9, "Risk register did not use the full available content width");
+      await open(page, htmlPath, "#v=1&view=risk-register&mode=quantitative-progress");
+      await page.waitForSelector("#risk-register-view");
+      await page.fill("#risk-register-search", "R-OPEN");
+      await page.locator(".risk-register-controls button").click();
+      check(new URL(page.url()).hash.includes("risk=R-OPEN") && await page.locator("[data-risk-code='R-OPEN'].is-register-target").count() === 1, "manual Risk ID lookup did not locate the canonical table row");
       evidence.screenshots.push(await screenshot(page, "risk-register-1280x720.png", false));
       await open(page, htmlPath, "#v=1&view=fde-morning&mode=quantitative-progress");
       await page.waitForSelector("#fde-window-delta");
@@ -280,6 +294,21 @@ async function screenshot(page, name, fullPage = true) {
       check(await page.locator("#nav-action-ledger").getAttribute("aria-current") === "page", "Action ledger navigation did not become current");
       check((await page.locator(".action-ledger-document").innerText()).includes("Confirm integration evidence"), "Action ledger view lost canonical Markdown content");
       check(await page.locator("[data-action-code='A-OPEN'].is-register-target").count() === 1, "ledger jump did not locate the exact Action ID");
+      check(await page.locator("[data-action-code='A-OPEN']").evaluate(element => element.tagName) === "TR", "Action ledger lookup did not resolve the structured Action ID table column");
+      const actionRegisterLayout = await page.evaluate(() => {
+        const view = document.querySelector("#action-ledger-view").getBoundingClientRect();
+        const documentView = document.querySelector(".action-ledger-document");
+        const bounds = documentView.getBoundingClientRect();
+        const firstHeader = documentView.querySelector("th").getBoundingClientRect();
+        return { view: view.width, documentView: bounds.width, firstHeader: firstHeader.width, scrollWidth: documentView.scrollWidth, clientWidth: documentView.clientWidth };
+      });
+      check(actionRegisterLayout.documentView >= actionRegisterLayout.view * .9, "Action ledger did not use the full available content width");
+      check(actionRegisterLayout.firstHeader >= 145 && actionRegisterLayout.scrollWidth > actionRegisterLayout.clientWidth, "Action ledger wide table collapsed columns instead of using internal horizontal scrolling");
+      await open(page, htmlPath, "#v=1&view=action-ledger&mode=quantitative-progress");
+      await page.waitForSelector("#action-ledger-view");
+      await page.fill("#action-ledger-search", "A-OPEN");
+      await page.locator(".action-ledger-controls button").click();
+      check(new URL(page.url()).hash.includes("action=A-OPEN") && await page.locator("[data-action-code='A-OPEN'].is-register-target").count() === 1, "manual Action ID lookup did not locate the canonical table row");
       evidence.screenshots.push(await screenshot(page, "action-ledger-1280x720.png", false));
       await open(page, htmlPath, "#v=1&view=fde-morning&mode=flow-progress");
       await page.waitForSelector("#flow-frame[data-layout-status='ready']");

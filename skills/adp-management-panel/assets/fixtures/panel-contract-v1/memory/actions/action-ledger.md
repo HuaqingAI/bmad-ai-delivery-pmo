@@ -1,8 +1,7 @@
 # Action Ledger
 
-## A-OPEN
+This is the ADP action source of truth.
 
-- Status: open
-- Owner: internal-owner@example.com
-- Action: Confirm integration evidence
-- Due / Trigger: 2026-07-13
+| Action ID | Status | Owner | Workstream | Affected Workstreams | Action | Source | Reason | Due / Trigger | Closure Criteria | Related Plan Items |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A-OPEN | open | internal-owner@example.com | L1 | L1 | Confirm integration evidence | owner update | Gate evidence is missing | 2026-07-13 | Evidence is approved | M-A |

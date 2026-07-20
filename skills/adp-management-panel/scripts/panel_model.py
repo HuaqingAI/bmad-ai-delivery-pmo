@@ -23,7 +23,7 @@ from typing import Any
 
 
 PANEL_SCHEMA_VERSION = "1.0.0"
-PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.8"
+PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.9"
 PANEL_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_PREVIEW_PREFIX = "source-preview/"
 SOURCE_PREVIEW_MAX_FILES = 32
