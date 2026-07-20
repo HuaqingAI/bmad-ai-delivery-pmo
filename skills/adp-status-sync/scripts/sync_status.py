@@ -857,7 +857,9 @@ def normalize_text_key(value: str) -> str:
 
 def new_action_row(rows: list[dict[str, str]], action_update: ActionUpdate, timestamp: str) -> dict[str, str]:
     action_id = action_update.action_id or next_action_id(rows, timestamp)
-    started_at = action_update.started_at or (timestamp if action_update.status == "in-progress" else "")
+    started_at = action_update.started_at or (
+        timestamp if action_update.status in {"in-progress", "blocked", "done"} else ""
+    )
     done_at = action_update.done_at or (timestamp if action_update.status == "done" else "")
     cancelled_at = action_update.cancelled_at or (timestamp if action_update.status == "cancelled" else "")
     return {
@@ -901,7 +903,7 @@ def merge_action_row(row: dict[str, str], action_update: ActionUpdate, timestamp
         row["Created At"] = action_update.created_at or row.get("Last Updated") or timestamp
     if action_update.created_at:
         row["Created At"] = action_update.created_at
-    if action_update.status == "in-progress" and not row.get("Started At"):
+    if action_update.status in {"in-progress", "blocked", "done"} and not row.get("Started At"):
         row["Started At"] = action_update.started_at or timestamp
     elif action_update.started_at:
         row["Started At"] = action_update.started_at
@@ -928,6 +930,48 @@ def validate_action_transition(before: str, after: str, action_id: str) -> None:
         raise ValueError(f"terminal action {action_id} cannot transition from {before} to {after}")
 
 
+def valid_action_flow_timestamps(
+    status: str,
+    created_at: str,
+    updated_at: str,
+    started_at: str | None,
+    done_at: str | None,
+    cancelled_at: str | None,
+) -> bool:
+    if status in {"in-progress", "blocked", "done"} and not started_at:
+        return False
+    if status == "done":
+        if not done_at or cancelled_at:
+            return False
+    elif done_at:
+        return False
+    if status == "cancelled":
+        if not cancelled_at or done_at:
+            return False
+    elif cancelled_at:
+        return False
+    if status == "open" and started_at:
+        return False
+
+    def parsed(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    created = parsed(created_at)
+    updated = parsed(updated_at)
+    if created > updated:
+        return False
+    started = parsed(started_at) if started_at else None
+    terminal_value = done_at or cancelled_at
+    terminal = parsed(terminal_value) if terminal_value else None
+    if started is not None and not (created <= started <= updated):
+        return False
+    if terminal is not None and not (created <= terminal <= updated):
+        return False
+    if started is not None and terminal is not None and started > terminal:
+        return False
+    return True
+
+
 def build_action_flow_contract(rows: list[dict[str, str]], ledger_path: Path) -> dict[str, Any]:
     fingerprint = "sha256:" + hashlib.sha256(ledger_path.read_bytes()).hexdigest()
     actions: list[dict[str, Any]] = []
@@ -939,15 +983,34 @@ def build_action_flow_contract(rows: list[dict[str, str]], ledger_path: Path) ->
         updated_at = row.get("Last Updated", "").strip()
         if not action_id or status not in ACTION_STATUSES or not revision.isdigit() or int(revision) < 1 or not created_at or not updated_at:
             continue
+        try:
+            normalized_created_at = clean_iso_timestamp(created_at, f"action {action_id} created_at")
+            normalized_updated_at = clean_iso_timestamp(updated_at, f"action {action_id} updated_at")
+            normalized_started_at = clean_iso_timestamp(row.get("Started At"), f"action {action_id} started_at")
+            normalized_done_at = clean_iso_timestamp(row.get("Done At"), f"action {action_id} done_at")
+            normalized_cancelled_at = clean_iso_timestamp(row.get("Cancelled At"), f"action {action_id} cancelled_at")
+        except ValueError:
+            continue
+        if normalized_created_at is None or normalized_updated_at is None:
+            continue
+        if not valid_action_flow_timestamps(
+            status,
+            normalized_created_at,
+            normalized_updated_at,
+            normalized_started_at,
+            normalized_done_at,
+            normalized_cancelled_at,
+        ):
+            continue
         actions.append(
             {
                 "action_id": action_id,
                 "status": status,
-                "created_at": clean_iso_timestamp(created_at, f"action {action_id} created_at"),
-                "updated_at": clean_iso_timestamp(updated_at, f"action {action_id} updated_at"),
-                "started_at": clean_iso_timestamp(row.get("Started At"), f"action {action_id} started_at"),
-                "done_at": clean_iso_timestamp(row.get("Done At"), f"action {action_id} done_at"),
-                "cancelled_at": clean_iso_timestamp(row.get("Cancelled At"), f"action {action_id} cancelled_at"),
+                "created_at": normalized_created_at,
+                "updated_at": normalized_updated_at,
+                "started_at": normalized_started_at,
+                "done_at": normalized_done_at,
+                "cancelled_at": normalized_cancelled_at,
                 "baseline_revision": int(revision),
                 "related_plan_item_ids": normalize_stable_id_list(re.split(r"\s*[;,]\s*", row.get("Related Plan Items", "")), "related_plan_item_ids"),
                 "related_flow_edge_ids": normalize_stable_id_list(re.split(r"\s*[;,]\s*", row.get("Related Flow Edges", "")), "related_flow_edge_ids"),
@@ -1429,7 +1492,7 @@ def has_wdr_delta(update: StatusUpdate) -> bool:
             update.risks,
             update.dependencies,
             update.change_notes,
-            update.next_actions_provided,
+            update.next_actions,
             update.refresh_actions,
             update.milestones,
         ]
@@ -1569,7 +1632,7 @@ def compact_values(values: list[str]) -> list[str]:
 
 def unresolved_gaps(update: StatusUpdate) -> list[str]:
     gaps = list(update.reported_gaps)
-    if not any([update.status, update.progress, update.blockers, update.risks, update.dependencies, update.next_actions, update.actions, update.milestones]):
+    if not has_wdr_delta(update) and not update.actions:
         gaps.append("status note contained no reliable volatile field update")
     if update.blockers and not update.next_actions:
         gaps.append("blockers were recorded without next actions")

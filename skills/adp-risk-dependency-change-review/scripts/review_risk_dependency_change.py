@@ -10,8 +10,11 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +42,15 @@ PLACEHOLDERS = {
 }
 
 MISSING_WORKSTREAM_GAP = "no workstream records found under ADP memory root"
+RISK_RELATION_UPDATE_SCHEMA_VERSION = "1.0.0"
+RISK_RELATION_RECEIPT_SCHEMA_VERSION = "1.0.0"
+RISK_RELATION_RECEIPT_ROOT = Path("receipts") / "risk-relations"
+RISK_SOURCE_FIELDS = {
+    "Project Status.blocker": ("Blockers", "blocker"),
+    "Project Status.risk": ("Risks", "risk"),
+    "Project Status.change": ("Scope or change notes", "change"),
+}
+DECISION_SOURCE_FIELDS = {"Decision / Question", "Project Status.decision/change"}
 
 
 @dataclass
@@ -62,6 +74,8 @@ class Workstream:
     impact_facts: list[str] = field(default_factory=list)
     l0_references: list[str] = field(default_factory=list)
     decision_rows: list[dict[str, str]] = field(default_factory=list)
+    decision_path: Path | None = None
+    decision_fingerprint: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,6 +101,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--packet-workstream", action="append", default=[], help="Affected workstream id. Repeatable.")
     parser.add_argument("--language", help="Override document_output_language for derived views.")
     parser.add_argument("--config-script", default=str(DEFAULT_CONFIG_SCRIPT), help="Shared ADP effective-config resolver.")
+    parser.add_argument("--relation-updates-file", help="Approved structured risk relation updates JSON.")
+    parser.add_argument("--apply-relations", action="store_true", help="Apply a previously previewed relation update plan.")
+    parser.add_argument("--verified-plan-token", help="Exact token returned by the unchanged relation preview.")
     parser.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
     return parser.parse_args()
 
@@ -135,6 +152,14 @@ def first_meaningful(*values: str) -> str:
         if is_meaningful(value):
             return value.strip()
     return "TBD"
+
+
+def sha256_bytes(content: bytes) -> str:
+    return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def clean_bullet(line: str) -> str:
@@ -275,6 +300,8 @@ def parse_workstream(record_path: Path) -> Workstream:
     decision_file = record_path.parent / "decisions.md"
     if decision_file.exists():
         workstream.decision_rows = parse_markdown_table(decision_file.read_text(encoding="utf-8").splitlines())
+        workstream.decision_path = decision_file
+        workstream.decision_fingerprint = sha256_bytes(decision_file.read_bytes())
     return workstream
 
 
@@ -343,8 +370,20 @@ def risk_entries(workstreams: list[Workstream], baseline_revision: int | None = 
                             row.get("escalation", ""),
                             extract_inline_field(decision, ["escalation", "upgrade", "升级"]),
                         ),
-                    }
-                entry.update(canonical_risk_fields(ws, "decision/change", decision, baseline_revision, memory_root))
+                }
+                entry.update(
+                    canonical_risk_fields(
+                        ws,
+                        "decision/change",
+                        decision,
+                        baseline_revision,
+                        memory_root,
+                        source_path=ws.decision_path,
+                        source_field="Decision / Question",
+                        artifact_id=f"WORKSTREAM-DECISIONS-{ws.workstream_id.upper()}",
+                        source_fingerprint=ws.decision_fingerprint,
+                    )
+                )
                 entries.append(entry)
     gaps.extend(risk_detail_gaps(entries))
     return entries, gaps
@@ -385,6 +424,11 @@ def canonical_risk_fields(
     description: str,
     baseline_revision: int | None,
     memory_root: Path | None,
+    *,
+    source_path: Path | None = None,
+    source_field: str | None = None,
+    artifact_id: str | None = None,
+    source_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     explicit_id = extract_inline_field(description, ["risk_id"])
     semantic_description = strip_inline_fields(
@@ -416,13 +460,14 @@ def canonical_risk_fields(
     revision = int(explicit_revision) if is_meaningful(explicit_revision) and explicit_revision.isdigit() else baseline_revision
     related_nodes = parse_related_ids(extract_inline_field(description, ["related_plan_item_ids"]))
     related_edges = parse_related_ids(extract_inline_field(description, ["related_flow_edge_ids"]))
-    source_path = ws.path.as_posix()
+    resolved_source_path = source_path or ws.path
+    contract_source_path = resolved_source_path.as_posix()
     if memory_root is not None:
         try:
-            source_path = ws.path.resolve().relative_to(memory_root.resolve()).as_posix()
+            contract_source_path = resolved_source_path.resolve().relative_to(memory_root.resolve()).as_posix()
         except ValueError:
             pass
-    source_fingerprint = "sha256:" + hashlib.sha256(ws.path.read_bytes()).hexdigest()
+    resolved_fingerprint = source_fingerprint or sha256_bytes(resolved_source_path.read_bytes())
     return {
         "risk_id": risk_id,
         "lifecycle": lifecycle,
@@ -435,10 +480,10 @@ def canonical_risk_fields(
         "rule_id": "RISK-" + relation_state.upper(),
         "sources": [
             {
-                "artifact_id": f"WDR-{ws.workstream_id.upper()}",
-                "artifact_path": source_path,
-                "field": f"Project Status.{entry_type}",
-                "source_fingerprint": source_fingerprint,
+                "artifact_id": artifact_id or f"WDR-{ws.workstream_id.upper()}",
+                "artifact_path": contract_source_path,
+                "field": source_field or f"Project Status.{entry_type}",
+                "source_fingerprint": resolved_fingerprint,
             }
         ],
     }
@@ -543,6 +588,530 @@ def make_dependency(ws: Workstream, relationship: str, target: str) -> dict[str,
         "owner": ws.owner,
         "status": "open",
         "next_action": ws.next_actions if is_meaningful(ws.next_actions) else "Confirm dependency owner and closure condition",
+    }
+
+
+def normalize_approved_at(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("approved_at is required")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("approved_at must be a timezone-aware ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("approved_at must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def stable_id_list(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", item):
+            raise ValueError(f"{label} contains invalid stable ID {item!r}")
+        if item in result:
+            raise ValueError(f"{label} contains duplicate stable ID {item!r}")
+        result.append(item)
+    return sorted(result)
+
+
+def require_exact_keys(value: dict[str, Any], allowed: set[str], required: set[str], label: str) -> None:
+    missing = sorted(required - value.keys())
+    extra = sorted(value.keys() - allowed)
+    if missing:
+        raise ValueError(f"{label} is missing required fields: {', '.join(missing)}")
+    if extra:
+        raise ValueError(f"{label} contains unsupported fields: {', '.join(extra)}")
+
+
+def safe_memory_path(memory_root: Path, raw_path: Any) -> tuple[Path, str]:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("source_artifact_path is required")
+    candidate = Path(raw_path.strip())
+    if candidate.is_absolute():
+        raise ValueError("source_artifact_path must be relative to the ADP memory root")
+    resolved = (memory_root / candidate).resolve()
+    try:
+        relative = resolved.relative_to(memory_root.resolve())
+    except ValueError as exc:
+        raise ValueError("source_artifact_path escapes the ADP memory root") from exc
+    if not resolved.is_file():
+        raise ValueError(f"source artifact does not exist: {relative.as_posix()}")
+    return resolved, relative.as_posix()
+
+
+def validate_relation_payload(
+    payload: Any,
+    memory_root: Path,
+    flow_graph: dict[str, Any],
+    risk_flow: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("relation updates file must contain a JSON object")
+    root_fields = {
+        "risk_relation_update_schema_version",
+        "_control",
+        "proposal_only",
+        "approval_status",
+        "approved_by",
+        "approved_at",
+        "flow_graph_id",
+        "baseline_revision",
+        "updates",
+    }
+    require_exact_keys(payload, root_fields, root_fields, "relation update payload")
+    if payload["risk_relation_update_schema_version"] != RISK_RELATION_UPDATE_SCHEMA_VERSION:
+        raise ValueError("unsupported risk_relation_update_schema_version")
+    control = payload["_control"]
+    if not isinstance(control, dict) or control.get("execute_allowed") is not True:
+        raise ValueError("relation update payload requires _control.execute_allowed=true")
+    if payload["proposal_only"] is not False:
+        raise ValueError("proposal_only must be false for an executable relation intake")
+    if payload["approval_status"] != "approved":
+        raise ValueError("approval_status must be approved")
+    approved_by = str(payload["approved_by"] or "").strip()
+    if not approved_by:
+        raise ValueError("approved_by is required")
+    approved_at = normalize_approved_at(payload["approved_at"])
+    if payload["flow_graph_id"] != flow_graph.get("flow_graph_id"):
+        raise ValueError("flow_graph_id does not match the current canonical graph")
+    current_revision = flow_graph.get("topology", {}).get("baseline_revision")
+    revision = payload["baseline_revision"]
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise ValueError("baseline_revision must be a positive integer")
+    if revision != current_revision:
+        raise ValueError("baseline_revision does not match the current canonical graph")
+    raw_updates = payload["updates"]
+    if not isinstance(raw_updates, list) or not raw_updates:
+        raise ValueError("updates must be a non-empty array")
+
+    node_ids = {str(item["node_id"]) for item in flow_graph["topology"]["nodes"]}
+    edge_ids = {str(item["edge_id"]) for item in flow_graph["topology"]["edges"]}
+    current_risks = {str(item["risk_id"]): item for item in risk_flow.get("risks", [])}
+    normalized_updates: list[dict[str, Any]] = []
+    seen_risks: set[str] = set()
+    update_fields = {
+        "risk_id",
+        "workstream_id",
+        "source_artifact_path",
+        "source_fingerprint",
+        "source_field",
+        "related_plan_item_ids",
+        "related_flow_edge_ids",
+    }
+    for index, raw_update in enumerate(raw_updates):
+        if not isinstance(raw_update, dict):
+            raise ValueError(f"updates[{index}] must be an object")
+        require_exact_keys(raw_update, update_fields, update_fields, f"updates[{index}]")
+        risk_id = str(raw_update["risk_id"] or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", risk_id):
+            raise ValueError(f"updates[{index}].risk_id is invalid")
+        if risk_id in seen_risks:
+            raise ValueError(f"duplicate risk update: {risk_id}")
+        seen_risks.add(risk_id)
+        current_risk = current_risks.get(risk_id)
+        if current_risk is None:
+            raise ValueError(f"risk_id is not present in current risk-flow: {risk_id}")
+        if current_risk.get("baseline_revision") != revision:
+            raise ValueError(f"risk {risk_id} baseline revision does not match the intake")
+        workstream_id = normalize_id(str(raw_update["workstream_id"] or ""))
+        if not workstream_id:
+            raise ValueError(f"updates[{index}].workstream_id is required")
+        source_path, source_relative = safe_memory_path(memory_root, raw_update["source_artifact_path"])
+        expected_parent = Path("workstreams") / workstream_id
+        if Path(source_relative).parent != expected_parent:
+            raise ValueError(f"risk {risk_id} source path does not match workstream_id")
+        source_field = str(raw_update["source_field"] or "").strip()
+        if source_field in RISK_SOURCE_FIELDS:
+            if source_path.name != "delivery-record.md":
+                raise ValueError(f"risk {risk_id} Project Status source must be delivery-record.md")
+        elif source_field in DECISION_SOURCE_FIELDS:
+            if source_path.name != "decisions.md":
+                raise ValueError(f"risk {risk_id} decision source must be decisions.md")
+        else:
+            raise ValueError(f"risk {risk_id} has unsupported source_field {source_field!r}")
+        fingerprint = str(raw_update["source_fingerprint"] or "").strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint):
+            raise ValueError(f"risk {risk_id} source_fingerprint is invalid")
+        if sha256_bytes(source_path.read_bytes()) != fingerprint:
+            raise ValueError(f"risk {risk_id} source fingerprint does not match current bytes")
+        related_nodes = stable_id_list(raw_update["related_plan_item_ids"], f"risk {risk_id} related_plan_item_ids")
+        related_edges = stable_id_list(raw_update["related_flow_edge_ids"], f"risk {risk_id} related_flow_edge_ids")
+        if not related_nodes and not related_edges:
+            raise ValueError(f"risk {risk_id} requires at least one explicit relation ID")
+        unknown_nodes = sorted(set(related_nodes) - node_ids)
+        unknown_edges = sorted(set(related_edges) - edge_ids)
+        if unknown_nodes:
+            raise ValueError(f"risk {risk_id} references unknown plan items: {', '.join(unknown_nodes)}")
+        if unknown_edges:
+            raise ValueError(f"risk {risk_id} references unknown flow edges: {', '.join(unknown_edges)}")
+        normalized_updates.append(
+            {
+                "risk_id": risk_id,
+                "workstream_id": workstream_id,
+                "source_artifact_path": source_relative,
+                "source_fingerprint": fingerprint,
+                "source_field": source_field,
+                "related_plan_item_ids": related_nodes,
+                "related_flow_edge_ids": related_edges,
+            }
+        )
+    return {
+        **payload,
+        "approved_by": approved_by,
+        "approved_at": approved_at,
+        "updates": sorted(normalized_updates, key=lambda item: item["risk_id"]),
+    }
+
+
+def relation_inline_text(update: dict[str, Any], baseline_revision_value: int, description: str) -> str:
+    semantic = strip_inline_fields(
+        description,
+        ["risk_id", "baseline_revision", "related_plan_item_ids", "related_flow_edge_ids"],
+    ).strip(" ;,|")
+    fields = [
+        semantic,
+        f"risk_id:{update['risk_id']}",
+        f"baseline_revision:{baseline_revision_value}",
+    ]
+    if update["related_plan_item_ids"]:
+        fields.append(f"related_plan_item_ids:{'+'.join(update['related_plan_item_ids'])}")
+    if update["related_flow_edge_ids"]:
+        fields.append(f"related_flow_edge_ids:{'+'.join(update['related_flow_edge_ids'])}")
+    return "; ".join(item for item in fields if item)
+
+
+def update_project_status_relation(
+    record_path: Path,
+    update: dict[str, Any],
+    baseline_revision_value: int,
+    memory_root: Path,
+) -> None:
+    field_label, entry_type = RISK_SOURCE_FIELDS[update["source_field"]]
+    workstream = parse_workstream(record_path)
+    lines = record_path.read_text(encoding="utf-8").splitlines()
+    start = next((index for index, line in enumerate(lines) if line.strip().lower() == "## project status"), None)
+    if start is None:
+        raise ValueError(f"risk {update['risk_id']} source has no Project Status section")
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")), len(lines))
+    pattern = re.compile(rf"^(\s*-\s*{re.escape(field_label)}\s*:\s*)(.*)$", re.IGNORECASE)
+    matches = [(index, pattern.match(lines[index])) for index in range(start + 1, end)]
+    matches = [(index, match) for index, match in matches if match]
+    if len(matches) != 1:
+        raise ValueError(f"risk {update['risk_id']} source field must occur exactly once")
+    index, match = matches[0]
+    assert match is not None
+    description = match.group(2).strip()
+    current = canonical_risk_fields(workstream, entry_type, description, baseline_revision_value, memory_root)
+    if current["risk_id"] != update["risk_id"]:
+        raise ValueError(f"risk {update['risk_id']} does not match the selected Project Status field")
+    lines[index] = match.group(1) + relation_inline_text(update, baseline_revision_value, description)
+    record_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8", newline="\n")
+
+
+def split_markdown_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    cells: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(stripped):
+        char = stripped[index]
+        if char == "\\" and index + 1 < len(stripped) and stripped[index + 1] == "|":
+            current.append("|")
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    cells.append("".join(current).strip())
+    return cells
+
+
+def markdown_table_cell(value: str) -> str:
+    return value.replace("\n", " ").replace("|", "\\|").strip()
+
+
+def update_decision_relation(
+    decision_path: Path,
+    record_path: Path,
+    update: dict[str, Any],
+    baseline_revision_value: int,
+    memory_root: Path,
+) -> None:
+    workstream = parse_workstream(record_path)
+    lines = decision_path.read_text(encoding="utf-8").splitlines()
+    header_index = None
+    headers: list[str] = []
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("|"):
+            continue
+        candidate = [cell.lower() for cell in split_markdown_row(line)]
+        if "decision / question" in candidate and "type" in candidate:
+            header_index = index
+            headers = candidate
+            break
+    if header_index is None:
+        raise ValueError(f"risk {update['risk_id']} decision source has no supported table")
+    decision_index = headers.index("decision / question")
+    type_index = headers.index("type")
+    matches: list[tuple[int, list[str]]] = []
+    for index in range(header_index + 1, len(lines)):
+        if not lines[index].strip().startswith("|"):
+            if matches or index > header_index + 2:
+                break
+            continue
+        cells = split_markdown_row(lines[index])
+        if len(cells) != len(headers) or all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in cells):
+            continue
+        row_type = cells[type_index].lower()
+        if not any(token in row_type for token in ["change", "scope", "risk acceptance", "business decision"]):
+            continue
+        description = cells[decision_index]
+        current = canonical_risk_fields(workstream, "decision/change", description, baseline_revision_value, memory_root)
+        if current["risk_id"] == update["risk_id"]:
+            matches.append((index, cells))
+    if len(matches) != 1:
+        raise ValueError(f"risk {update['risk_id']} must match exactly one decision row")
+    line_index, cells = matches[0]
+    cells[decision_index] = relation_inline_text(update, baseline_revision_value, cells[decision_index])
+    lines[line_index] = "| " + " | ".join(markdown_table_cell(cell) for cell in cells) + " |"
+    decision_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8", newline="\n")
+
+
+def apply_relation_to_staged_source(
+    staged_root: Path,
+    update: dict[str, Any],
+    baseline_revision_value: int,
+) -> None:
+    source_path = staged_root / update["source_artifact_path"]
+    record_path = staged_root / "workstreams" / update["workstream_id"] / "delivery-record.md"
+    if update["source_field"] in RISK_SOURCE_FIELDS:
+        update_project_status_relation(source_path, update, baseline_revision_value, staged_root)
+    else:
+        update_decision_relation(source_path, record_path, update, baseline_revision_value, staged_root)
+
+
+def changed_staged_files(memory_root: Path, staged_root: Path) -> list[Path]:
+    changed: list[Path] = []
+    for staged_path in sorted(path for path in staged_root.rglob("*") if path.is_file()):
+        relative = staged_path.relative_to(staged_root)
+        canonical_path = memory_root / relative
+        if not canonical_path.is_file() or canonical_path.read_bytes() != staged_path.read_bytes():
+            changed.append(relative)
+    return changed
+
+
+def write_temp_bytes(path: Path, content: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(raw_temp)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
+def publish_staged_files(memory_root: Path, staged_root: Path, relatives: list[Path]) -> None:
+    originals = {
+        relative: (memory_root / relative).read_bytes() if (memory_root / relative).is_file() else None
+        for relative in relatives
+    }
+    prepared: dict[Path, Path] = {}
+    committed: list[Path] = []
+    try:
+        for relative in relatives:
+            prepared[relative] = write_temp_bytes(memory_root / relative, (staged_root / relative).read_bytes())
+        for relative in relatives:
+            os.replace(prepared[relative], memory_root / relative)
+            committed.append(relative)
+    except BaseException:
+        for relative in reversed(committed):
+            canonical_path = memory_root / relative
+            original = originals[relative]
+            if original is None:
+                canonical_path.unlink(missing_ok=True)
+            else:
+                restore_temp = write_temp_bytes(canonical_path, original)
+                os.replace(restore_temp, canonical_path)
+        raise
+    finally:
+        for temp_path in prepared.values():
+            temp_path.unlink(missing_ok=True)
+
+
+def relation_change_manifest(memory_root: Path, staged_root: Path, relatives: list[Path]) -> list[dict[str, Any]]:
+    return [
+        {
+            "artifact_path": relative.as_posix(),
+            "before_fingerprint": sha256_bytes((memory_root / relative).read_bytes()) if (memory_root / relative).is_file() else None,
+            "after_fingerprint": sha256_bytes((staged_root / relative).read_bytes()),
+        }
+        for relative in relatives
+    ]
+
+
+def relation_receipt_id(input_hash: str, flow_graph_id: str) -> str:
+    digest = hashlib.sha256(f"{input_hash}\n{flow_graph_id}".encode("utf-8")).hexdigest()[:32]
+    return f"rrr-{digest}"
+
+
+def run_relation_updates(
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+    message,
+    language: dict[str, Any],
+) -> dict[str, Any]:
+    if args.dry_run and args.apply_relations:
+        raise ValueError("--dry-run cannot be combined with --apply-relations")
+    input_path = Path(args.relation_updates_file).expanduser().resolve()
+    if not input_path.is_file():
+        raise ValueError("relation-updates-file is not an existing file")
+    input_bytes = input_path.read_bytes()
+    input_hash = sha256_bytes(input_bytes)
+    try:
+        raw_payload = json.loads(input_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("relation-updates-file must contain valid UTF-8 JSON") from exc
+    flow_path = memory_root / "views/flow-graph.json"
+    risk_flow_path = memory_root / "views/risk-flow.json"
+    if not flow_path.is_file() or not risk_flow_path.is_file():
+        raise ValueError("current flow-graph.json and risk-flow.json are required")
+    flow_graph = json.loads(flow_path.read_text(encoding="utf-8"))
+    current_risk_flow = json.loads(risk_flow_path.read_text(encoding="utf-8"))
+    raw_flow_graph_id = raw_payload.get("flow_graph_id") if isinstance(raw_payload, dict) else None
+    receipt_id = relation_receipt_id(input_hash, str(raw_flow_graph_id))
+    receipt_relative = RISK_RELATION_RECEIPT_ROOT / f"{receipt_id}.json"
+    receipt_path = memory_root / receipt_relative
+    if receipt_path.is_file():
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if raw_flow_graph_id != flow_graph.get("flow_graph_id"):
+            raise ValueError("existing receipt belongs to a non-current flow graph; create a new relation intake")
+        if (
+            receipt.get("input_path") != str(input_path)
+            or receipt.get("input_hash") != input_hash
+            or receipt.get("flow_graph_id") != raw_flow_graph_id
+        ):
+            raise ValueError(f"existing receipt binding conflicts at {receipt_path}")
+        return {
+            "ok": True,
+            "mode": "risk-relation-update",
+            "status": "already-applied",
+            "dry_run": False,
+            "input_path": str(input_path),
+            "input_hash": input_hash,
+            "receipt": receipt,
+            "receipt_path": str(receipt_path),
+        }
+    payload = validate_relation_payload(raw_payload, memory_root, flow_graph, current_risk_flow)
+
+    with tempfile.TemporaryDirectory(prefix=".risk-relations-", dir=memory_root.parent) as temp_dir:
+        staged_root = Path(temp_dir) / "memory"
+        shutil.copytree(memory_root, staged_root)
+        for update in payload["updates"]:
+            apply_relation_to_staged_source(staged_root, update, payload["baseline_revision"])
+
+        records, missing = discover_records(staged_root, [])
+        if missing:
+            raise ValueError(f"staged relation update has missing workstreams: {', '.join(missing)}")
+        workstreams = [parse_workstream(path) for path in records]
+        risks, gaps = risk_entries(workstreams, payload["baseline_revision"], staged_root)
+        dependencies = dependency_entries(workstreams)
+        staged_risk_path = staged_root / "views/risk-matrix.md"
+        staged_dependency_path = staged_root / "views/dependency-map.md"
+        staged_risk_flow_path = staged_root / "views/risk-flow.json"
+        write_text(staged_risk_path, render_risk_matrix(risks, gaps, payload["approved_at"], message), False)
+        write_text(staged_dependency_path, render_dependency_map(dependencies, payload["approved_at"], message), False)
+        staged_contract = risk_flow_contract(risks)
+        write_text(
+            staged_risk_flow_path,
+            json.dumps(staged_contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            False,
+        )
+        staged_risks = {item["risk_id"]: item for item in staged_contract["risks"]}
+        for update in payload["updates"]:
+            staged_risk = staged_risks.get(update["risk_id"])
+            if staged_risk is None:
+                raise ValueError(f"risk {update['risk_id']} disappeared after staged regeneration")
+            if staged_risk["related_plan_item_ids"] != update["related_plan_item_ids"]:
+                raise ValueError(f"risk {update['risk_id']} staged plan-item relations do not match")
+            if staged_risk["related_flow_edge_ids"] != update["related_flow_edge_ids"]:
+                raise ValueError(f"risk {update['risk_id']} staged flow-edge relations do not match")
+            if staged_risk["baseline_revision"] != payload["baseline_revision"]:
+                raise ValueError(f"risk {update['risk_id']} staged baseline revision does not match")
+
+        changed = changed_staged_files(memory_root, staged_root)
+        changes = relation_change_manifest(memory_root, staged_root, changed)
+        token_seed = {
+            "input_path": str(input_path),
+            "input_hash": input_hash,
+            "flow_graph_id": payload["flow_graph_id"],
+            "baseline_revision": payload["baseline_revision"],
+            "approved_by": payload["approved_by"],
+            "approved_at": payload["approved_at"],
+            "updates": payload["updates"],
+            "changes": changes,
+        }
+        plan_token = "sha256:" + hashlib.sha256(canonical_json_bytes(token_seed)).hexdigest()
+        if args.apply_relations:
+            if args.verified_plan_token != plan_token:
+                raise ValueError("verified plan token is missing or does not match the current relation preview")
+            applied_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            receipt = {
+                "risk_relation_receipt_schema_version": RISK_RELATION_RECEIPT_SCHEMA_VERSION,
+                "receipt_id": receipt_id,
+                "status": "applied",
+                "input_path": str(input_path),
+                "input_hash": input_hash,
+                "verified_plan_token": plan_token,
+                "flow_graph_id": payload["flow_graph_id"],
+                "baseline_revision": payload["baseline_revision"],
+                "approved_by": payload["approved_by"],
+                "approved_at": payload["approved_at"],
+                "applied_at": applied_at,
+                "risk_ids": [item["risk_id"] for item in payload["updates"]],
+                "changes": changes,
+            }
+            staged_receipt = staged_root / receipt_relative
+            write_text(staged_receipt, json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n", False)
+            publish_staged_files(memory_root, staged_root, [*changed, receipt_relative])
+            status = "applied"
+        else:
+            receipt = None
+            status = "preview"
+    return {
+        "ok": True,
+        "mode": "risk-relation-update",
+        "status": status,
+        "dry_run": status == "preview",
+        "apply_authorized": status == "applied",
+        "project_root": str(project_root),
+        "memory_root": str(memory_root),
+        "input_path": str(input_path),
+        "input_hash": input_hash,
+        "flow_graph_id": payload["flow_graph_id"],
+        "baseline_revision": payload["baseline_revision"],
+        "risk_ids": [item["risk_id"] for item in payload["updates"]],
+        "verified_plan_token": plan_token,
+        "changes": changes,
+        "receipt": receipt,
+        "receipt_path": str(receipt_path) if status == "applied" else None,
+        "recommended_workflows": ["adp-flow-graph", "adp-state-audit", "adp-meeting-pack", "adp-management-panel"],
+        "language": language,
     }
 
 
@@ -711,6 +1280,41 @@ def main() -> int:
 
     def message(key: str) -> str:
         return config_module.message(key, locale)
+
+    if args.relation_updates_file:
+        incompatible = any(
+            [
+                args.workstream,
+                args.packet_title,
+                args.packet_question,
+                args.packet_background,
+                args.packet_option,
+                args.packet_impact,
+                args.packet_recommendation,
+                args.packet_deadline,
+                args.packet_owner,
+                args.packet_workstream,
+            ]
+        )
+        if incompatible:
+            emit({"ok": False, "error": "relation update mode cannot be combined with review selection or packet fields"}, args.output)
+            return 2
+        try:
+            result = run_relation_updates(
+                args,
+                project_root,
+                memory_root,
+                message,
+                language_metadata(config, locale),
+            )
+        except Exception as exc:
+            emit({"ok": False, "mode": "risk-relation-update", "error": str(exc)}, args.output)
+            return 2
+        emit(result, args.output)
+        return 0
+    if args.apply_relations or args.verified_plan_token:
+        emit({"ok": False, "error": "--apply-relations and --verified-plan-token require --relation-updates-file"}, args.output)
+        return 2
 
     records, missing = discover_records(memory_root, args.workstream)
     workstreams = [parse_workstream(path) for path in records]

@@ -6,16 +6,23 @@ from panel_contract_testkit import SKILL_ROOT
 
 
 class PanelContractDeliveryBoundaryTests(unittest.TestCase):
-    def test_skill_routes_canonical_inputs_and_phase7_operations(self) -> None:
+    def test_skill_keeps_runtime_boundary_and_exact_operations(self) -> None:
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertNotIn("ADP-PANEL-RENDERER-NOT-IMPLEMENTED", skill)
-        for operation in ("refresh", "inspect", "archive"):
-            self.assertIn(operation, skill)
-        self.assertIn("adp-program-status", skill)
-        self.assertIn("adp-roadmap-sync", skill)
-        self.assertIn("adp-flow-graph", skill)
-        self.assertIn("adp-meeting-pack", skill)
-        self.assertIn("copy`, `allowlist`, `stable-sort`, `select`, or `redact", skill)
+        for command in (
+            "refresh --memory-root {memory-root} --selection-policy <path>",
+            "inspect --memory-root {memory-root}",
+            "archive --memory-root {memory-root} --selection-policy <path> --distribution-profile",
+        ):
+            self.assertIn(command, skill)
+        self.assertIn("Use only audited canonical inputs", skill)
+        self.assertIn("selection policy supplied by the owning workflow or user", skill)
+        self.assertIn("Do not bypass a blocked result or modify immutable artifacts", skill)
+        self.assertIn("only when changing or diagnosing", skill)
+        self.assertIn("Python >=3.10", skill)
+        self.assertIn("Return the JSON emitted by `management_panel.py` unchanged", skill)
+        self.assertEqual(1, skill.count("references/panel-model-contract-v1.md"))
+        self.assertNotIn("copy`, `allowlist`, `stable-sort`, `select`, or `redact", skill)
 
     def test_phase7_renderer_frontend_and_fixed_elk_asset_exist(self) -> None:
         for relative in (

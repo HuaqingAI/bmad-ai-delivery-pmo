@@ -11,7 +11,17 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "program_status.py"
 AUDIT_SCRIPT = Path(__file__).resolve().parents[3] / "adp-state-audit/scripts/audit_state.py"
-MEMLOG_HELPER = Path(__file__).resolve().parents[4] / "_bmad/scripts/memlog.py"
+
+
+def find_memlog_helper() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "_bmad/scripts/memlog.py"
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("could not locate _bmad/scripts/memlog.py from the installed test layout")
+
+
+MEMLOG_HELPER = find_memlog_helper()
 sys.path.insert(0, str(SCRIPT.parent))
 import program_status  # noqa: E402
 try:
@@ -975,7 +985,12 @@ class ProgramStatusTests(unittest.TestCase):
             self.assertIn("(decision)", memlog_text)
 
             helper.unlink()
-            self.assertIsNone(program_status.memlog_helper(root))
+            expected_fallback = (
+                program_status.DEFAULT_MEMLOG_SCRIPT.resolve()
+                if program_status.DEFAULT_MEMLOG_SCRIPT.is_file()
+                else None
+            )
+            self.assertEqual(program_status.memlog_helper(root), expected_fallback)
             inspect_memlog = root / "inspect.memlog.md"
             inspected = self.run_script(
                 root,

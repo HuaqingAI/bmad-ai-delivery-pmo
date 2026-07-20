@@ -1609,6 +1609,35 @@ class AdpStateAuditTests(unittest.TestCase):
             intake.write_text(json.dumps({**payload, "tampered": True}) + "\n", encoding="utf-8")
             self.assertFalse(SUCCESSFUL_RECEIPT_PAYLOAD(valid, intake, {**payload, "tampered": True}))
 
+    def test_successful_receipt_accepts_cross_platform_memory_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir) / "project/_bmad-output/adp/memory"
+            intake = memory_root / "intake/status-sync/pending-actions.json"
+            intake.parent.mkdir(parents=True)
+            payload = {"status": "pending", "updates": [{"id": "l1-checkout"}]}
+            intake.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            portable_path = (
+                r"D:\portable\project\_bmad-output\adp\memory\intake\status-sync\pending-actions.json"
+            )
+            receipt = {
+                "receipt_schema_version": 1,
+                "receipt_type": "execution",
+                "execution_id": "ssr-portable",
+                "ok": True,
+                "status": "applied",
+                "durable": True,
+                "dry_run": False,
+                "input_path": portable_path,
+                "input_hash": f"sha256:{hashlib.sha256(intake.read_bytes()).hexdigest()}",
+                "applied_at": "2026-07-10T10:00:00Z",
+                "mode": "update",
+                "update_count": 1,
+            }
+
+            self.assertTrue(SUCCESSFUL_RECEIPT_PAYLOAD(receipt, intake, payload))
+            receipt["input_path"] = portable_path.replace("status-sync", "other")
+            self.assertFalse(SUCCESSFUL_RECEIPT_PAYLOAD(receipt, intake, payload))
+
     def test_pending_canonical_intake_is_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)

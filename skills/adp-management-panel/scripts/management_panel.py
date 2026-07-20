@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,15 @@ VIEW_IDS = ("project-lead", "fde-morning", "business-biweekly")
 PROFILE_IDS = ("internal-full", "shareable-summary")
 MEETING_LIFECYCLES = {"current-derived", "pre-meeting-snapshot", "post-sync-official", "sync-failed"}
 SELECTION_POLICY_VERSION = "1.0.0"
+GENERIC_RECOVERY_WORKFLOWS = ("adp-state-audit", "adp-management-panel")
+PROGRAM_STATUS_RECOVERY = ("adp-state-audit", "adp-program-status")
+ROADMAP_RECOVERY = ("adp-roadmap-sync",)
+AUDITED_ROADMAP_RECOVERY = ("adp-state-audit", "adp-roadmap-sync")
+FLOW_GRAPH_RECOVERY = ("adp-flow-graph",)
+MEETING_PACK_RECOVERY = ("adp-meeting-pack",)
+AUDITED_MEETING_PACK_RECOVERY = ("adp-state-audit", "adp-meeting-pack")
+HISTORY_RECOVERY = ("adp-program-status",)
+SELECTION_POLICY_RECOVERY = ("adp-management-panel",)
 SHAREABLE_REMOVED_FIELDS = (
     "allocations",
     "counts",
@@ -59,6 +69,26 @@ SHAREABLE_REMOVED_FIELDS = (
 
 class PanelError(RuntimeError):
     """A deterministic panel contract or publication failure."""
+
+    def __init__(
+        self,
+        message: str,
+        recommended_workflows: tuple[str, ...] | list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.recommended_workflows = tuple(recommended_workflows) if recommended_workflows else None
+
+
+@contextmanager
+def recovery_route(*recommended_workflows: str):
+    """Attach recovery ownership without replacing a more specific route."""
+
+    try:
+        yield
+    except (PanelError, ValueError, KeyError, OSError, json.JSONDecodeError) as exc:
+        if isinstance(exc, PanelError) and exc.recommended_workflows:
+            raise
+        raise PanelError(str(exc), recommended_workflows) from exc
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -421,27 +451,40 @@ def load_memory_inputs(
     roadmap_path = memory_root / "views/roadmap.json"
     graph_path = memory_root / "views/flow-graph.json"
     packs_root = memory_root / "views/meeting-packs"
-    status, status_audit_path = attach_artifact_audit(
-        memory_root, status_path, load_json(status_path), "program-status"
-    )
-    roadmap, roadmap_audit_path = attach_artifact_audit(
-        memory_root, roadmap_path, load_json(roadmap_path), "roadmap"
-    )
-    graph = load_json(graph_path)
-    resolved_packs = {
-        scenario: resolve_current_meeting_pack(packs_root, scenario)
-        for scenario in ("fde-morning", "business-biweekly")
-    }
+    with recovery_route(*PROGRAM_STATUS_RECOVERY):
+        status = load_json(status_path)
+        status, status_audit_path = attach_artifact_audit(
+            memory_root, status_path, status, "program-status"
+        )
+    with recovery_route(*ROADMAP_RECOVERY):
+        roadmap = load_json(roadmap_path)
+    with recovery_route(*AUDITED_ROADMAP_RECOVERY):
+        roadmap, roadmap_audit_path = attach_artifact_audit(
+            memory_root, roadmap_path, roadmap, "roadmap"
+        )
+    with recovery_route(*FLOW_GRAPH_RECOVERY):
+        graph = load_json(graph_path)
+    with recovery_route(*MEETING_PACK_RECOVERY):
+        resolved_packs = {
+            scenario: resolve_current_meeting_pack(packs_root, scenario)
+            for scenario in ("fde-morning", "business-biweekly")
+        }
     pack_paths = {scenario: resolved[0] for scenario, resolved in resolved_packs.items()}
     pack_audits: dict[str, Path] = {}
     packs: dict[str, dict[str, Any]] = {}
     for scenario, path in pack_paths.items():
-        attached, pack_audits[scenario] = attach_artifact_audit(
-            memory_root, path, resolved_packs[scenario][1], f"{scenario}-meeting-pack"
+        with recovery_route(*AUDITED_MEETING_PACK_RECOVERY):
+            attached, pack_audits[scenario] = attach_artifact_audit(
+                memory_root, path, resolved_packs[scenario][1], f"{scenario}-meeting-pack"
+            )
+        with recovery_route(*MEETING_PACK_RECOVERY):
+            packs[scenario] = enrich_pack(attached, memory_root)
+    with recovery_route(*HISTORY_RECOVERY):
+        history_by_id, history_paths_by_id = history_snapshot_index(
+            memory_root, status["snapshot_id"]
         )
-        packs[scenario] = enrich_pack(attached, memory_root)
-    history_by_id, history_paths_by_id = history_snapshot_index(memory_root, status["snapshot_id"])
-    selection = validate_selection_policy(graph, policy, set(history_by_id))
+    with recovery_route(*SELECTION_POLICY_RECOVERY):
+        selection = validate_selection_policy(graph, policy, set(history_by_id))
     history_ids = selection["history_snapshot_ids"]
     inputs = {
         "program_status": status,
@@ -611,17 +654,22 @@ def load_inputs(args: argparse.Namespace, resource: dict[str, Any], profile: str
         selection = embedded_selection_policy(inputs)
     elif args.input_bundle:
         input_path = Path(args.input_bundle).expanduser().resolve()
-        inputs = load_json(input_path)
-        inputs["_panel_source_paths"] = {"input-bundle": str(input_path)}
-        selection = embedded_selection_policy(inputs)
+        with recovery_route(*SELECTION_POLICY_RECOVERY):
+            inputs = load_json(input_path)
+            inputs["_panel_source_paths"] = {"input-bundle": str(input_path)}
+            selection = embedded_selection_policy(inputs)
     else:
         if not args.selection_policy:
-            raise PanelError("canonical-memory compose requires --selection-policy")
+            raise PanelError(
+                "canonical-memory compose requires --selection-policy",
+                SELECTION_POLICY_RECOVERY,
+            )
         policy_path = Path(args.selection_policy).expanduser()
         if not policy_path.is_absolute():
             policy_path = Path(args.project_root).expanduser().resolve() / policy_path
         policy_path = policy_path.resolve()
-        policy = load_json(policy_path)
+        with recovery_route(*SELECTION_POLICY_RECOVERY):
+            policy = load_json(policy_path)
         inputs, selection = load_memory_inputs(memory_root, policy)
         inputs["_panel_source_paths"]["panel-selection-policy"] = str(policy_path)
     inputs = copy.deepcopy(inputs)
@@ -638,12 +686,22 @@ def run_input_audit_gate(
     try:
         audit_date = datetime.fromisoformat(str(status_as_of)).date()
     except ValueError as exc:
-        raise PanelError("program-status as_of is invalid before panel audit") from exc
-    audit = module.audit_panel_inputs(inputs, as_of=audit_date, max_age_days=getattr(args, "max_age_days", 7))
+        raise PanelError(
+            "program-status as_of is invalid before panel audit",
+            PROGRAM_STATUS_RECOVERY,
+        ) from exc
+    audit = module.audit_panel_inputs(
+        inputs,
+        as_of=audit_date,
+        max_age_days=getattr(args, "max_age_days", 7),
+    )
     audit_path = module.write_audit_record(audit, memory_root / "audits/management-panel")
     if audit["execution_disposition"] == "blocked":
         codes = [item["code"] for item in audit["blocking_gaps"]]
-        raise PanelError("panel pre-render audit blocked: " + ", ".join(codes))
+        raise PanelError(
+            "panel pre-render audit blocked: " + ", ".join(codes),
+            audit["recommended_workflows"],
+        )
     request = inputs["request"]
     request["panel_input_audit_id"] = audit["panel_input_audit_id"]
     request["panel_input_audit_disposition"] = audit["execution_disposition"]
@@ -1028,12 +1086,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run(args)
     except (PanelError, ValueError, KeyError, OSError, json.JSONDecodeError) as exc:
+        recommended_workflows = (
+            getattr(exc, "recommended_workflows", None) or GENERIC_RECOVERY_WORKFLOWS
+        )
         result = {
             "ok": False,
             "status": "blocked",
             "operation": args.operation,
             "reason": str(exc),
-            "recommended_workflows": ["adp-state-audit", "adp-management-panel"],
+            "recommended_workflows": list(recommended_workflows),
         }
     emit(result, args.output)
     return 0 if result.get("ok") else 1

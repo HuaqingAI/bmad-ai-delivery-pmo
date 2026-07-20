@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -6,7 +7,9 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -624,11 +627,102 @@ class ManagementPanelTests(unittest.TestCase):
             bundle_path = root / "inputs.json"
             bundle_path.write_text(json.dumps(inputs), encoding="utf-8")
             args = self.args(root, fixture=False, input_bundle=str(bundle_path))
-            with self.assertRaises(management_panel.PanelError):
+            with self.assertRaises(management_panel.PanelError) as caught:
                 management_panel.run(args)
+            self.assertEqual(
+                ("adp-program-status", "adp-roadmap-sync", "adp-meeting-pack"),
+                caught.exception.recommended_workflows,
+            )
             self.assertFalse((root / "memory/snapshots/management-panel").exists())
             self.assertFalse((root / "memory/views/management-panel").exists())
             self.assertTrue(any((root / "memory/audits/management-panel").glob("panel-input-audit-*.json")))
+
+    def test_precompose_failures_route_to_owning_producers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            memory_root = Path(folder)
+            views = memory_root / "views"
+            views.mkdir()
+            audit_path = memory_root / "audits/source.json"
+
+            with self.assertRaises(management_panel.PanelError) as caught:
+                management_panel.load_memory_inputs(memory_root, {})
+            self.assertEqual(
+                management_panel.PROGRAM_STATUS_RECOVERY,
+                caught.exception.recommended_workflows,
+            )
+            policy_path = memory_root / "panel-policy.json"
+            policy_path.write_text("{}", encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = management_panel.main(
+                    [
+                        folder,
+                        "refresh",
+                        "--memory-root",
+                        folder,
+                        "--selection-policy",
+                        str(policy_path),
+                    ]
+                )
+            result = json.loads(output.getvalue())
+            self.assertEqual(1, exit_code)
+            self.assertEqual(
+                ["adp-state-audit", "adp-program-status"],
+                result["recommended_workflows"],
+            )
+            self.assertFalse((memory_root / "snapshots/management-panel").exists())
+            self.assertFalse((views / "management-panel").exists())
+
+            (views / "program-status.json").write_text("{}", encoding="utf-8")
+            status = {"snapshot_id": "ps-current"}
+            with patch.object(management_panel, "attach_artifact_audit", return_value=(status, audit_path)):
+                with self.assertRaises(management_panel.PanelError) as caught:
+                    management_panel.load_memory_inputs(memory_root, {})
+            self.assertEqual(management_panel.ROADMAP_RECOVERY, caught.exception.recommended_workflows)
+
+            (views / "roadmap.json").write_text("{}", encoding="utf-8")
+            with patch.object(
+                management_panel,
+                "attach_artifact_audit",
+                side_effect=[(status, audit_path), ({}, audit_path)],
+            ):
+                with self.assertRaises(management_panel.PanelError) as caught:
+                    management_panel.load_memory_inputs(memory_root, {})
+            self.assertEqual(management_panel.FLOW_GRAPH_RECOVERY, caught.exception.recommended_workflows)
+
+            (views / "flow-graph.json").write_text("{}", encoding="utf-8")
+            with patch.object(
+                management_panel,
+                "attach_artifact_audit",
+                side_effect=[(status, audit_path), ({}, audit_path)],
+            ):
+                with self.assertRaises(management_panel.PanelError) as caught:
+                    management_panel.load_memory_inputs(memory_root, {})
+            self.assertEqual(management_panel.MEETING_PACK_RECOVERY, caught.exception.recommended_workflows)
+
+    def test_main_defaults_unclassified_failures_to_generic_recovery(self):
+        error = OSError("unexpected filesystem failure")
+        output = io.StringIO()
+        with patch.object(management_panel, "run", side_effect=error), redirect_stdout(output):
+            exit_code = management_panel.main(["/project", "refresh"])
+        result = json.loads(output.getvalue())
+        self.assertEqual(1, exit_code)
+        self.assertEqual(str(error), result["reason"])
+        self.assertEqual(
+            ["adp-state-audit", "adp-management-panel"],
+            result["recommended_workflows"],
+        )
+
+    def test_missing_selection_policy_routes_to_panel_caller_boundary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            args = self.args(root, fixture=False, selection_policy=None)
+            with self.assertRaises(management_panel.PanelError) as caught:
+                management_panel.load_inputs(args, {}, "internal-full", root / "memory")
+            self.assertEqual(
+                management_panel.SELECTION_POLICY_RECOVERY,
+                caught.exception.recommended_workflows,
+            )
 
     def test_malicious_source_text_is_inert_in_html_and_svg_contract(self):
         with tempfile.TemporaryDirectory() as folder:

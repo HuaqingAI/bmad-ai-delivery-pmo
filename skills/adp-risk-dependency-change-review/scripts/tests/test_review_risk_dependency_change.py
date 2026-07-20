@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -16,6 +17,130 @@ RISK_SCHEMA = Path(__file__).resolve().parents[2] / "assets/risk-flow-relation-v
 
 
 class ReviewRiskDependencyChangeTests(unittest.TestCase):
+    def test_relation_writer_previews_then_atomically_applies_wdr_relation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            make_relation_context(project, memory)
+            risk_flow = json.loads((memory / "views/risk-flow.json").read_text(encoding="utf-8"))
+            risk = next(item for item in risk_flow["risks"] if item["sources"][0]["field"] == "Project Status.risk")
+            record = memory / "workstreams/alpha/delivery-record.md"
+            before = record.read_bytes()
+            updates_path = project / "approved-risk-relations.json"
+            write_relation_updates(
+                updates_path,
+                risk_id=risk["risk_id"],
+                source_path="workstreams/alpha/delivery-record.md",
+                source_fingerprint=fingerprint(record),
+                source_field="Project Status.risk",
+            )
+
+            preview = run_script(project, "--relation-updates-file", str(updates_path))
+
+            self.assertEqual(preview["status"], "preview")
+            self.assertTrue(preview["dry_run"])
+            self.assertEqual(record.read_bytes(), before)
+            self.assertIsNone(preview["receipt_path"])
+            rejected = run_script_failure(
+                project,
+                "--relation-updates-file",
+                str(updates_path),
+                "--apply-relations",
+            )
+            self.assertIn("verified plan token", rejected["error"])
+            self.assertEqual(record.read_bytes(), before)
+
+            applied = run_script(
+                project,
+                "--relation-updates-file",
+                str(updates_path),
+                "--apply-relations",
+                "--verified-plan-token",
+                preview["verified_plan_token"],
+            )
+
+            self.assertEqual(applied["status"], "applied")
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            record_text = record.read_text(encoding="utf-8")
+            self.assertIn(f"risk_id:{risk['risk_id']}", record_text)
+            self.assertIn("baseline_revision:2", record_text)
+            self.assertIn("related_plan_item_ids:MS-PAYMENT", record_text)
+            updated_flow = json.loads((memory / "views/risk-flow.json").read_text(encoding="utf-8"))
+            updated_risk = next(item for item in updated_flow["risks"] if item["risk_id"] == risk["risk_id"])
+            self.assertEqual(updated_risk["related_plan_item_ids"], ["MS-PAYMENT"])
+            self.assertEqual(updated_risk["related_flow_edge_ids"], [])
+            repeated = run_script(project, "--relation-updates-file", str(updates_path))
+            self.assertEqual(repeated["status"], "already-applied")
+
+    def test_relation_writer_updates_decision_row_and_uses_decision_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            make_relation_context(project, memory)
+            risk_flow = json.loads((memory / "views/risk-flow.json").read_text(encoding="utf-8"))
+            risk = next(item for item in risk_flow["risks"] if item["sources"][0]["field"] == "Decision / Question")
+            decision_path = memory / "workstreams/alpha/decisions.md"
+            self.assertEqual(risk["sources"][0]["artifact_path"], "workstreams/alpha/decisions.md")
+            self.assertEqual(risk["sources"][0]["source_fingerprint"], fingerprint(decision_path))
+            updates_path = project / "approved-decision-risk-relations.json"
+            write_relation_updates(
+                updates_path,
+                risk_id=risk["risk_id"],
+                source_path="workstreams/alpha/decisions.md",
+                source_fingerprint=fingerprint(decision_path),
+                source_field="Decision / Question",
+            )
+
+            preview = run_script(project, "--relation-updates-file", str(updates_path))
+            applied = run_script(
+                project,
+                "--relation-updates-file",
+                str(updates_path),
+                "--apply-relations",
+                "--verified-plan-token",
+                preview["verified_plan_token"],
+            )
+
+            self.assertEqual(applied["status"], "applied")
+            self.assertIn(f"risk_id:{risk['risk_id']}", decision_path.read_text(encoding="utf-8"))
+            updated_flow = json.loads((memory / "views/risk-flow.json").read_text(encoding="utf-8"))
+            updated_risk = next(item for item in updated_flow["risks"] if item["risk_id"] == risk["risk_id"])
+            self.assertEqual(updated_risk["related_plan_item_ids"], ["MS-PAYMENT"])
+            self.assertEqual(updated_risk["sources"][0]["artifact_path"], "workstreams/alpha/decisions.md")
+            self.assertEqual(updated_risk["sources"][0]["field"], "Decision / Question")
+
+    def test_relation_writer_rejects_unapproved_unknown_and_stale_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            make_relation_context(project, memory)
+            risk_flow = json.loads((memory / "views/risk-flow.json").read_text(encoding="utf-8"))
+            risk = next(item for item in risk_flow["risks"] if item["sources"][0]["field"] == "Project Status.risk")
+            record = memory / "workstreams/alpha/delivery-record.md"
+            updates_path = project / "invalid-risk-relations.json"
+            payload = relation_update_payload(
+                risk_id=risk["risk_id"],
+                source_path="workstreams/alpha/delivery-record.md",
+                source_fingerprint=fingerprint(record),
+                source_field="Project Status.risk",
+            )
+            payload["approval_status"] = "pending"
+            updates_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertIn("approval_status must be approved", run_script_failure(project, "--relation-updates-file", str(updates_path))["error"])
+
+            payload["approval_status"] = "approved"
+            payload["updates"][0]["related_plan_item_ids"] = ["UNKNOWN"]
+            updates_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertIn("unknown plan items", run_script_failure(project, "--relation-updates-file", str(updates_path))["error"])
+
+            payload["updates"][0]["related_plan_item_ids"] = ["MS-PAYMENT"]
+            payload["updates"][0]["source_fingerprint"] = "sha256:" + "f" * 64
+            updates_path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertIn("source fingerprint", run_script_failure(project, "--relation-updates-file", str(updates_path))["error"])
+
     def test_risk_flow_contract_has_stable_identity_lifecycle_and_relations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -207,6 +332,19 @@ def run_script(project: Path, *extra: str) -> dict:
     return json.loads(proc.stdout)
 
 
+def run_script_failure(project: Path, *extra: str) -> dict:
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(project), *extra],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if proc.returncode == 0:
+        raise AssertionError(f"command unexpectedly succeeded: {proc.stdout}")
+    return json.loads(proc.stdout)
+
+
 def make_memory(project: Path) -> Path:
     memory = project / "_bmad-output" / "adp" / "memory"
     (memory / "workstreams").mkdir(parents=True)
@@ -266,6 +404,65 @@ L0 references:
         encoding="utf-8",
         newline="\n",
     )
+
+
+def fingerprint(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def make_relation_context(project: Path, memory: Path) -> None:
+    baseline = memory / "plans/program-baseline.md"
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(
+        "# Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+        + json.dumps({"revision": 2})
+        + "\n```\n",
+        encoding="utf-8",
+    )
+    flow_graph = {
+        "flow_graph_id": "sha256:" + "a" * 64,
+        "topology": {
+            "baseline_revision": 2,
+            "nodes": [{"node_id": "MS-PAYMENT"}, {"node_id": "G-PAYMENT"}],
+            "edges": [{"edge_id": "E-PAYMENT"}],
+        },
+    }
+    (memory / "views/flow-graph.json").write_text(json.dumps(flow_graph), encoding="utf-8")
+    run_script(project)
+
+
+def relation_update_payload(
+    *,
+    risk_id: str,
+    source_path: str,
+    source_fingerprint: str,
+    source_field: str,
+) -> dict:
+    return {
+        "risk_relation_update_schema_version": "1.0.0",
+        "_control": {"execute_allowed": True},
+        "proposal_only": False,
+        "approval_status": "approved",
+        "approved_by": "Program owner",
+        "approved_at": "2026-07-20T08:00:00Z",
+        "flow_graph_id": "sha256:" + "a" * 64,
+        "baseline_revision": 2,
+        "updates": [
+            {
+                "risk_id": risk_id,
+                "workstream_id": "alpha",
+                "source_artifact_path": source_path,
+                "source_fingerprint": source_fingerprint,
+                "source_field": source_field,
+                "related_plan_item_ids": ["MS-PAYMENT"],
+                "related_flow_edge_ids": [],
+            }
+        ],
+    }
+
+
+def write_relation_updates(path: Path, **kwargs) -> None:
+    path.write_text(json.dumps(relation_update_payload(**kwargs)), encoding="utf-8")
 
 
 if __name__ == "__main__":

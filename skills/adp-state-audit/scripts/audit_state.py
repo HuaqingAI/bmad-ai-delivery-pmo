@@ -2482,12 +2482,13 @@ def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intak
     input_path = receipt.get("input_path") or receipt.get("updates_file")
     if not isinstance(input_path, str) or not input_path.strip():
         return False
-    if Path(input_path).expanduser().resolve() != intake_path.resolve():
+    memory_root = intake_path.resolve().parents[2]
+    if not portable_memory_path_matches(input_path, intake_path, memory_root):
         return False
     updates = intake_payload.get("updates")
     if not isinstance(updates, list) or receipt.get("update_count") != len(updates):
         return False
-    if receipt.get("receipt_type") == "migration" and not valid_migration_receipt(receipt):
+    if receipt.get("receipt_type") == "migration" and not valid_migration_receipt(receipt, memory_root):
         return False
     return True
 
@@ -2500,7 +2501,41 @@ def valid_receipt_timestamp(value: Any) -> bool:
     return parsed.tzinfo is not None
 
 
-def valid_migration_receipt(receipt: dict[str, Any]) -> bool:
+def portable_memory_relative_path(value: str) -> Path | None:
+    parts = [part for part in value.replace("\\", "/").split("/") if part not in {"", "."}]
+    anchor = ["_bmad-output", "adp", "memory"]
+    folded = [part.casefold() for part in parts]
+    for index in range(len(parts) - len(anchor) + 1):
+        if folded[index : index + len(anchor)] != anchor:
+            continue
+        relative_parts = parts[index + len(anchor) :]
+        if not relative_parts or any(part == ".." for part in relative_parts):
+            return None
+        return Path(*relative_parts)
+    return None
+
+
+def resolve_portable_memory_path(value: str, memory_root: Path) -> Path:
+    direct = Path(value).expanduser().resolve()
+    relative = portable_memory_relative_path(value)
+    if relative is None:
+        return direct
+    resolved = (memory_root.resolve() / relative).resolve()
+    try:
+        resolved.relative_to(memory_root.resolve())
+    except ValueError:
+        return direct
+    return resolved
+
+
+def portable_memory_path_matches(value: str, expected: Path, memory_root: Path) -> bool:
+    direct = Path(value).expanduser().resolve()
+    if direct == expected.resolve():
+        return True
+    return resolve_portable_memory_path(value, memory_root) == expected.resolve()
+
+
+def valid_migration_receipt(receipt: dict[str, Any], memory_root: Path) -> bool:
     migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
     evidence_path = migration.get("evidence_path")
     evidence_hash = str(migration.get("evidence_hash") or "").strip().lower()
@@ -2514,7 +2549,7 @@ def valid_migration_receipt(receipt: dict[str, Any]) -> bool:
         return False
     if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", evidence_hash):
         return False
-    path = Path(evidence_path).expanduser().resolve()
+    path = resolve_portable_memory_path(evidence_path, memory_root)
     if not path.is_file():
         return False
     try:

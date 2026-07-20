@@ -137,6 +137,92 @@ class SyncStatusTests(unittest.TestCase):
             self.assertIsNotNone(finished_action["done_at"])
             self.assertEqual(finished_action["related_plan_item_ids"], ["MS-CHECKOUT-COMPLETE"])
 
+    def test_action_flow_fails_closed_for_missing_or_nonmonotonic_lifecycle_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            updates_file = project_root / "action-flow-invalid-time.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "baseline_revision": 3,
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "action_id": "A-OPEN-TIME",
+                                        "status": "open",
+                                        "owner": "FDE-A",
+                                        "action": "Open action",
+                                        "source": "meeting#time",
+                                        "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
+                                    },
+                                    {
+                                        "action_id": "A-BLOCKED-TIME",
+                                        "status": "blocked",
+                                        "owner": "FDE-A",
+                                        "action": "Blocked action",
+                                        "source": "meeting#time",
+                                        "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            first = self.run_script(project_root, "update", str(project_root), "--updates-file", str(updates_file))
+            first_contract = json.loads(Path(first["action_flow"]).read_text(encoding="utf-8"))
+            blocked = next(item for item in first_contract["actions"] if item["action_id"] == "A-BLOCKED-TIME")
+            self.assertIsNotNone(blocked["started_at"])
+
+            ledger = Path(first["action_ledger"])
+            lines = ledger.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if line.startswith("| A-BLOCKED-TIME |"):
+                    cells = [cell.strip() for cell in line.strip("|").split("|")]
+                    cells[11] = ""
+                    lines[index] = "| " + " | ".join(cells) + " |"
+                elif line.startswith("| A-OPEN-TIME |"):
+                    cells = [cell.strip() for cell in line.strip("|").split("|")]
+                    cells[10] = "2099-01-01T00:00:00Z"
+                    lines[index] = "| " + " | ".join(cells) + " |"
+            ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "baseline_revision": 3,
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "action_id": "A-VALID-TIME",
+                                        "status": "open",
+                                        "owner": "FDE-A",
+                                        "action": "Valid action",
+                                        "source": "meeting#time",
+                                        "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            second = self.run_script(project_root, "update", str(project_root), "--updates-file", str(updates_file))
+            action_ids = {
+                item["action_id"]
+                for item in json.loads(Path(second["action_flow"]).read_text(encoding="utf-8"))["actions"]
+            }
+            self.assertIn("A-VALID-TIME", action_ids)
+            self.assertNotIn("A-BLOCKED-TIME", action_ids)
+            self.assertNotIn("A-OPEN-TIME", action_ids)
+
     def run_script(self, project_root: Path, *args: str, check: bool = True) -> dict:
         completed = subprocess.run(
             [sys.executable, str(SCRIPT), *args, str(project_root)]
@@ -1034,6 +1120,22 @@ class SyncStatusTests(unittest.TestCase):
                 record.read_text(encoding="utf-8"),
             )
 
+    def test_refresh_actions_only_is_a_reliable_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--id", "l1-checkout", "--refresh-actions", "--dry-run"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual([], result["updates"][0]["unresolved_gaps"])
+
     def test_mistyped_action_id_does_not_fall_back_to_matching_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -1357,7 +1459,19 @@ class SyncStatusTests(unittest.TestCase):
             project_root = Path(temp_dir)
             updates_file = project_root / "program-action.json"
             updates_file.write_text(
-                json.dumps({"updates": [{"id": "PROGRAM", "actions": [{"owner": "PMO", "action": "Publish program note", "source": "meeting#program"}]}]}),
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "PROGRAM",
+                                "next_actions": [],
+                                "actions": [
+                                    {"owner": "PMO", "action": "Publish program note", "source": "meeting#program"}
+                                ],
+                            }
+                        ]
+                    }
+                ),
                 encoding="utf-8",
             )
 
