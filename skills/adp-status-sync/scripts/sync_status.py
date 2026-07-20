@@ -77,6 +77,7 @@ ACTION_FIELDS = [
     "Reason",
     "Due / Trigger",
     "Closure Criteria",
+    "Closure Criteria Verifiable",
     "Created At",
     "Started At",
     "Done At",
@@ -110,6 +111,7 @@ class ActionUpdate:
     reason: str = ""
     due_or_trigger: str = "TBD"
     closure_criteria: str = "TBD"
+    closure_criteria_verifiable: bool | None = None
     owning_workflow: str = "adp-status-sync"
     created_at: str | None = None
     started_at: str | None = None
@@ -579,6 +581,10 @@ def actions_from_mapping(
                     or "TBD"
                 ),
                 closure_criteria=clean_optional(raw_action.get("closure_criteria")) or "TBD",
+                closure_criteria_verifiable=parse_optional_boolean(
+                    raw_action.get("closure_criteria_verifiable"),
+                    "action closure_criteria_verifiable",
+                ),
                 owning_workflow=clean_optional(raw_action.get("owning_workflow")) or "adp-status-sync",
                 created_at=clean_iso_timestamp(raw_action.get("created_at"), "action created_at"),
                 started_at=clean_iso_timestamp(raw_action.get("started_at"), "action started_at"),
@@ -611,6 +617,14 @@ def clean_iso_timestamp(value: Any, label: str) -> str | None:
     if parsed.tzinfo is None:
         raise ValueError(f"{label} must include a timezone")
     return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_optional_boolean(value: Any, label: str) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be boolean when supplied")
+    return value
 
 
 def normalize_stable_id_list(value: Any, label: str) -> list[str]:
@@ -873,6 +887,11 @@ def new_action_row(rows: list[dict[str, str]], action_update: ActionUpdate, time
         "Reason": action_update.reason or "TBD",
         "Due / Trigger": action_update.due_or_trigger or "TBD",
         "Closure Criteria": action_update.closure_criteria or "TBD",
+        "Closure Criteria Verifiable": (
+            str(action_update.closure_criteria_verifiable).lower()
+            if action_update.closure_criteria_verifiable is not None
+            else ""
+        ),
         "Created At": action_update.created_at or timestamp,
         "Started At": started_at,
         "Done At": done_at,
@@ -899,6 +918,8 @@ def merge_action_row(row: dict[str, str], action_update: ActionUpdate, timestamp
     assign_if_meaningful(row, "Reason", action_update.reason)
     assign_if_meaningful(row, "Due / Trigger", action_update.due_or_trigger)
     assign_if_meaningful(row, "Closure Criteria", action_update.closure_criteria)
+    if action_update.closure_criteria_verifiable is not None:
+        row["Closure Criteria Verifiable"] = str(action_update.closure_criteria_verifiable).lower()
     if not row.get("Created At"):
         row["Created At"] = action_update.created_at or row.get("Last Updated") or timestamp
     if action_update.created_at:

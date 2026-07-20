@@ -453,7 +453,7 @@ def split_markdown_row(line: str) -> list[str]:
     return cells
 
 
-def parse_action_ledger(memory_root: Path) -> list[dict[str, str]]:
+def parse_action_ledger(memory_root: Path) -> list[dict[str, Any]]:
     path = memory_root / ACTION_LEDGER_REL
     if not path.exists():
         return []
@@ -461,7 +461,7 @@ def parse_action_ledger(memory_root: Path) -> list[dict[str, str]]:
     if len(table_lines) < 2:
         return []
     headers = [cell.strip().lower() for cell in split_markdown_row(table_lines[0])]
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for line in table_lines[1:]:
         cells = split_markdown_row(line)
         if all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in cells):
@@ -480,6 +480,9 @@ def parse_action_ledger(memory_root: Path) -> list[dict[str, str]]:
             "reason": raw.get("reason", ""),
             "due_or_trigger": raw.get("due / trigger", "TBD"),
             "closure_criteria": raw.get("closure criteria", "TBD"),
+            "closure_criteria_verifiable": parse_optional_boolean_cell(
+                raw.get("closure criteria verifiable", "")
+            ),
             "last_updated": raw.get("last updated", ""),
             "owning_workflow": raw.get("owning workflow", ""),
         }
@@ -488,7 +491,16 @@ def parse_action_ledger(memory_root: Path) -> list[dict[str, str]]:
     return rows
 
 
-def active_ledger_actions(memory_root: Path) -> list[dict[str, str]]:
+def parse_optional_boolean_cell(value: str) -> bool | None:
+    normalized = str(value).strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    return None
+
+
+def active_ledger_actions(memory_root: Path) -> list[dict[str, Any]]:
     actions = []
     for row in parse_action_ledger(memory_root):
         if row.get("status", "").lower() not in ACTIVE_ACTION_STATUSES:

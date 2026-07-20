@@ -285,10 +285,10 @@ class AdpStatePrepassTests(unittest.TestCase):
                     [
                         "# Action Ledger",
                         "",
-                        "| Action ID | Status | Owner | Workstream | Action | Source | Reason | Due / Trigger | Closure Criteria | Last Updated | Owning Workflow |",
-                        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-                        "| ACT-20260702-001 | open | FDE-A | l1-checkout | Add checkout validation evidence | meetings/2026-07-02-sync.md#M-001 | Meeting action | 2026-07-05 | Evidence linked | 2026-07-02T09:00:00+08:00 | adp-status-sync |",
-                        "| ACT-20260702-002 | done | FDE-B | l1-checkout | Closed historical task | meetings/2026-07-02-sync.md#M-002 | Meeting action | 2026-07-03 | Closed | 2026-07-02T09:00:00+08:00 | adp-status-sync |",
+                        "| Action ID | Status | Owner | Workstream | Action | Source | Reason | Due / Trigger | Closure Criteria | Closure Criteria Verifiable | Last Updated | Owning Workflow |",
+                        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+                        "| ACT-20260702-001 | open | FDE-A | l1-checkout | Add checkout validation evidence | meetings/2026-07-02-sync.md#M-001 | Meeting action | 2026-07-05 | Evidence linked | true | 2026-07-02T09:00:00+08:00 | adp-status-sync |",
+                        "| ACT-20260702-002 | done | FDE-B | l1-checkout | Closed historical task | meetings/2026-07-02-sync.md#M-002 | Meeting action | 2026-07-03 | Closed | false | 2026-07-02T09:00:00+08:00 | adp-status-sync |",
                     ]
                 )
                 + "\n",
@@ -307,6 +307,7 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["counts"]["actions"], 1)
             self.assertEqual(result["ledger_actions"][0]["action_id"], "ACT-20260702-001")
+            self.assertIs(result["ledger_actions"][0]["closure_criteria_verifiable"], True)
             self.assertEqual(result["actions"][0]["action"], "Add checkout validation evidence")
             gaps = [item["gap"] for item in result["cross_reference_gaps"]]
             self.assertNotIn("ledger open action is missing from WDR Next actions", gaps)

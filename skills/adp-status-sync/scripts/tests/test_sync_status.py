@@ -183,11 +183,11 @@ class SyncStatusTests(unittest.TestCase):
             for index, line in enumerate(lines):
                 if line.startswith("| A-BLOCKED-TIME |"):
                     cells = [cell.strip() for cell in line.strip("|").split("|")]
-                    cells[11] = ""
+                    cells[12] = ""
                     lines[index] = "| " + " | ".join(cells) + " |"
                 elif line.startswith("| A-OPEN-TIME |"):
                     cells = [cell.strip() for cell in line.strip("|").split("|")]
-                    cells[10] = "2099-01-01T00:00:00Z"
+                    cells[11] = "2099-01-01T00:00:00Z"
                     lines[index] = "| " + " | ".join(cells) + " |"
             ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1001,6 +1001,7 @@ class SyncStatusTests(unittest.TestCase):
                                         "reason": "Meeting action",
                                         "due": "Friday",
                                         "closure_criteria": "Evidence linked in evidence.md",
+                                        "closure_criteria_verifiable": True,
                                     }
                                 ],
                             }
@@ -1049,6 +1050,8 @@ class SyncStatusTests(unittest.TestCase):
             ledger_text = ledger.read_text(encoding="utf-8")
             self.assertEqual(ledger_text.count("Add checkout validation evidence"), 1)
             self.assertIn(f"| {first_result['actions_registered'][0]} | open |", ledger_text)
+            self.assertIn("Closure Criteria Verifiable", ledger_text)
+            self.assertIn("| true |", ledger_text)
             updated = record.read_text(encoding="utf-8")
             self.assertIn("FDE-A send summary", updated)
             self.assertNotIn("Add checkout validation evidence", updated)
