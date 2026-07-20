@@ -73,6 +73,32 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             repeated = run_script(project, "--relation-updates-file", str(updates_path))
             self.assertEqual(repeated["status"], "already-applied")
 
+    def test_relation_writer_rebinds_an_older_risk_to_current_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            make_relation_context(project, memory)
+            risk_flow_path = memory / "views/risk-flow.json"
+            risk_flow = json.loads(risk_flow_path.read_text(encoding="utf-8"))
+            risk = next(item for item in risk_flow["risks"] if item["sources"][0]["field"] == "Project Status.risk")
+            risk["baseline_revision"] = 1
+            risk_flow_path.write_text(json.dumps(risk_flow), encoding="utf-8")
+            record = memory / "workstreams/alpha/delivery-record.md"
+            updates_path = project / "approved-risk-rebind.json"
+            write_relation_updates(
+                updates_path,
+                risk_id=risk["risk_id"],
+                source_path="workstreams/alpha/delivery-record.md",
+                source_fingerprint=fingerprint(record),
+                source_field="Project Status.risk",
+            )
+
+            preview = run_script(project, "--relation-updates-file", str(updates_path))
+
+            self.assertEqual("preview", preview["status"])
+            self.assertEqual(2, preview["baseline_revision"])
+
     def test_relation_writer_updates_decision_row_and_uses_decision_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -110,6 +136,50 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             self.assertEqual(updated_risk["related_plan_item_ids"], ["MS-PAYMENT"])
             self.assertEqual(updated_risk["sources"][0]["artifact_path"], "workstreams/alpha/decisions.md")
             self.assertEqual(updated_risk["sources"][0]["field"], "Decision / Question")
+
+    def test_relation_writer_updates_legacy_decision_row_after_non_table_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            decision_path = memory / "workstreams/alpha/decisions.md"
+            decision_path.write_text(
+                decision_path.read_text(encoding="utf-8")
+                + "\n## Decision Rules\n\n- Preserve legacy rows.\n"
+                + "| 2026-07-02 | scope | Delayed scope row | Dana | alpha | open | TBD |\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            make_relation_context(project, memory)
+            semantic = "Delayed scope row"
+            digest = hashlib.sha256(f"alpha\ndecision/change\n{semantic.casefold()}".encode("utf-8")).hexdigest()[:16]
+            risk_id = f"RISK-{digest}"
+            risk_flow = json.loads((memory / "views/risk-flow.json").read_text(encoding="utf-8"))
+            self.assertIn(risk_id, {item["risk_id"] for item in risk_flow["risks"]})
+            updates_path = project / "approved-legacy-decision-risk-relations.json"
+            write_relation_updates(
+                updates_path,
+                risk_id=risk_id,
+                source_path="workstreams/alpha/decisions.md",
+                source_fingerprint=fingerprint(decision_path),
+                source_field="Decision / Question",
+            )
+
+            preview = run_script(project, "--relation-updates-file", str(updates_path))
+            applied = run_script(
+                project,
+                "--relation-updates-file",
+                str(updates_path),
+                "--apply-relations",
+                "--verified-plan-token",
+                preview["verified_plan_token"],
+            )
+
+            self.assertEqual(applied["status"], "applied")
+            self.assertIn(
+                f"Delayed scope row; risk_id:{risk_id}; baseline_revision:2; related_plan_item_ids:MS-PAYMENT",
+                decision_path.read_text(encoding="utf-8"),
+            )
 
     def test_relation_writer_rejects_unapproved_unknown_and_stale_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

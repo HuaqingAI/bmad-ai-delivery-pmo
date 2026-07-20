@@ -714,8 +714,14 @@ def validate_relation_payload(
         current_risk = current_risks.get(risk_id)
         if current_risk is None:
             raise ValueError(f"risk_id is not present in current risk-flow: {risk_id}")
-        if current_risk.get("baseline_revision") != revision:
-            raise ValueError(f"risk {risk_id} baseline revision does not match the intake")
+        current_risk_revision = current_risk.get("baseline_revision")
+        if (
+            not isinstance(current_risk_revision, int)
+            or isinstance(current_risk_revision, bool)
+            or current_risk_revision < 1
+            or current_risk_revision > revision
+        ):
+            raise ValueError(f"risk {risk_id} baseline revision cannot be rebound to the intake revision")
         workstream_id = normalize_id(str(raw_update["workstream_id"] or ""))
         if not workstream_id:
             raise ValueError(f"updates[{index}].workstream_id is required")
@@ -866,8 +872,6 @@ def update_decision_relation(
     matches: list[tuple[int, list[str]]] = []
     for index in range(header_index + 1, len(lines)):
         if not lines[index].strip().startswith("|"):
-            if matches or index > header_index + 2:
-                break
             continue
         cells = split_markdown_row(lines[index])
         if len(cells) != len(headers) or all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in cells):
