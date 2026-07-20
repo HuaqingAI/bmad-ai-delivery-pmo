@@ -23,7 +23,7 @@ from typing import Any
 
 
 PANEL_SCHEMA_VERSION = "1.0.0"
-PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.3"
+PANEL_GENERATOR_VERSION = "adp-management-panel/1.0.4"
 PANEL_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SKILLS = SKILL_ROOT.parent

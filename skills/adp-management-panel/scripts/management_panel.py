@@ -622,7 +622,6 @@ def build_request(
     selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status = inputs["program_status"]
-    graph = inputs["flow_graph"]
     forecast = status.get("progress", {}).get("overall", {}).get("series", {}).get("forecast_points", [])
     generated_at = args.generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     selection = selection or embedded_selection_policy(inputs)

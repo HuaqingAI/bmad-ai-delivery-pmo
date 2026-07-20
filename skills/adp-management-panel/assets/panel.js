@@ -5,11 +5,13 @@
   var manifest = JSON.parse(document.getElementById("adp-panel-manifest").textContent);
   var viewIds = ["project-lead", "fde-morning", "business-biweekly"];
   var modeIds = ["quantitative-progress", "flow-progress"];
-  var statusValues = ["on-plan", "at-risk", "blocked", "off-plan", "indeterminate", "complete", "in-progress", "ready", "planned", "not-applicable"];
+  var statusValues = ["on-plan", "at-risk", "blocked", "off-plan", "indeterminate", "complete", "in-progress", "not-started", "ready", "planned", "not-applicable"];
   var state = parseHash();
   var sortState = { key: "scope_id", direction: "ascending" };
   var collapsedLanes = new Set();
   var flowTransform = { scale: 1, x: 0, y: 0 };
+  var flowFullscreen = false;
+  var activeFlowNodeId = null;
   var svgNamespace = "http://www.w3.org/2000/svg";
 
   document.documentElement.classList.add("js");
@@ -99,7 +101,12 @@
     var workstream = document.getElementById("filter-workstream");
     (model.data.status.progress.by_scope || []).forEach(function (item) { addOption(workstream, item.scope_id); });
     var statuses = document.getElementById("filter-status");
-    statusValues.forEach(function (value) { addOption(statuses, value); });
+    statusValues.forEach(function (value) {
+      var label = value === "not-started" ? message("flow.state.not-started", "Not started")
+        : value === "in-progress" ? message("flow.state.in-progress", "In progress")
+          : value === "complete" ? message("flow.state.complete", "Complete") : value;
+      addOption(statuses, value, label);
+    });
     var owners = document.getElementById("filter-owner");
     allOwners().forEach(function (value) { addOption(owners, value); });
     var period = document.getElementById("filter-period");
@@ -127,6 +134,24 @@
     var token = create("span", "status-token", value || "indeterminate");
     token.dataset.value = value || "indeterminate";
     return token;
+  }
+
+  function executionPresentation(value) {
+    if (value === "complete") return { id: "complete", label: message("flow.state.complete", "Complete"), detail: value };
+    if (value === "in-progress") return { id: "in-progress", label: message("flow.state.in-progress", "In progress"), detail: value };
+    if (value === "ready" || value === "planned") return { id: "not-started", label: message("flow.state.not-started", "Not started"), detail: value };
+    return { id: "not-applicable", label: message("flow.state.not-applicable", "Not applicable"), detail: value || "not-applicable" };
+  }
+
+  function healthPresentation(value) {
+    if (value === "blocked") return { id: "blocked", label: message("flow.health.blocked", "Blocked") };
+    if (value === "at-risk") return { id: "risk", label: message("flow.state.risk", "Risk") };
+    return null;
+  }
+
+  function flowStatusMatches(filter, execution, health) {
+    if (filter === "not-started") return execution === "planned" || execution === "ready";
+    return filter === execution || filter === health;
   }
 
   function percent(value, suffix) {
@@ -499,7 +524,7 @@
       var lane = (node.lane || {}).lane_id || "PROGRAM";
       if (collapsedLanes.has(lane)) return false;
       if (state.workstream !== "all" && lane !== state.workstream) return false;
-      if (state.status !== "all" && state.status !== execution && state.status !== health) return false;
+      if (state.status !== "all" && !flowStatusMatches(state.status, execution, health)) return false;
       if (state.owner !== "all" && node.owner !== state.owner) return false;
       return !query || JSON.stringify(node).toLocaleLowerCase().indexOf(query) >= 0;
     });
@@ -521,6 +546,177 @@
     };
   }
 
+  function nodeAllocation(flow, nodeId) {
+    return (flow.allocations || []).find(function (item) { return item.target_type === "node" && item.target_id === nodeId; });
+  }
+
+  function relatedItemType(sourceKind) {
+    if (sourceKind === "risk") return "risk";
+    if (sourceKind === "decision") return "decision";
+    if (sourceKind === "question" || sourceKind === "open-question") return "open-question";
+    return "todo";
+  }
+
+  function boardItemType(boardName) {
+    if (boardName.indexOf("decision") >= 0) return "decision";
+    if (boardName.indexOf("question") >= 0) return "open-question";
+    if (boardName.indexOf("risk") >= 0 || boardName.indexOf("blocker") >= 0) return "risk";
+    if (boardName.indexOf("commitment") >= 0 || boardName.indexOf("due") >= 0 || boardName.indexOf("action") >= 0) return "todo";
+    return null;
+  }
+
+  function appendRelatedItem(items, item) {
+    var key = item.type + ":" + item.id;
+    var existing = items.get(key);
+    if (existing) {
+      item.states.forEach(function (value) { if (existing.states.indexOf(value) < 0) existing.states.push(value); });
+      return;
+    }
+    items.set(key, item);
+  }
+
+  function relatedNodeItems(node, flow) {
+    var items = new Map();
+    var allocation = nodeAllocation(flow, node.node_id);
+    Object.keys((allocation || {}).counts || {}).forEach(function (category) {
+      (((allocation || {}).counts[category] || {}).source_refs || []).forEach(function (source) {
+        appendRelatedItem(items, {
+          type: relatedItemType(source.source_kind),
+          id: source.source_id,
+          summary: source.source_id,
+          states: [category],
+          sourceFingerprint: source.source_fingerprint || ""
+        });
+      });
+    });
+
+    if (manifest.distribution_profile === "internal-full") {
+      Object.keys(model.data.meetings || {}).forEach(function (meetingId) {
+        var boards = (model.data.meetings[meetingId] || {}).boards || {};
+        Object.keys(boards).forEach(function (boardName) {
+          var type = boardItemType(boardName);
+          if (!type || !Array.isArray(boards[boardName])) return;
+          boards[boardName].forEach(function (item) {
+            if (!item || typeof item !== "object") return;
+            var related = item.related_plan_item_ids || item.plan_item_ids;
+            if (!Array.isArray(related) || related.indexOf(node.node_id) < 0) return;
+            var id = item.action_id || item.risk_id || item.decision_id || item.question_id || item.id;
+            if (!id) return;
+            appendRelatedItem(items, {
+              type: type,
+              id: String(id),
+              summary: item.summary || item.action || item.decision || item.question || item.item || String(id),
+              states: item.status ? [String(item.status)] : [],
+              sourceFingerprint: ""
+            });
+          });
+        });
+      });
+    }
+    return Array.from(items.values()).sort(function (left, right) {
+      return left.type.localeCompare(right.type) || left.id.localeCompare(right.id);
+    });
+  }
+
+  function compactRelatedItemsText(node, flow) {
+    var counts = { decision: 0, todo: 0, "open-question": 0, risk: 0 };
+    relatedNodeItems(node, flow).forEach(function (item) { counts[item.type] += 1; });
+    var values = [];
+    [["decision", "D"], ["todo", "T"], ["open-question", "Q"], ["risk", "R"]].forEach(function (item) {
+      if (counts[item[0]]) values.push(item[1] + (counts[item[0]] > 99 ? "99+" : counts[item[0]]));
+    });
+    return values.join(" ") || message("flow.actions.none-short", "No related items");
+  }
+
+  function renderFlowOverview(flow) {
+    var counts = { "not-started": 0, "in-progress": 0, complete: 0, risk: 0 };
+    var stateById = new Map((flow.node_states || []).map(function (item) { return [item.node_id, item]; }));
+    var inProgress = [];
+    flow.nodes.forEach(function (node) {
+      var canonical = stateById.get(node.node_id) || {};
+      var execution = (canonical.execution || {}).value;
+      var health = (canonical.health || {}).value;
+      var primary = executionPresentation(execution).id;
+      if (counts[primary] !== undefined) counts[primary] += 1;
+      if (health === "at-risk" || health === "blocked") counts.risk += 1;
+      if (execution === "in-progress") inProgress.push(node);
+    });
+    if (!activeFlowNodeId || !inProgress.some(function (node) { return node.node_id === activeFlowNodeId; })) {
+      activeFlowNodeId = inProgress.length ? inProgress[0].node_id : null;
+    }
+
+    var root = create("div", "flow-overview");
+    root.setAttribute("aria-label", message("flow.overview.label", "Visible node status overview"));
+    var strip = create("div", "flow-state-strip");
+    [["not-started", "flow.state.not-started", "Not started"], ["in-progress", "flow.state.in-progress", "In progress"], ["complete", "flow.state.complete", "Complete"], ["risk", "flow.state.risk", "Risk"]].forEach(function (item) {
+      var cell = create("div", "flow-state-cell");
+      cell.dataset.state = item[0];
+      cell.appendChild(create("span", "flow-state-marker"));
+      cell.appendChild(create("span", "flow-state-label", message(item[1], item[2])));
+      cell.appendChild(create("strong", "flow-state-count", counts[item[0]]));
+      strip.appendChild(cell);
+    });
+    root.appendChild(strip);
+    var frontier = create("div", "flow-frontier");
+    frontier.appendChild(create("span", "flow-frontier-label", message("flow.current-focus", "Current focus")));
+    var focusText = inProgress.length
+      ? inProgress.map(function (node) { return node.name || node.node_id; }).join(" / ")
+      : message("flow.current-focus.empty", "No node is currently in progress");
+    frontier.appendChild(create("strong", "flow-frontier-value", focusText));
+    root.appendChild(frontier);
+    var announcer = create("div", "visually-hidden");
+    announcer.id = "flow-keyboard-status";
+    announcer.setAttribute("aria-live", "polite");
+    root.appendChild(announcer);
+    return root;
+  }
+
+  function updateActiveFlowNode(focus) {
+    document.querySelectorAll("[data-node-id]").forEach(function (element) {
+      var selected = element.dataset.nodeId === activeFlowNodeId;
+      element.classList.toggle("is-current", selected);
+      if (selected) element.setAttribute("aria-current", "step"); else element.removeAttribute("aria-current");
+    });
+    if (!focus || !activeFlowNodeId) return;
+    var target = document.querySelector(".flow-node[data-node-id='" + CSS.escape(activeFlowNodeId) + "'], .stage-list [data-node-id='" + CSS.escape(activeFlowNodeId) + "']");
+    if (target) target.focus({ preventScroll: true });
+  }
+
+  function setFlowFullscreen(active) {
+    flowFullscreen = Boolean(active);
+    document.body.classList.toggle("flow-is-fullscreen", flowFullscreen);
+    var sectionRoot = document.querySelector(".flow-band");
+    var button = document.getElementById("flow-fullscreen-toggle");
+    if (sectionRoot) {
+      sectionRoot.classList.toggle("is-fullscreen", flowFullscreen);
+      sectionRoot.dataset.fullscreen = String(flowFullscreen);
+    }
+    if (button) {
+      button.setAttribute("aria-pressed", String(flowFullscreen));
+      button.textContent = flowFullscreen ? message("flow.fullscreen.exit", "Exit full screen") : message("flow.fullscreen.enter", "Full screen");
+    }
+    if (flowFullscreen) window.requestAnimationFrame(function () { updateActiveFlowNode(true); });
+  }
+
+  function stepInProgressNode(direction) {
+    var flow = filteredFlow();
+    var stateById = new Map(flow.node_states.map(function (item) { return [item.node_id, item]; }));
+    var nodes = flow.nodes.filter(function (node) { return ((stateById.get(node.node_id) || {}).execution || {}).value === "in-progress"; });
+    if (!nodes.length) {
+      var empty = document.getElementById("flow-keyboard-status");
+      if (empty) empty.textContent = message("flow.current-focus.empty", "No node is currently in progress");
+      return;
+    }
+    var current = nodes.findIndex(function (node) { return node.node_id === activeFlowNodeId; });
+    var next = current < 0 ? 0 : (current + direction + nodes.length) % nodes.length;
+    var node = nodes[next];
+    activeFlowNodeId = node.node_id;
+    updateActiveFlowNode(!document.getElementById("source-drawer"));
+    var announcer = document.getElementById("flow-keyboard-status");
+    if (announcer) announcer.textContent = message("flow.current-focus", "Current focus") + ": " + (node.name || node.node_id);
+    if (document.getElementById("source-drawer")) openDrawer(node, stateById.get(node.node_id) || {}, flow);
+  }
+
   function flowFallback(flow) {
     var states = new Map(flow.node_states.map(function (item) { return [item.node_id, item]; }));
     var allocationByTarget = new Map(flow.allocations.map(function (item) { return [item.target_type + ":" + item.target_id, item.counts || {}]; }));
@@ -530,13 +726,19 @@
     flow.nodes.forEach(function (node) {
       var item = create("li");
       var canonical = states.get(node.node_id) || {};
+      var execution = (canonical.execution || {}).value || "not-applicable";
+      var health = (canonical.health || {}).value || "indeterminate";
+      var primary = executionPresentation(execution);
+      var auxiliary = healthPresentation(health);
       item.appendChild(create("strong", "", node.name || node.node_id));
-      item.appendChild(create("div", "muted", ((node.lane || {}).lane_id || "PROGRAM") + " / " + ((canonical.execution || {}).value || "indeterminate") + " / " + ((canonical.health || {}).value || "indeterminate")));
-      var counts = allocationByTarget.get("node:" + node.node_id) || {};
-      item.appendChild(create("div", "muted", countText(counts, (canonical.execution || {}).value)));
+      item.appendChild(create("div", "flow-fallback-status", primary.label + (auxiliary ? " / " + auxiliary.label : "") + " / " + ((node.lane || {}).lane_id || "PROGRAM")));
+      item.appendChild(create("div", "muted", compactRelatedItemsText(node, flow)));
+      item.dataset.nodeId = node.node_id;
+      item.dataset.primaryState = primary.id;
+      item.dataset.health = health;
       item.tabIndex = 0;
-      item.addEventListener("click", function () { openDrawer(node, canonical, flow); });
-      item.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDrawer(node, canonical, flow); } });
+      item.addEventListener("click", function () { activeFlowNodeId = node.node_id; updateActiveFlowNode(false); openDrawer(node, canonical, flow); });
+      item.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activeFlowNodeId = node.node_id; updateActiveFlowNode(false); openDrawer(node, canonical, flow); } });
       list.appendChild(item);
     });
     root.appendChild(list);
@@ -554,8 +756,14 @@
   }
 
   function renderFlow(root) {
-    renderViewHeading(root, message("view." + state.view, state.view) + " / Flow", "Canonical topology with orthogonal execution and health states.");
-    var sectionRoot = section("Flow progress", state.view === "project-lead" ? "pl-flow" : state.view === "fde-morning" ? "fde-flow-window" : "biz-flow-spine");
+    renderViewHeading(root, message("view." + state.view, state.view) + " / " + message("mode.flow-progress", "Flow progress"), message("flow.subtitle", "Canonical topology with execution progress and independent risk signals."));
+    var sectionRoot = section(message("mode.flow-progress", "Flow progress"), state.view === "project-lead" ? "pl-flow" : state.view === "fde-morning" ? "fde-flow-window" : "biz-flow-spine");
+    sectionRoot.classList.add("flow-band");
+    sectionRoot.tabIndex = -1;
+    if (flowFullscreen) {
+      sectionRoot.classList.add("is-fullscreen");
+      sectionRoot.dataset.fullscreen = "true";
+    }
     var flow = filteredFlow();
     var frame = create("div", "flow-frame");
     frame.id = "flow-frame";
@@ -568,6 +776,7 @@
       document.getElementById("result-count").textContent = "0 nodes / 0 edges";
       return;
     }
+    sectionRoot.appendChild(renderFlowOverview(flow));
     var toolbar = create("div", "flow-toolbar");
     var lanes = Array.from(new Set((model.data.flows[state.view].nodes || []).map(function (node) { return (node.lane || {}).lane_id || "PROGRAM"; }))).sort();
     lanes.forEach(function (lane) {
@@ -583,6 +792,12 @@
       button.addEventListener("click", item[1]);
       toolbar.appendChild(button);
     });
+    var fullscreen = create("button", "flow-fullscreen-toggle", flowFullscreen ? message("flow.fullscreen.exit", "Exit full screen") : message("flow.fullscreen.enter", "Full screen"));
+    fullscreen.id = "flow-fullscreen-toggle";
+    fullscreen.type = "button";
+    fullscreen.setAttribute("aria-pressed", String(flowFullscreen));
+    fullscreen.addEventListener("click", function () { setFlowFullscreen(!flowFullscreen); });
+    toolbar.appendChild(fullscreen);
     sectionRoot.appendChild(toolbar);
     frame.appendChild(flowFallback(flow));
     sectionRoot.appendChild(frame);
@@ -664,7 +879,6 @@
     svg.appendChild(defs);
     var viewport = createSvg("g", { id: "flow-viewport" });
     var edgeById = new Map(flow.edges.map(function (edge) { return [edge.edge_id, edge]; }));
-    var allocationByTarget = new Map(flow.allocations.map(function (item) { return [item.target_type + ":" + item.target_id, item.counts || {}]; }));
     (layout.edges || []).forEach(function (laidEdge) {
       var edge = edgeById.get(laidEdge.id) || {};
       var pathData = "";
@@ -692,19 +906,27 @@
       var canonical = stateById.get(laidNode.id) || {};
       var execution = (canonical.execution || {}).value || "indeterminate";
       var health = (canonical.health || {}).value || "indeterminate";
-      var group = createSvg("g", { class: "flow-node", transform: "translate(" + laidNode.x + " " + laidNode.y + ")", tabindex: 0, role: "button", "aria-label": (node.name || node.node_id) + ", " + execution + ", " + health, "data-execution": execution, "data-health": health });
+      var primary = executionPresentation(execution);
+      var auxiliary = healthPresentation(health);
+      var group = createSvg("g", { class: "flow-node", transform: "translate(" + laidNode.x + " " + laidNode.y + ")", tabindex: 0, role: "button", "aria-label": (node.name || node.node_id) + ", " + primary.label + (auxiliary ? ", " + auxiliary.label : ""), "data-node-id": node.node_id, "data-primary-state": primary.id, "data-execution": execution, "data-health": health });
       if (node.node_type === "gate") {
         group.appendChild(createSvg("rect", { width: laidNode.width, height: laidNode.height, rx: 5, ry: 5 }));
         group.appendChild(createSvg("polygon", { class: "gate-icon", points: "20,27 31,38 20,49 9,38" }));
       } else group.appendChild(createSvg("rect", { width: laidNode.width, height: laidNode.height, rx: 7, ry: 7 }));
+      if (auxiliary) {
+        var healthMarker = createSvg("g", { class: "health-marker", "data-health": auxiliary.id, "aria-hidden": "true" });
+        healthMarker.appendChild(createSvg("circle", { cx: laidNode.width - 15, cy: 14, r: 9 }));
+        healthMarker.appendChild(createSvg("text", { x: laidNode.width - 15, y: 18, "text-anchor": "middle" }, auxiliary.id === "blocked" ? "!" : "R"));
+        group.appendChild(healthMarker);
+      }
       var textCenter = node.node_type === "gate" ? 130 : laidNode.width / 2;
       group.appendChild(createSvg("text", { x: textCenter, y: 25, "text-anchor": "middle" }, truncate(node.name || node.node_id, 28)));
-      group.appendChild(createSvg("text", { x: textCenter, y: 46, "text-anchor": "middle", fill: "#5c6773" }, execution + " / " + health));
-      group.appendChild(createSvg("text", { x: textCenter, y: 63, "text-anchor": "middle", fill: "#5c6773" }, ((node.lane || {}).lane_id || "PROGRAM") + " · " + countText(allocationByTarget.get("node:" + node.node_id) || {}, execution)));
-      group.addEventListener("click", function () { openDrawer(node, canonical, flow); });
+      group.appendChild(createSvg("text", { class: "flow-node-status", x: textCenter, y: 46, "text-anchor": "middle" }, primary.label + (primary.id === "not-started" ? " · " + primary.detail : "")));
+      group.appendChild(createSvg("text", { class: "flow-node-meta", x: textCenter, y: 63, "text-anchor": "middle" }, ((node.lane || {}).lane_id || "PROGRAM") + " · " + compactRelatedItemsText(node, flow)));
+      group.addEventListener("click", function () { activeFlowNodeId = node.node_id; updateActiveFlowNode(false); openDrawer(node, canonical, flow); });
       group.addEventListener("keydown", function (event) {
         var nodes = Array.prototype.slice.call(svg.querySelectorAll(".flow-node"));
-        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDrawer(node, canonical, flow); }
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activeFlowNodeId = node.node_id; updateActiveFlowNode(false); openDrawer(node, canonical, flow); }
         if (event.key === "ArrowRight" || event.key === "ArrowDown") { event.preventDefault(); nodes[(index + 1) % nodes.length].focus(); }
         if (event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); nodes[(index - 1 + nodes.length) % nodes.length].focus(); }
       });
@@ -715,6 +937,7 @@
     if (fallback) frame.appendChild(fallback);
     enablePan(svg, viewport);
     applyFlowTransform();
+    updateActiveFlowNode(false);
   }
 
   function truncate(value, size) { return value.length > size ? value.slice(0, size - 1) + "…" : value; }
@@ -771,10 +994,73 @@
     var dragging = false;
     var origin = null;
     svg.addEventListener("wheel", function (event) { event.preventDefault(); zoomFlow(event.deltaY < 0 ? 1.1 : .9); }, { passive: false });
-    svg.addEventListener("pointerdown", function (event) { dragging = true; origin = { x: event.clientX - flowTransform.x, y: event.clientY - flowTransform.y }; svg.setPointerCapture(event.pointerId); });
+    svg.addEventListener("pointerdown", function (event) {
+      if (event.target.closest && event.target.closest(".flow-node")) return;
+      dragging = true;
+      origin = { x: event.clientX - flowTransform.x, y: event.clientY - flowTransform.y };
+      svg.setPointerCapture(event.pointerId);
+    });
     svg.addEventListener("pointermove", function (event) { if (!dragging) return; flowTransform.x = event.clientX - origin.x; flowTransform.y = event.clientY - origin.y; applyFlowTransform(); });
     svg.addEventListener("pointerup", function () { dragging = false; });
     svg.addEventListener("pointercancel", function () { dragging = false; });
+  }
+
+  function relatedItemsPanel(node, flow) {
+    var items = relatedNodeItems(node, flow);
+    var labels = {
+      all: message("flow.action.all", "All"),
+      decision: message("flow.action.decision", "Decisions"),
+      todo: message("flow.action.todo", "To-dos"),
+      "open-question": message("flow.action.open-question", "Open questions"),
+      risk: message("flow.action.risk", "Risks")
+    };
+    var root = create("section", "node-related-items");
+    root.appendChild(create("h3", "", message("flow.actions.title", "Related items")));
+    var controls = create("div", "related-item-filters");
+    controls.setAttribute("role", "group");
+    controls.setAttribute("aria-label", message("flow.actions.filter", "Filter related items"));
+    var list = create("ul", "related-item-list");
+
+    function renderItems(filter) {
+      list.replaceChildren();
+      var visible = filter === "all" ? items : items.filter(function (item) { return item.type === filter; });
+      if (!visible.length) {
+        list.appendChild(create("li", "related-item-empty", message("flow.actions.empty", "No related items of this type in the canonical flow data.")));
+        return;
+      }
+      visible.forEach(function (item) {
+        var row = create("li", "related-item");
+        row.dataset.itemType = item.type;
+        var head = create("div", "related-item-heading");
+        head.appendChild(create("span", "related-item-kind", labels[item.type]));
+        head.appendChild(create("strong", "", item.id));
+        row.appendChild(head);
+        if (item.summary !== item.id) row.appendChild(create("p", "", item.summary));
+        if (item.states.length) {
+          var states = create("div", "related-item-states");
+          item.states.forEach(function (value) { states.appendChild(create("span", "", value)); });
+          row.appendChild(states);
+        }
+        list.appendChild(row);
+      });
+    }
+
+    ["all", "decision", "todo", "open-question", "risk"].forEach(function (type, index) {
+      var count = type === "all" ? items.length : items.filter(function (item) { return item.type === type; }).length;
+      var button = create("button", "", labels[type] + " " + count);
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(index === 0));
+      button.addEventListener("click", function () {
+        controls.querySelectorAll("button").forEach(function (item) { item.setAttribute("aria-pressed", "false"); });
+        button.setAttribute("aria-pressed", "true");
+        renderItems(type);
+      });
+      controls.appendChild(button);
+    });
+    root.appendChild(controls);
+    root.appendChild(list);
+    renderItems("all");
+    return root;
   }
 
   function openDrawer(node, canonical, flow) {
@@ -784,12 +1070,28 @@
     dialog.id = "source-drawer";
     var header = create("header");
     header.appendChild(create("h2", "", node.name || node.node_id));
-    var close = create("button", "", "Close");
+    var close = create("button", "", message("common.close", "Close"));
     close.type = "button";
     close.addEventListener("click", function () { dialog.close(); });
     header.appendChild(close);
     dialog.appendChild(header);
     var body = create("div", "drawer-body");
+    var execution = (canonical.execution || {}).value;
+    var health = (canonical.health || {}).value;
+    var primary = executionPresentation(execution);
+    var auxiliary = healthPresentation(health);
+    var nodeStatus = create("div", "drawer-node-status");
+    var primaryToken = create("span", "node-state-token", primary.label);
+    primaryToken.dataset.state = primary.id;
+    nodeStatus.appendChild(primaryToken);
+    if (auxiliary) {
+      var healthToken = create("span", "node-state-token", auxiliary.label);
+      healthToken.dataset.state = auxiliary.id;
+      nodeStatus.appendChild(healthToken);
+    }
+    body.appendChild(nodeStatus);
+    body.appendChild(relatedItemsPanel(node, flow));
+    body.appendChild(create("h3", "drawer-source-heading", message("flow.source.title", "Source and rules")));
     var details = create("dl");
     var source = node.source || {};
     [
@@ -819,6 +1121,7 @@
   }
 
   function render() {
+    if (state.mode !== "flow-progress" && flowFullscreen) setFlowFullscreen(false);
     document.body.dataset.view = state.view;
     renderHeader();
     renderNav();
@@ -833,6 +1136,20 @@
   initControls();
   writeHash(true);
   render();
+  window.addEventListener("keydown", function (event) {
+    if (!flowFullscreen) return;
+    if (event.key === "Escape") {
+      if (document.getElementById("source-drawer")) return;
+      event.preventDefault();
+      setFlowFullscreen(false);
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if (["INPUT", "SELECT", "TEXTAREA"].indexOf((event.target || {}).tagName) >= 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stepInProgressNode(event.key === "ArrowRight" ? 1 : -1);
+  }, true);
   window.addEventListener("popstate", function () { state = parseHash(); render(); });
   window.addEventListener("hashchange", function () { var next = parseHash(); if (JSON.stringify(next) !== JSON.stringify(state)) { state = next; render(); } });
 }());

@@ -30,6 +30,12 @@ View IDs and section IDs are stable machine identifiers. Labels come from the lo
 
 Every view declares both `quantitative-progress` and `flow-progress`. The modes change presentation only. They do not create a fourth audience view or a second data model.
 
+## Flow presentation
+
+The renderer presents canonical execution as three primary UI states: `planned|ready` -> not started, `in-progress` -> in progress, and `complete` -> complete; `not-applicable` remains explicit. Canonical health stays independent: `at-risk` and `blocked` appear as auxiliary risk signals, so a node can remain visibly `in-progress + risk` or `not started + blocked`.
+
+The node drawer groups explicit related references as decisions, to-dos, open questions, and risks. Flow `action`/`risk` source refs supply to-do/risk items; a meeting-board decision or open question appears on a node only when that structured item carries the node ID in `related_plan_item_ids`. The renderer never relates items by owner, workstream, ID prefix, or text similarity. Full-screen mode changes presentation only; Left/Right cycles through the filtered nodes whose canonical execution is `in-progress`, without changing model state or selection identity.
+
 ## Selection contract
 
 - History selection is an ordered list of immutable `program_status_snapshot_id` values. Selection fails closed when a requested snapshot is absent; a missing optional predecessor may degrade period comparison but may not be represented as zero.

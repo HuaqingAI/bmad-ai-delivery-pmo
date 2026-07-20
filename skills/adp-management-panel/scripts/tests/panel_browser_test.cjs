@@ -99,7 +99,7 @@ async function screenshot(page, name, fullPage = true) {
       check((await page.locator(".metric .value").first().innerText()).includes("20"), "period comparison did not show immutable historical value");
       await page.click("#clear-filters");
       await page.fill("#filter-search", "L1");
-      check((await page.locator("#result-count").innerText()).includes("1 workstreams"), "Chinese-capable free search did not filter rows");
+      check((await page.locator("#result-count").innerText()).includes("1 scopes"), "Chinese-capable free search did not filter rows");
       await page.fill("#filter-search", "");
 
       const firstHeader = page.locator(".data-table th button").first();
@@ -108,8 +108,12 @@ async function screenshot(page, name, fullPage = true) {
 
       await page.getByRole("button", { name: /流程图|Flow progress/ }).click();
       await page.waitForSelector("#flow-frame[data-layout-status='ready']", { timeout: 8000 });
-      check(await page.locator("#flow-frame svg .flow-node").count() === 5, "project flow did not render the complete selected graph");
-      check(await page.locator("#flow-frame svg .flow-edge").count() === 5, "project flow edge count differs from canonical selection");
+      check(await page.locator("#flow-frame svg .flow-node").count() === 3, "project flow did not render the complete owner-selected graph");
+      check(await page.locator("#flow-frame svg .flow-edge").count() === 2, "project flow edge count differs from canonical selection");
+      const statusOverview = await page.locator(".flow-state-strip").innerText();
+      check(statusOverview.includes("未开始\n1") && statusOverview.includes("进行中\n1") && statusOverview.includes("已完成\n1") && statusOverview.includes("风险\n2"), "flow overview does not expose the requested primary states and auxiliary risk count");
+      check(await page.locator(".flow-node[data-node-id='M-A'][data-primary-state='in-progress'] .health-marker[data-health='risk']").count() === 1, "in-progress plus risk node lost its orthogonal visual state");
+      check(await page.locator(".flow-node[data-node-id='G-MERGE'][data-primary-state='not-started'] .health-marker[data-health='blocked']").count() === 1, "not-started plus blocked node lost its orthogonal visual state");
       const flowGeometry = await page.evaluate(() => {
         const nodes = Array.from(document.querySelectorAll("#flow-frame svg .flow-node"));
         const rects = nodes.map(node => node.getBoundingClientRect());
@@ -130,6 +134,32 @@ async function screenshot(page, name, fullPage = true) {
       check(flowGeometry.overlaps.length === 0, "ELK flow nodes overlap: " + JSON.stringify(flowGeometry.overlaps));
       check(flowGeometry.escaped === 0, "flow label/status/count escaped its node container");
       check(flowGeometry.gateIcons === 1, "gate node lacks a stable semantic diamond icon");
+      await page.locator(".flow-node[data-node-id='M-A']").click();
+      await page.waitForSelector("#source-drawer[open]");
+      const relatedControls = await page.locator(".related-item-filters").innerText();
+      for (const label of ["全部", "决策", "待办", "Open question", "风险"]) check(relatedControls.includes(label), "node related-item filters omit " + label);
+      check((await page.locator(".related-item-list").innerText()).includes("A-OPEN") && (await page.locator(".related-item-list").innerText()).includes("R-OPEN"), "node drawer did not expose canonical to-do and risk source references");
+      await page.getByRole("button", { name: /^待办 1$/ }).click();
+      check(await page.locator(".related-item[data-item-type='todo']").count() === 1, "to-do related-item filter is not functional");
+      await page.getByRole("button", { name: /^风险 1$/ }).click();
+      check(await page.locator(".related-item[data-item-type='risk']").count() === 1, "risk related-item filter is not functional");
+      evidence.screenshots.push(await screenshot(page, "project-flow-node-detail-1920x1080.png", false));
+      await page.keyboard.press("Escape");
+      await page.waitForSelector("#source-drawer", { state: "detached" });
+      await page.getByRole("button", { name: /全屏|Full screen/ }).click();
+      check(await page.locator("body").evaluate(element => element.classList.contains("flow-is-fullscreen")), "full-screen mode did not activate");
+      check(await page.locator(".flow-band").getAttribute("data-fullscreen") === "true", "flow work surface does not expose full-screen state");
+      await page.keyboard.press("ArrowRight");
+      check(await page.locator(".flow-node[aria-current='step']").getAttribute("data-node-id") === "M-A", "right arrow did not select the next in-progress node");
+      await page.keyboard.press("ArrowLeft");
+      check(await page.locator(".flow-node[aria-current='step']").getAttribute("data-node-id") === "M-A", "left arrow did not select the previous in-progress node");
+      await page.locator(".flow-node[data-node-id='M-A']").click();
+      await page.keyboard.press("Escape");
+      await page.waitForSelector("#source-drawer", { state: "detached" });
+      check(await page.locator("body").evaluate(element => element.classList.contains("flow-is-fullscreen")), "closing the node drawer also exited full-screen mode");
+      evidence.screenshots.push(await screenshot(page, "project-flow-fullscreen-1920x1080.png", false));
+      await page.keyboard.press("Escape");
+      check(!(await page.locator("body").evaluate(element => element.classList.contains("flow-is-fullscreen"))), "Escape did not exit full-screen mode");
       const transformBefore = await page.locator("#flow-viewport").getAttribute("transform");
       await page.getByRole("button", { name: "Zoom in" }).click();
       const transformAfter = await page.locator("#flow-viewport").getAttribute("transform");
@@ -144,7 +174,7 @@ async function screenshot(page, name, fullPage = true) {
       await page.getByRole("button", { name: "Reset" }).click();
       await page.getByRole("button", { name: "Collapse L1" }).click();
       await page.waitForTimeout(100);
-      check((await page.locator("#result-count").innerText()).includes("3 nodes"), "lane collapse did not reduce visible canonical nodes");
+      check((await page.locator("#result-count").innerText()).includes("2 nodes"), "lane collapse did not reduce visible canonical nodes");
       await page.getByRole("button", { name: "Expand L1" }).click();
       await page.waitForSelector("#flow-frame[data-layout-status='ready']");
       const firstNode = page.locator("#flow-frame svg .flow-node").first();
@@ -158,7 +188,7 @@ async function screenshot(page, name, fullPage = true) {
       await page.waitForSelector("#source-drawer", { state: "detached" });
       evidence.screenshots.push(await screenshot(page, "project-flow-1920x1080.png", false));
       check(errors.length === 0, "Chrome console errors: " + errors.join(" | "));
-      evidence.checks.push("project lead, filtering, period selection, sorting, ELK flow, lane collapse, zoom, keyboard and source drawer");
+      evidence.checks.push("project lead, filtering, period selection, sorting, status/risk visualization, typed node items, ELK flow, full screen, lane collapse, zoom, keyboard and source drawer");
       await context.close();
     }
 
