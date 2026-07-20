@@ -66,7 +66,11 @@ def build_progress_projection(
         }
         - {""}
     )
-    if "L0" not in workstream_ids:
+    has_physical_l0_scope = any(
+        workstream_id.casefold() == "l0" or workstream_id.casefold().startswith("l0-")
+        for workstream_id in workstream_ids
+    )
+    if "L0" not in workstream_ids and not has_physical_l0_scope:
         workstream_ids.insert(0, "L0")
 
     by_workstream: list[dict[str, Any]] = []

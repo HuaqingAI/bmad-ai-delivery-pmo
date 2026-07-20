@@ -1182,6 +1182,46 @@ class ProgramStatusTests(unittest.TestCase):
             virtual = next(item for item in model["progress"]["by_scope"] if item["scope_id"] == "program")
             self.assertEqual("virtual", virtual["scope_kind"])
 
+    def test_physical_l0_milestones_do_not_create_legacy_l0_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = {"type": "approved-plan", "reference": "docs/plan.md", "confirmed_by": "Owner"}
+            milestones = [
+                {
+                    "id": milestone_id,
+                    "name": milestone_id,
+                    "workstream_id": "l0-foundation-platform",
+                    "planned_date": "2026-07-20",
+                    "owner": "Owner",
+                    "confirmation_status": "approved",
+                    "source": source,
+                    "dependencies": [],
+                    "baseline_revision": 1,
+                    "completion_criteria": "Stage evidence is accepted.",
+                    "weight": 25,
+                }
+                for milestone_id in (
+                    "MS-L0-PRD-READY",
+                    "MS-L0-ARCHITECTURE-READY",
+                    "MS-L0-MVP-COMPLETE",
+                    "MS-L0-V0.9-INTEGRATION-READY",
+                )
+            ]
+            baseline = self.baseline(
+                milestones=milestones,
+                critical_path=[],
+                weighting={"enabled": True, "completion_measure": "stage attainment", "source": source},
+            )
+            memory = self.scaffold(root, baseline, {"l0-foundation-platform": []})
+            audit = self.write_audit(root, memory)
+
+            _, result = self.generate(root, audit)
+            model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+            physical_ids = [item["scope_id"] for item in model["progress"]["by_scope"] if item["scope_kind"] == "physical"]
+
+            self.assertEqual(["l0-foundation-platform"], physical_ids)
+            self.assertNotIn("L0", physical_ids)
+
     def test_virtual_signal_conflict_blocks_instead_of_overwriting_aggregation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
