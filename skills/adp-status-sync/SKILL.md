@@ -17,6 +17,7 @@ The consumer is the FDE owner, project lead, and later ADP reports. They need to
 - `{project-root}` -> the project working directory.
 - `{skill-name}` -> the skill directory's basename.
 - When executing skill-owned scripts in a shell, use `{skill-root}/scripts/...`. Do not rely on the shell working directory resolving `scripts/...`, because commands usually run from `{project-root}`.
+- Prefer `uv run`; if `uv` is unavailable, run the identical script and arguments with Python 3.10+.
 
 ## On Activation
 
@@ -61,15 +62,9 @@ Add only fields that are reliable:
 
 For multiple workstreams, workflow-produced actions, updates-file execution, or receipt migration, load `references/batch-status-updates.md`; it owns the payload contract, preview acceptance, atomic apply, durable receipts, and historical migration.
 
-If `uv` or Python is unavailable, manual fallback is valid only for one named workstream's volatile WDR fields plus one daily-log append. Batch files, milestones, structured actions, receipt-required intake, and any atomic multi-file update are blocked; preserve their input unchanged for retry.
+If neither runtime works, manual fallback is valid only for one named workstream's volatile WDR fields plus one daily-log append. Batch files, milestones, structured actions, receipt-required intake, and any atomic multi-file update are blocked; preserve their input unchanged for retry.
 
-For milestone updates, the script reads `plans/program-baseline.md` and validates the current revision, exact case-sensitive milestone ID, and owning workstream before any write. Unknown milestones never become implicit plan entries. It writes forecast, actual, status, evidence, and baseline lineage to the targeted WDR `Roadmap` row; planned date, name, owner, and dependencies continue to come from the baseline. Every milestone update requires traceable evidence. The baseline itself is never modified.
-
-The writer preflights every target, stages coupled files atomically, and returns changed fields, milestone lineage, action IDs, and unresolved gaps. Any milestone mapping failure blocks the command before publication.
-
-WDR `Next actions` is an explicit projection boundary. With neither `--next-action` nor `--refresh-actions`, preserve the existing field byte-for-byte. Explicit `--next-action` replaces only that field with the supplied content and never merges the ledger. `--refresh-actions` projects active actions whose target is the physical Workstream or whose `affected_workstreams` explicitly contains it; it preserves human entries without a stable action marker and updates/removes ledger-backed entries by stable action ID. Structured action mutations refresh no WDR unless the update also sets `refresh_actions: true`.
-
-The shared scope contract classifies CLI-normalized `program` as virtual. Program action-only updates continue to write the action ledger and daily log without finding a WDR. Program milestone, WDR field, or action-refresh updates fail with `ADP-VIRTUAL-SCOPE-NOT-WDR-TARGET`. A dependency-only update changes only `Dependencies` and `Last status sync` in dry-run and apply.
+The writer preflights every target, stages coupled files atomically, and returns changed fields, milestone lineage, exact action IDs, unresolved gaps, `refresh_required`, and the next panel-refresh command. Any milestone mapping failure blocks the command before publication.
 
 ## Versioned Action Flow Relations
 
@@ -83,7 +78,23 @@ To find records that need an owner follow-up, run:
 uv run "{skill-root}/scripts/sync_status.py" stale "{project-root}" --max-age-days 7
 ```
 
-Treat missing `Last status sync` as stale unless the user is still registering the workstream. Staleness creates follow-up candidates; it does not prove delivery risk by itself.
+Add `--as-of YYYY-MM-DD` when a reproducible age calculation must use a caller-owned date instead of today. Treat missing `Last status sync` as stale unless the user is still registering the workstream. Staleness creates follow-up candidates; it does not prove delivery risk by itself.
+
+## Projection Repair
+
+Use only a repair batch emitted by `adp-state-audit`. Dry-run one exact batch to revalidate ledger/WDR/sidecar fingerprints and revisions and issue a 15-minute single-use token:
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" repair "{project-root}" --memory-root <memory-root> --audit-json <audit.json> --batch-id <repair-batch-id> --dry-run
+```
+
+Add `--principal <id>` to bind the repair attempt and receipt to a stable operator or automation principal; the default is `adp-status-sync`. Carry the same principal from dry-run to apply.
+
+Apply the same batch with the returned token. The operation rewrites only the target WDR `Next actions`, its WDR state, and `action-projection.json`, then records nonce and attempt receipts. Process batches in sorted batch-ID order and stop on the first failure. Previously committed batches remain committed; rerun `adp-state-audit`, dry-run the failed batch against current facts, and use the new token.
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" repair "{project-root}" --memory-root <memory-root> --audit-json <audit.json> --batch-id <repair-batch-id> --token <single-use-token>
+```
 
 ## Escalation
 
@@ -106,9 +117,7 @@ With `--headless`, require `{project-root}` plus either one unambiguous workstre
 ## Guardrails
 
 - Update only volatile project-status fields unless the user explicitly asks for deeper review.
-- `adp-plan-baseline` is the only baseline writer. Status sync records actual-state facts and never changes planned facts.
 - BMM artifacts remain the source of truth; status sync stores links and short management-level deltas only.
-- `actions/action-ledger.md` is the ADP action source of truth. `views/fde-actions.md` is a derived view, and WDR `Next actions` changes only through explicit `next_actions` content or `refresh_actions` projection.
 - Preserve existing user content outside the targeted WDR fields and daily-log append.
 - Never treat a dry-run, wrapper attestation, nested receipt binding, or unbound historical report as proof that an intake was applied.
 - Make no-op explicit when a status note contains no reliable change.

@@ -428,6 +428,9 @@ def normalize_handoff_action(raw: dict[str, Any], default_workstream: str, defau
     action_id = clean_text(raw.get("action_id") or raw.get("id"))
     if action_id:
         action["action_id"] = action_id
+    command_id = clean_text(raw.get("command_id"))
+    if command_id:
+        action["command_id"] = command_id
     return action
 
 
@@ -567,16 +570,33 @@ def status_sync_intake_path(memory_root: Path, workstream_id: str, checkpoint: s
 def status_sync_intake_payload(
     actions: list[dict[str, Any]],
     projection_workstream_id: str,
+    stable_key: str,
 ) -> dict[str, Any]:
     updates: list[dict[str, Any]] = []
     by_id: dict[str, list[dict[str, Any]]] = {}
     order: list[str] = []
-    for action in actions:
-        update_id = clean_text(action.get("workstream")) or "program"
+    for ordinal, action in enumerate(actions):
+        identity_digest = stable_digest(
+            {
+                "namespace": "adp-bmm-checkpoint-action-v1",
+                "stable_key": stable_key,
+                "ordinal": ordinal,
+            },
+            24,
+        )
+        typed_action = dict(action)
+        typed_action["operation"] = "create"
+        typed_action.setdefault("action_id", f"ACT-BMM-{identity_digest}")
+        typed_action.setdefault("command_id", f"cmd-bmm-{identity_digest}")
+        typed_action.setdefault(
+            "evidence",
+            [{"source": clean_text(typed_action.get("source")) or "adp-bmm-checkpoint-sync"}],
+        )
+        update_id = clean_text(typed_action.get("workstream")) or "program"
         if update_id not in by_id:
             by_id[update_id] = []
             order.append(update_id)
-        by_id[update_id].append(action)
+        by_id[update_id].append(typed_action)
     for update_id in order:
         updates.append(
             {
@@ -605,7 +625,7 @@ def write_status_sync_intake(
     dry_run: bool,
 ) -> tuple[Path, bool]:
     path = status_sync_intake_path(memory_root, workstream_id, checkpoint, stable_key, dry_run)
-    payload = status_sync_intake_payload(actions, workstream_id)
+    payload = status_sync_intake_payload(actions, workstream_id, stable_key)
     canonical = canonical_json(payload)
     if dry_run:
         return path, False

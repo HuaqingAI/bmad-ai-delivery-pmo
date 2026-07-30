@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -31,6 +32,8 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_ROOT = SKILL_ROOT.parent
 DEFAULT_CONFIG_SCRIPT = SKILLS_ROOT / "adp-plan-baseline" / "scripts" / "adp_effective_config.py"
 LANGUAGE_CONTEXT: dict[str, Any] = {"locale": "en", "module": None, "metadata": {}}
+STATUS_INTENT_OUTBOX_REL = Path("state") / "status-intent-outbox.json"
+FACT_LOCK_REL = Path("state") / "fact-write.lock"
 
 CLASSIFICATIONS = {
     "fact",
@@ -176,7 +179,11 @@ def main() -> int:
     if args.verbose:
         print(f"Using memory root: {memory_root}", file=sys.stderr)
 
-    result = apply_plan(project_root, memory_root, normalized, templates, args.dry_run)
+    try:
+        result = apply_plan(project_root, memory_root, normalized, templates, args.dry_run)
+    except ValueError as exc:
+        emit({"ok": False, "error": str(exc)}, args.output)
+        return 2
     result["language"] = LANGUAGE_CONTEXT["metadata"]
     emit(result, args.output)
     return 0 if result["ok"] else 1
@@ -279,6 +286,34 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         item["id"] = string_value(item.get("id")) or f"M-{index:03d}"
         item["classification"] = normalize_classification(item.get("classification"))
         item["text"] = string_value(item.get("text"))
+        item["action_id"] = string_value(item.get("action_id"))
+        item["action_operation"] = string_value(item.get("action_operation") or item.get("operation"))
+        item["expected_action_revision"] = item.get(
+            "expected_action_revision", item.get("expected_revision")
+        )
+        item["action_patch_text"] = string_value(item.get("action"))
+        item["action_patch_affected_workstreams"] = normalize_workstreams(
+            item.get("action_affected_workstreams")
+        )
+        item["action_field_presence"] = sorted(
+            field_name
+            for field_name, aliases in {
+                "status": ("status",),
+                "owner": ("owner",),
+                "action": ("action",),
+                "due_or_trigger": ("due", "trigger"),
+                "closure_criteria": ("closure_criteria",),
+                "affected_workstreams": ("action_affected_workstreams",),
+            }.items()
+            if any(alias in raw_item for alias in aliases)
+        )
+        raw_status_intent = item.get("status_intent", item.get("current_field_update"))
+        if raw_status_intent in (None, {}):
+            item["status_intent"] = {}
+        elif isinstance(raw_status_intent, dict):
+            item["status_intent"] = normalize_status_intent(raw_status_intent)
+        else:
+            raise ValueError(f"items[{index}].status_intent must be an object")
         item["affected_workstreams"] = normalize_workstreams(item.get("affected_workstreams"))
         item["owner"] = string_value(item.get("owner")) or "TBD"
         item["due"] = string_value(item.get("due")) or string_value(item.get("trigger")) or "TBD"
@@ -288,6 +323,8 @@ def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         )
         item["confirmer"] = string_value(item.get("confirmer")) or "TBD"
         item["status"] = string_value(item.get("status")) or default_status(item["classification"])
+        if item["classification"] == "action":
+            item["status"] = normalize_action_status(item["status"])
         item["wdr_update"] = string_value(item.get("wdr_update"))
         item["no_op_reason"] = string_value(item.get("no_op_reason"))
         item["closure_criteria"] = string_value(item.get("closure_criteria"))
@@ -407,12 +444,60 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
             decision_needed = string_value(packet.get("decision_needed"))
             if not decision_needed:
                 errors.append(prefix + "business_decision_needed requires packet.decision_needed")
+        if item["action_operation"] not in {"", "create", "patch"}:
+            errors.append(prefix + f"unsupported action operation {item['action_operation']!r}")
+        if item["action_id"] or item["action_operation"] == "patch":
+            if item["classification"] != "action":
+                errors.append(prefix + "action_id/action_operation is only valid for action items")
+            if not item["action_id"]:
+                errors.append(prefix + "action patch requires action_id")
+            revision = item["expected_action_revision"]
+            if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+                errors.append(prefix + "action patch requires positive expected_action_revision")
+            if not item["action_field_presence"]:
+                errors.append(prefix + "action patch must include at least one mutable field")
+        if item["status_intent"] and not item["affected_workstreams"]:
+            errors.append(prefix + "status_intent requires an affected workstream")
     return errors
+
+
+def normalize_status_intent(raw: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "status",
+        "phase",
+        "progress",
+        "blockers",
+        "risks",
+        "dependencies",
+        "change_notes",
+        "refresh_actions",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("status_intent contains unsupported fields: " + ", ".join(unknown))
+    normalized: dict[str, Any] = {}
+    for field_name, value in raw.items():
+        if field_name == "refresh_actions":
+            if value is not True:
+                raise ValueError("status_intent.refresh_actions must be true when supplied")
+            normalized[field_name] = True
+        elif field_name in {"blockers", "risks", "dependencies", "change_notes"}:
+            if not isinstance(value, list):
+                raise ValueError(f"status_intent.{field_name} must be a list")
+            normalized[field_name] = [string_value(item) for item in value if string_value(item)]
+        else:
+            text = string_value(value)
+            if not text:
+                raise ValueError(f"status_intent.{field_name} must be non-empty")
+            normalized[field_name] = text
+    if not normalized:
+        raise ValueError("status_intent must contain at least one field")
+    return normalized
 
 
 @contextmanager
 def meeting_sync_lock(memory_root: Path):
-    lock_path = memory_root / ".meeting-sync.lock"
+    lock_path = memory_root / FACT_LOCK_REL
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as handle:
         acquire_file_lock(handle)
@@ -715,6 +800,7 @@ def _apply_plan_once(
         "status_sync_intake_files": [],
         "workstream_records": [],
         "workstream_decisions": [],
+        "status_intent_outbox": [],
     }
     unresolved_gaps: list[str] = []
 
@@ -722,7 +808,7 @@ def _apply_plan_once(
     meeting_path = memory_root / "meetings" / (
         f"{meeting['date']}-{slugify(meeting['type'])}-{slugify(meeting['title'])}-{instance_suffix}.md"
     )
-    raw_evidence_path, raw_evidence_gap = copy_raw_evidence(project_root, memory_root, meeting, dry_run)
+    raw_evidence_path, raw_evidence_gap = copy_raw_evidence(project_root, memory_root, meeting, True)
     if raw_evidence_path:
         meeting["raw_evidence"] = rel_to_memory(memory_root, raw_evidence_path)
         touched["raw_evidence_files"].append(str(raw_evidence_path))
@@ -734,6 +820,17 @@ def _apply_plan_once(
     for item in items:
         if item["classification"] == "business_decision_needed":
             item["packet_path"] = business_packet_path(memory_root, meeting, item, dry_run)
+
+    status_sync_intake, action_quality_audit, milestone_quality_audit = build_status_sync_intake(
+        memory_root, meeting_path, meeting, items
+    )
+    unresolved_gaps.extend(
+        f"{item['item_id']}: {gap}"
+        for item in milestone_quality_audit["blocked_milestones"]
+        for gap in item["gaps"]
+    )
+    if raw_evidence_path and not dry_run:
+        copy_raw_evidence(project_root, memory_root, meeting, False)
 
     closure_rows, item_details, item_destinations = render_item_outputs(
         memory_root,
@@ -824,14 +921,6 @@ def _apply_plan_once(
                         f"{item['id']}: WDR update references missing workstream {workstream_id}"
                     )
 
-    status_sync_intake, action_quality_audit, milestone_quality_audit = build_status_sync_intake(
-        memory_root, meeting_path, meeting, items
-    )
-    unresolved_gaps.extend(
-        f"{item['item_id']}: {gap}"
-        for item in milestone_quality_audit["blocked_milestones"]
-        for gap in item["gaps"]
-    )
     if status_sync_intake:
         intake_path = status_sync_intake_path(memory_root, meeting, dry_run)
         write_file(
@@ -840,8 +929,31 @@ def _apply_plan_once(
             dry_run,
         )
         touched["status_sync_intake_files"].append(str(intake_path))
+        if status_sync_intake.get("status_intents"):
+            outbox_path = memory_root / STATUS_INTENT_OUTBOX_REL
+            append_pending_status_intents(
+                outbox_path,
+                status_sync_intake["status_intents"],
+                meeting["meeting_instance_id"],
+                dry_run,
+            )
+            touched["status_intent_outbox"].append(str(outbox_path))
 
-    return {
+    intake_files = touched["status_sync_intake_files"]
+    next_command_args = (
+        [
+            "adp-status-sync",
+            "update",
+            str(project_root),
+            "--memory-root",
+            str(memory_root),
+            "--updates-file",
+            str(intake_files[0]),
+        ]
+        if intake_files
+        else []
+    )
+    result = {
         "ok": True,
         "dry_run": dry_run,
         "memory_root": str(memory_root),
@@ -857,7 +969,16 @@ def _apply_plan_once(
             touched["status_sync_intake_files"],
             action_quality_audit,
         ),
+        "refresh_required": not dry_run,
+        "dirty_hints": sorted(
+            rel_to_memory(memory_root, Path(path))
+            for paths in touched.values()
+            for path in paths
+        ),
+        "next_command": shlex.join(next_command_args) if next_command_args else None,
+        "next_command_args": next_command_args,
     }
+    return result
 
 
 def ensure_directories(memory_root: Path, dry_run: bool) -> None:
@@ -1276,6 +1397,7 @@ def build_status_sync_intake(
     meeting: dict[str, Any],
     items: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    today = date.fromisoformat(meeting["date"])
     audit = {
         "actions_seen": 0,
         "canonical_actions": 0,
@@ -1287,11 +1409,12 @@ def build_status_sync_intake(
         "workstream_gap_count": 0,
         "closure_gap_count": 0,
         "past_due_open_count": 0,
-        "status_calibrated_count": 0,
+        "status_review_required_count": 0,
         "blocked_actions": [],
-        "status_calibrations": [],
+        "action_quality_signals": [],
     }
     canonical_actions: dict[str, dict[str, Any]] = {}
+    status_intents: list[dict[str, Any]] = []
     milestone_audit = {
         "milestones_seen": 0,
         "ledger_ready_milestones": 0,
@@ -1304,9 +1427,16 @@ def build_status_sync_intake(
         audit["actions_seen"] += 1
         source = f"{rel_to_memory(memory_root, meeting_path)}#{item['id']}"
         affected_workstreams = item["affected_workstreams"]
-        blocking_gaps = action_blocking_gaps(item)
+        is_patch = bool(item["action_id"] or item["action_operation"] == "patch")
+        routing_workstreams = (
+            affected_workstreams
+            or (existing_action_routing(memory_root, item["action_id"]) if is_patch else [])
+        )
+        blocking_gaps = action_blocking_gaps(item, patch=is_patch)
         closure_criteria = item["closure_criteria"]
-        closure_gap = is_missing_closure_criteria(closure_criteria) or bool(item["closure_gap"])
+        closure_gap = (not is_patch) and (
+            is_missing_closure_criteria(closure_criteria) or bool(item["closure_gap"])
+        )
         if closure_gap:
             audit["closure_gap_count"] += 1
             closure_criteria = "TBD"
@@ -1329,78 +1459,131 @@ def build_status_sync_intake(
             )
             continue
 
-        original_status = normalize_action_status(item["status"])
+        original_status = (
+            normalize_action_status(item["status"])
+            if not is_patch or "status" in item["action_field_presence"]
+            else None
+        )
         status = original_status
         reason_parts = [item["wdr_update"] or f"Meeting action from {meeting['title']}"]
         if affected_workstreams:
             reason_parts.append(f"Affected workstreams: {', '.join(affected_workstreams)}")
         if closure_gap:
             reason_parts.append(item["closure_gap"] or "Closure criteria is missing")
-            if status == "open":
-                status = "blocked"
-                audit["status_calibrated_count"] += 1
-                audit["status_calibrations"].append(
-                    {"id": item["id"], "from": "open", "to": "blocked", "reason": "closure criteria gap"}
-                )
 
         due_date = parse_due_date(item["due"])
         past_due_needs_confirmation = (
             due_date is not None
-            and due_date < date.today()
+            and due_date < today
             and original_status == "open"
             and not item["status_confirmation"]
         )
         if past_due_needs_confirmation:
             audit["past_due_open_count"] += 1
             reason_parts.append("Past due and needs status confirmation")
-            if status == "open":
-                audit["status_calibrated_count"] += 1
-                status = "blocked"
-                audit["status_calibrations"].append(
-                    {"id": item["id"], "from": "open", "to": "blocked", "reason": "past due without status confirmation"}
-                )
+        if closure_gap or past_due_needs_confirmation:
+            audit["status_review_required_count"] += 1
+            audit["action_quality_signals"].append(
+                {
+                    "id": item["id"],
+                    "source": source,
+                    "supplied_status": original_status,
+                    "closure_missing": closure_gap,
+                    "due_date": due_date.isoformat() if due_date else None,
+                    "overdue": bool(due_date and due_date < today),
+                    "status_confirmation_missing": past_due_needs_confirmation,
+                }
+            )
 
-        key = canonical_action_key(source, item)
+        key = item["action_id"] if is_patch else canonical_action_key(source, item)
         action = canonical_actions.get(key)
         if action:
+            if is_patch:
+                raise ValueError(f"meeting contains duplicate patch for action {item['action_id']}")
             audit["duplicate_actions_merged"] += 1
             action["affected_workstreams"] = merge_values(action["affected_workstreams"], affected_workstreams)
             action["reason_parts"] = merge_values(action["reason_parts"], reason_parts)
             continue
 
-        canonical_actions[key] = {
-            "owner": item["owner"],
-            "action": item["text"],
-            "source": source,
-            "reason_parts": reason_parts,
-            "due": item["due"],
-            "status": status,
-            "closure_criteria": closure_criteria or "TBD",
-            "owning_workflow": "adp-meeting-sync",
-            "affected_workstreams": affected_workstreams,
-        }
+        command_id = stable_command_id(meeting, item, "action")
+        if is_patch:
+            patch_payload: dict[str, Any] = {
+                "operation": "patch",
+                "command_id": command_id,
+                "action_id": item["action_id"],
+                "expected_action_revision": item["expected_action_revision"],
+                "evidence": [meeting_evidence(meeting, source)],
+            }
+            field_map = {
+                "status": status,
+                "owner": item["owner"],
+                "action": item["action_patch_text"],
+                "due_or_trigger": item["due"],
+                "closure_criteria": closure_criteria,
+                "affected_workstreams": item["action_patch_affected_workstreams"],
+            }
+            for field_name in item["action_field_presence"]:
+                patch_payload[field_name] = field_map[field_name]
+            canonical_actions[key] = patch_payload
+            canonical_actions[key]["_routing_workstreams"] = routing_workstreams
+        else:
+            canonical_actions[key] = {
+                "operation": "create",
+                "command_id": command_id,
+                "action_id": stable_meeting_action_id(meeting, item),
+                "owner": item["owner"],
+                "action": item["text"],
+                "source": source,
+                "reason_parts": reason_parts,
+                "due": item["due"],
+                "status": status,
+                "closure_criteria": closure_criteria or "TBD",
+                "owning_workflow": "adp-meeting-sync",
+                "affected_workstreams": affected_workstreams,
+                "evidence": [meeting_evidence(meeting, source)],
+                "_routing_workstreams": affected_workstreams,
+            }
 
     updates_by_workstream: dict[str, dict[str, Any]] = {}
     for action in canonical_actions.values():
-        affected_workstreams = action["affected_workstreams"]
-        action_workstream = canonical_action_workstream(affected_workstreams)
-        action["workstream"] = action_workstream
-        action["reason"] = "; ".join(action.pop("reason_parts"))
-        if len(affected_workstreams) > 1:
-            audit["fanout_suppressed"] += len(affected_workstreams) - 1
+        routing_workstreams = action.pop("_routing_workstreams", action.get("affected_workstreams", []))
+        action_workstream = canonical_action_workstream(routing_workstreams)
+        if action["operation"] == "create":
+            action["workstream"] = action_workstream
+            action["reason"] = "; ".join(action.pop("reason_parts"))
+        if len(routing_workstreams) > 1:
+            audit["fanout_suppressed"] += len(routing_workstreams) - 1
+        mutation_refreshes_wdr = len(routing_workstreams) == 1
         update = updates_by_workstream.setdefault(
             action_workstream,
             {
                 "id": action_workstream,
                 "source": "adp-meeting-sync",
                 "next_actions": [],
+                "refresh_actions": mutation_refreshes_wdr,
                 "actions": [],
             },
         )
-        if action_workstream not in {"program", "project", "adp-program"}:
-            if action["action"] not in update["next_actions"]:
-                update["next_actions"].append(action["action"])
+        if (
+            action["operation"] == "create"
+            and action_workstream not in {"program", "project", "adp-program"}
+            and action["action"] not in update["next_actions"]
+        ):
+            update["next_actions"].append(action["action"])
         update["actions"].append(action)
+        if not mutation_refreshes_wdr:
+            for workstream_id in routing_workstreams:
+                projection_update = updates_by_workstream.setdefault(
+                    workstream_id,
+                    {
+                        "id": workstream_id,
+                        "source": "adp-meeting-sync",
+                        "next_actions": [],
+                        "refresh_actions": True,
+                        "actions": [],
+                    },
+                )
+                projection_update["refresh_actions"] = True
 
     for item in items:
         for milestone in item["milestones"]:
@@ -1423,6 +1606,30 @@ def build_status_sync_intake(
             update.setdefault("milestones", []).append(payload)
             milestone_audit["ledger_ready_milestones"] += 1
 
+    for item in items:
+        if not item["status_intent"]:
+            continue
+        for workstream_id in item["affected_workstreams"]:
+            source = f"{rel_to_memory(memory_root, meeting_path)}#{item['id']}"
+            intent = {
+                "intent_id": stable_command_id(meeting, item, f"status-{workstream_id}"),
+                "origin_producer": "adp-meeting-sync",
+                "workstream_id": workstream_id,
+                "set": dict(item["status_intent"]),
+                "evidence": [meeting_evidence(meeting, source)],
+            }
+            status_intents.append(intent)
+            update = updates_by_workstream.setdefault(
+                workstream_id,
+                {"id": workstream_id, "source": "adp-meeting-sync", "next_actions": [], "actions": []},
+            )
+            for field_name, value in intent["set"].items():
+                if field_name in update and update[field_name] != value:
+                    raise ValueError(
+                        f"meeting status intents conflict for {workstream_id}.{field_name}"
+                    )
+                update[field_name] = value
+
     audit["canonical_actions"] = len(canonical_actions)
     audit["ledger_ready_actions"] = sum(len(update["actions"]) for update in updates_by_workstream.values())
     if not updates_by_workstream:
@@ -1441,20 +1648,27 @@ def build_status_sync_intake(
         meeting_payload["lineage"] = dict(meeting["lineage"])
     return {
         "generated_by": "adp-meeting-sync",
+        "schema_version": "2.0.0",
         "meeting": meeting_payload,
         "action_quality_audit": audit,
         "milestone_quality_audit": milestone_audit,
         "updates": list(updates_by_workstream.values()),
+        "action_commands": sorted(canonical_actions.values(), key=lambda item: item["command_id"]),
+        "status_intents": sorted(status_intents, key=lambda item: item["intent_id"]),
+        "outbox": {
+            "pending_intent_ids": sorted(item["intent_id"] for item in status_intents),
+            "consumed_intent_ids": [],
+        },
     }, audit, milestone_audit
 
 
-def action_blocking_gaps(item: dict[str, Any]) -> list[dict[str, str]]:
+def action_blocking_gaps(item: dict[str, Any], patch: bool = False) -> list[dict[str, str]]:
     gaps: list[dict[str, str]] = []
-    if not item["affected_workstreams"]:
+    if not patch and not item["affected_workstreams"]:
         gaps.append({"type": "workstream", "message": "affected workstream is missing"})
-    if is_missing_owner(item["owner"]) or item["owner_gap"]:
+    if not patch and (is_missing_owner(item["owner"]) or item["owner_gap"]):
         gaps.append({"type": "owner", "message": item["owner_gap"] or "action owner is missing"})
-    if is_missing_due(item["due"]):
+    if not patch and is_missing_due(item["due"]):
         gaps.append({"type": "due", "message": "action due trigger is missing"})
     return gaps
 
@@ -1471,12 +1685,104 @@ def canonical_action_key(source: str, item: dict[str, Any]) -> str:
     )
 
 
+def stable_command_id(meeting: dict[str, Any], item: dict[str, Any], purpose: str) -> str:
+    digest = hashlib.sha256(
+        f"{meeting['meeting_instance_id']}\0{item['id']}\0{purpose}".encode()
+    ).hexdigest()[:24]
+    return f"cmd-meeting-{digest}"
+
+
+def stable_meeting_action_id(meeting: dict[str, Any], item: dict[str, Any]) -> str:
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "meeting_instance_id": meeting["meeting_instance_id"],
+                "item_id": item["id"],
+                "text": item["text"],
+                "affected_workstreams": item["affected_workstreams"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16].upper()
+    return f"ACT-MTG-{digest}"
+
+
+def meeting_evidence(meeting: dict[str, Any], source: str) -> dict[str, str]:
+    observed_at = meeting.get("ended_at") or meeting.get("started_at") or f"{meeting['date']}T23:59:59Z"
+    parsed = parse_timestamp(observed_at)
+    if parsed is None:
+        raise ValueError("meeting evidence timestamp is invalid")
+    return {
+        "source": source,
+        "observed_at": parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "source_fingerprint": meeting["plan_fingerprint"],
+    }
+
+
 def canonical_action_workstream(affected_workstreams: list[str]) -> str:
     if len(affected_workstreams) == 1:
         return affected_workstreams[0]
     if len(affected_workstreams) > 1:
         return "program"
-    return "TBD"
+    return "program"
+
+
+def existing_action_routing(memory_root: Path, action_id: str) -> list[str]:
+    ledger_path = memory_root / "actions/action-ledger.md"
+    if not action_id or not ledger_path.is_file():
+        return []
+    lines = [line for line in ledger_path.read_text(encoding="utf-8-sig").splitlines() if line.strip().startswith("|")]
+    if len(lines) < 2:
+        return []
+    headers = split_markdown_row(lines[0])
+    matches: list[dict[str, str]] = []
+    for line in lines[1:]:
+        cells = split_markdown_row(line)
+        if len(cells) != len(headers) or all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in cells):
+            continue
+        row = dict(zip(headers, cells, strict=True))
+        if row.get("Action ID") == action_id:
+            matches.append(row)
+    if len(matches) > 1:
+        raise MeetingSyncConflict(f"action ledger contains duplicate action ID {action_id}")
+    if not matches:
+        return []
+    row = matches[0]
+    raw_targets = [
+        row.get("Workstream", ""),
+        *re.split(r"\s*[,;]\s*", row.get("Affected Workstreams", "")),
+    ]
+    return sorted(
+        {
+            normalized
+            for raw in raw_targets
+            if (normalized := slugify(raw)) not in {"", "program", "project", "adp-program", "tbd"}
+        }
+    )
+
+
+def split_markdown_row(line: str) -> list[str]:
+    stripped = line.strip().strip("|")
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in stripped:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    return cells
 
 
 def merge_values(existing: list[str], new_values: list[str]) -> list[str]:
@@ -1497,7 +1803,7 @@ def normalize_action_status(raw: Any) -> str:
         return status
     if status in {"in progress", "inprogress"}:
         return "in-progress"
-    return "open"
+    raise ValueError("action status must be one of: blocked, cancelled, done, in-progress, open")
 
 
 def meeting_receipt_path(memory_root: Path, meeting: dict[str, Any]) -> Path:
@@ -1630,6 +1936,51 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     write_text_atomic(path, content)
+
+
+def append_pending_status_intents(
+    path: Path,
+    intents: list[dict[str, Any]],
+    producer_receipt_id: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    current = load_json_object(path) if path.is_file() else {}
+    existing_rows = current.get("intents", []) if isinstance(current.get("intents"), list) else []
+    by_id = {
+        str(row.get("intent_id")): dict(row)
+        for row in existing_rows
+        if isinstance(row, dict) and row.get("intent_id")
+    }
+    for intent in intents:
+        intent_id = str(intent["intent_id"])
+        payload_hash = fingerprint_json(intent)
+        existing = by_id.get(intent_id)
+        if existing:
+            if existing.get("payload_hash") != payload_hash:
+                raise MeetingSyncConflict(f"status intent {intent_id} already exists with different bytes")
+            continue
+        by_id[intent_id] = {
+            "intent_id": intent_id,
+            "state": "pending",
+            "payload_hash": payload_hash,
+            "producer": "adp-meeting-sync",
+            "producer_receipt_id": producer_receipt_id,
+            "intent": intent,
+            "consumed_by": None,
+            "consumed_at": None,
+        }
+    payload = {
+        "schema_version": "1.0.0",
+        "pending": sorted(key for key, row in by_id.items() if row.get("state") == "pending"),
+        "consumed": sorted(key for key, row in by_id.items() if row.get("state") == "consumed"),
+        "failed": [],
+        "waived": [],
+        "intents": [by_id[key] for key in sorted(by_id)],
+    }
+    payload["state_id"] = fingerprint_json(payload)
+    if not dry_run:
+        write_json_atomic(path, payload)
+    return payload
 
 
 def write_text_atomic(path: Path, content: str) -> None:
@@ -1930,10 +2281,17 @@ def next_actions(
 ) -> list[str]:
     actions: list[str] = []
     for path in status_sync_intake_files:
-        actions.append(runtime_message("meeting_sync.next.status_sync", project_root=project_root, path=path))
+        actions.append(
+            runtime_message(
+                "meeting_sync.next.status_sync",
+                project_root=project_root,
+                memory_root=memory_root,
+                path=path,
+            )
+        )
     if action_quality_audit.get("blocked_actions"):
         actions.append(runtime_message("meeting_sync.next.resolve_actions"))
-    if action_quality_audit.get("status_calibrated_count"):
+    if action_quality_audit.get("status_review_required_count"):
         actions.append(runtime_message("meeting_sync.next.review_actions"))
     if has_missing_workstream_route(memory_root, items):
         actions.append(runtime_message("meeting_sync.next.workstream"))

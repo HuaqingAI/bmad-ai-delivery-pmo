@@ -19,6 +19,7 @@ TARGETS = {
 }
 EXEMPTION_REGISTRIES = {
     "meeting": {"MEETING_SYSTEM_LINES", "MEETING_SYSTEM_PREFIXES", "MEETING_CANONICAL_FACT_COPY"},
+    "risk": {"RISK_CANONICAL_SOURCE_SECTIONS"},
     "l0": {"L0_SYSTEM_COPY", "L0_SYSTEM_PREFIXES"},
 }
 SYSTEM_PREFIX = re.compile(r"^(?:#{1,3} |\| [A-Z]|(?:Generated|Created|Source|Date|Status|Owner):)")

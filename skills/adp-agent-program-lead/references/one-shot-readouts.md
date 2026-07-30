@@ -12,6 +12,8 @@ This file is the standalone execution contract for every Program Lead readout.
 uv run "{project-root}/_bmad/scripts/resolve_customization.py" --skill "{skill-root}" --key workflow
 ```
 
+If the resolver is unavailable, read and merge `{skill-root}/customize.toml`, `{project-root}/_bmad/custom/adp-agent-program-lead.toml`, and `{project-root}/_bmad/custom/adp-agent-program-lead.user.toml` in order: the last scalar wins, tables deep-merge, table-array entries replace or append by `code`/`id`, and other arrays append. Read only `[workflow]`; `[agent]` remains an install-time identity contract.
+
 Resolve configuration before either consumer:
 
 ```bash
@@ -33,11 +35,12 @@ uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --inten
 uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent meeting-preparation --scenario <fde-morning|business-biweekly> --memory-root "{adp-state-root}"
 ```
 
-Panel requests use the same canonical consumer before routing. It never renders HTML or writes browser state:
+An explicit end-to-end refresh or resume request routes directly to `adp-panel-refresh` after runtime-root resolution. Do not gate repair of stale or missing projections on an existing canonical Panel; the refresh orchestrator owns `policy -> detect -> plan -> apply -> inspect` and returns the durable resume plan when interrupted.
+
+Panel readiness, open, and archive requests consume the existing canonical Panel before routing. The consumer never renders HTML or writes browser state:
 
 ```bash
 uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-readiness --panel-view <project-lead|fde-morning|business-biweekly> --memory-root "{adp-state-root}"
-uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-refresh --panel-view <view> --memory-root "{adp-state-root}"
 uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-open --panel-view <view> --memory-root "{adp-state-root}"
 uv run "{skill-root}/scripts/consume_program_status.py" "{project-root}" --intent panel-archive --panel-view <view> --distribution-profile <internal-full|shareable-summary> --memory-root "{adp-state-root}"
 ```

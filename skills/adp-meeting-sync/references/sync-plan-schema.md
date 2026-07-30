@@ -51,6 +51,15 @@ The plan root is a JSON object with `meeting` and `items`. The script validates 
       "confirmer": "Name",
       "status": "open",
       "wdr_update": "Project-level WDR text when applicable",
+      "status_intent": {
+        "status": "in-progress",
+        "progress": "Validation suite is 80% complete",
+        "blockers": ["Business copy approval pending"],
+        "risks": [],
+        "dependencies": ["M-API-READY"],
+        "change_notes": ["Scope unchanged; forecast moved"],
+        "refresh_actions": true
+      },
       "no_op_reason": "Required for no_op",
       "owner_gap": "Why the owner is not a resolved accountable person, when applicable",
       "closure_gap": "Why the closure criteria are not observable or verifiable, when applicable",
@@ -81,6 +90,24 @@ The plan root is a JSON object with `meeting` and `items`. The script validates 
 }
 ```
 
+Action creation and mutation are distinct contracts. A create omits `action_id`, `operation`, and `expected_action_revision`; the writer derives a stable action ID from the meeting and item identity. A patch uses the exact ledger identity and optimistic revision, and only explicitly present mutable fields are changed:
+
+```json
+{
+  "id": "M-010",
+  "classification": "action",
+  "text": "Existing action ownership and status were confirmed",
+  "affected_workstreams": ["l1-checkout"],
+  "action_id": "ACT-20260701-004",
+  "operation": "patch",
+  "expected_action_revision": 3,
+  "owner": "FDE-B",
+  "status": "in-progress"
+}
+```
+
+For patches, the mutable presence fields are `owner`, `status`, `action`, `due` or `trigger`, `closure_criteria`, and `action_affected_workstreams`. `affected_workstreams` routes the meeting item and status intent; use `action_affected_workstreams` only when the canonical action's affected-workstream set itself changes. An omitted mutable field is preserved byte-for-byte.
+
 Rules:
 
 - Every item needs `id`, `classification`, and `text`.
@@ -91,6 +118,8 @@ Rules:
 - `no_op` needs `no_op_reason`.
 - `business_decision_needed` needs `packet.decision_needed`.
 - `action` needs a specific owner, `affected_workstreams`, due trigger, and observable `closure_criteria`. The model records semantic uncertainty in `owner_gap` or `closure_gap`; the writer recognizes only missing values and exact `TBD` placeholders.
+- An existing-action patch needs exact `action_id`, `operation: "patch"`, positive `expected_action_revision`, and at least one explicitly present mutable field. Stale revisions fail in status-sync; never identify an action by copied prose.
+- `status_intent` may set only `status`, `phase`, `progress`, `blockers`, `risks`, `dependencies`, `change_notes`, and `refresh_actions`. The four plural current fields are arrays, `refresh_actions` is either omitted or `true`, and omitted fields are preserved. Every intent is durably handed to status-sync through the generated `status_intents` envelope and outbox.
 - Keep one canonical action for the same source and action. Use `affected_workstreams` for shared impact; split only when owner, due trigger, or deliverable differs, and route multi-workstream actions once through `program`.
 - Past-due action backfills need `status_confirmation`; otherwise the writer calibrates them to `blocked` with a status-confirmation gap instead of defaulting to `open`.
 - A milestone handoff needs exactly one affected workstream, an exact baseline milestone ID, canonical status, traceable evidence, and a positive baseline revision copied from lineage or stated on the milestone. Invalid milestone updates stay visible as gaps and are not sent to status-sync.

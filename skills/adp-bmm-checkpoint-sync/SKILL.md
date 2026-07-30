@@ -1,6 +1,6 @@
 ---
 name: adp-bmm-checkpoint-sync
-description: Discovers BMM checkpoints for ADP sync. Use when the user says "adp-bmm-checkpoint-sync" or "sync BMM checkpoint".
+description: Discovers, confirms, and idempotently syncs BMM checkpoints into ADP. Use when the user says "adp-bmm-checkpoint-sync" or "sync BMM checkpoint".
 ---
 
 # adp-bmm-checkpoint-sync
@@ -95,14 +95,14 @@ After sync, report the workstream folder path, files updated, `planned_files` fo
 When `status_sync_intake_files` is non-empty, surface both command shapes:
 
 ```bash
-adp-status-sync update "{project-root}" --updates-file "<generated-intake-file>"
+adp-status-sync update "{project-root}" --memory-root "<same-memory-root>" --updates-file "<generated-intake-file>"
 ```
 
 ```bash
-uv run "{status-sync-skill-root}/scripts/sync_status.py" update "{project-root}" --updates-file "<generated-intake-file>"
+uv run "{status-sync-skill-root}/scripts/sync_status.py" update "{project-root}" --memory-root "<same-memory-root>" --updates-file "<generated-intake-file>"
 ```
 
-`adp-status-sync update ...` is a runner alias. If the runner does not expose it, resolve the installed `adp-status-sync` skill root and use the direct script form.
+`adp-status-sync update ...` is a runner alias. If the runner does not expose it, resolve the installed `adp-status-sync` skill root and use the direct script form. Carry the identical resolved memory root from checkpoint sync through this handoff.
 
 Do not call a checkpoint complete because an artifact link exists. Complete means the project-level implication is visible, missing facts are marked as gaps, and the next owner/action is clear.
 

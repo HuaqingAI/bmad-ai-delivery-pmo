@@ -29,7 +29,7 @@ If the script or ADP prepass cannot run, or returns `blocked`/`error`, stop with
 
 Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root unless the user passes `--memory-root`. If the memory root is missing, tell the user to run `adp-project-kickoff`; do not create project state from this workflow.
 
-Facts come from Workstream Delivery Records, `actions/action-ledger.md`, decisions, business decision packets, daily logs, meeting archives, L0 summaries, and the prepass JSON. Derived views under `views/` are never promoted to source of truth. A stale derived view creates a refresh recommendation, not a blocking contradiction against durable source records.
+Facts come from Workstream Delivery Records, `actions/action-ledger.md`, decisions, business decision packets, daily logs, meeting archives, L0 summaries, and the prepass JSON. The audit also compares the 21-column ledger and ledger state against every selected WDR, WDR state, and `action-projection.json`. Derived views under `views/` are never promoted to source of truth. A stale derived view creates a refresh recommendation, while typed action-projection drift and pending status intents block panel publication.
 
 ## Input Audit
 
@@ -72,7 +72,11 @@ Load `references/scenario-contracts.md` only when the audit encounters `intake/s
 
 Treat `audit_state.py` output as the canonical finding set. `warning_findings` is the sole warning aggregation: its unique `finding_id` values drive `counts.warning_findings` and the Markdown warning table. The category groups remain compatibility projections and must not be re-counted or re-rendered. Report severity and `execution_disposition` independently: only disposition `blocked` prevents generation or publication; `degraded` requires lower confidence and a visibly risk-bearing readout. Baseline missing/invalid, unverified migration evidence, and unmapped actuals block; overdue missing actuals, stale artifacts, and explicit locale fallback degrade. Do not infer gaps from prose similarity.
 
+Repeated action/owner/due field content is emitted only as neutral `merge_review_evidence.action_field_collisions`; it is not a duplicate finding and does not change audit status. Duplicate identity requires explicit stable-ID evidence and semantic review remains prompt-owned.
+
 Every input audit publishes the complete shared `scope_contract` plus the selected `registered_workstreams` and `virtual_scopes`. Virtual scopes produce no WDR completeness, freshness, BMM phase/artifact, risk, dependency, or L0-reference gaps. Missing WDRs for non-virtual baseline scopes retain the existing warning or blocking rules. A consumer receiving an older audit without `scope_contract` must return `ADP-SCOPE-CONTRACT-MIGRATION-REQUIRED` and require a new Audit.
+
+Each drift finding carries a content-addressed `finding_id`, exact `action_id`/`action_ids`, typed entity references, source location, repairability, and severity. Repairable action-level findings are grouped deterministically by workstream into `repair_contract.repair_batches`; each batch binds the audit, exact finding set, WDR counters, ledger fingerprint/revision, per-action presence/revision, and source fingerprints. Never repair from Markdown prose or a copied action description.
 
 ## Output Contract
 

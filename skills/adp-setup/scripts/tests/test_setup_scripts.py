@@ -9,10 +9,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
+import tomllib
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = SCRIPT_ROOT.parent
@@ -107,6 +107,7 @@ class AdpSetupScriptTests(unittest.TestCase):
             "adp-roadmap-sync",
             "adp-flow-graph",
             "adp-meeting-pack",
+            "adp-panel-refresh",
             "adp-management-panel",
             "adp-agent-program-lead",
         ]
@@ -114,8 +115,8 @@ class AdpSetupScriptTests(unittest.TestCase):
         self.assertEqual(sorted(marketplace["skills"]), expected)
         self.assertEqual(sorted(marketplace["plugins"][0]["skills"]), expected)
         self.assertEqual([Path(path).name for path in marketplace["skills"]], expected_order)
-        self.assertEqual(marketplace["version"], "1.3.0")
-        self.assertEqual(marketplace["plugins"][0]["version"], "1.3.0")
+        self.assertEqual(marketplace["version"], "1.4.0")
+        self.assertEqual(marketplace["plugins"][0]["version"], "1.4.0")
 
     def test_module_help_registers_all_skills_in_lifecycle_order(self) -> None:
         header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
@@ -123,65 +124,183 @@ class AdpSetupScriptTests(unittest.TestCase):
         args_index = header.index("args")
         output_index = header.index("output-location")
         outputs_index = header.index("outputs")
-        row_by_skill = {row[skill_index]: row for row in rows}
+        action_index = header.index("action")
+        rows_by_skill = {
+            skill: [row for row in rows if row[skill_index] == skill]
+            for skill in {row[skill_index] for row in rows}
+        }
+        row_by_capability = {
+            (row[skill_index], row[action_index]): row
+            for row in rows
+        }
 
-        expected_order = [
-            "adp-setup",
-            "adp-project-kickoff",
-            "adp-plan-baseline",
-            "adp-workstream-register",
-            "adp-bmm-checkpoint-sync",
-            "adp-meeting-sync",
-            "adp-status-sync",
-            "adp-risk-dependency-change-review",
-            "adp-l0-reference-sync",
-            "adp-acceptance-readiness-review",
-            "adp-state-audit",
-            "adp-program-status",
-            "adp-roadmap-sync",
-            "adp-flow-graph",
-            "adp-meeting-pack",
-            "adp-management-panel",
-            "adp-agent-program-lead",
+        expected_capabilities = [
+            ("adp-setup", "configure"),
+            ("adp-project-kickoff", "kickoff"),
+            ("adp-plan-baseline", "baseline"),
+            ("adp-workstream-register", "register"),
+            ("adp-bmm-checkpoint-sync", "discover"),
+            ("adp-bmm-checkpoint-sync", "confirm"),
+            ("adp-bmm-checkpoint-sync", "sync"),
+            ("adp-bmm-checkpoint-sync", "packet-sync"),
+            ("adp-meeting-sync", "sync"),
+            ("adp-status-sync", "update"),
+            ("adp-status-sync", "create"),
+            ("adp-status-sync", "patch"),
+            ("adp-status-sync", "repair"),
+            ("adp-status-sync", "migrate-receipt"),
+            ("adp-status-sync", "stale"),
+            ("adp-risk-dependency-change-review", "review"),
+            ("adp-l0-reference-sync", "sync"),
+            ("adp-acceptance-readiness-review", "review"),
+            ("adp-state-audit", "audit"),
+            ("adp-program-status", "status"),
+            ("adp-roadmap-sync", "sync"),
+            ("adp-flow-graph", "generate"),
+            ("adp-meeting-pack", "render"),
+            ("adp-panel-refresh", "policy"),
+            ("adp-panel-refresh", "detect"),
+            ("adp-panel-refresh", "plan"),
+            ("adp-panel-refresh", "apply"),
+            ("adp-panel-refresh", "inspect"),
+            ("adp-management-panel", "refresh"),
+            ("adp-management-panel", "inspect"),
+            ("adp-management-panel", "archive"),
+            ("adp-agent-program-lead", "overall"),
+            ("adp-agent-program-lead", "period-review"),
+            ("adp-agent-program-lead", "meeting-preparation"),
+            ("adp-agent-program-lead", "operational-detail"),
+            ("adp-agent-program-lead", "recovery-routing"),
+            ("adp-agent-program-lead", "panel-readiness"),
+            ("adp-agent-program-lead", "panel-refresh"),
+            ("adp-agent-program-lead", "panel-open"),
+            ("adp-agent-program-lead", "panel-archive"),
         ]
-        self.assertEqual([row[skill_index] for row in rows], expected_order)
-        self.assertEqual(set(row_by_skill), set(expected_order))
+        self.assertEqual(
+            [(row[skill_index], row[action_index]) for row in rows],
+            expected_capabilities,
+        )
+        self.assertEqual(set(row_by_capability), set(expected_capabilities))
 
         self.assertEqual(
-            row_by_skill["adp-state-audit"][output_index],
+            row_by_capability[("adp-state-audit", "audit")][output_index],
             "{project-root}/_bmad-output/adp/memory/audits",
         )
         self.assertEqual(
-            row_by_skill["adp-meeting-pack"][output_index],
+            row_by_capability[("adp-meeting-pack", "render")][output_index],
             "{project-root}/_bmad-output/adp/memory/views/meeting-packs",
         )
         self.assertEqual(
-            row_by_skill["adp-roadmap-sync"][output_index],
+            row_by_capability[("adp-roadmap-sync", "sync")][output_index],
             "{project-root}/_bmad-output/adp/memory/views",
         )
         self.assertEqual(
-            row_by_skill["adp-flow-graph"][output_index],
+            row_by_capability[("adp-flow-graph", "generate")][output_index],
             "{project-root}/_bmad-output/adp/memory/views",
         )
         self.assertEqual(
-            row_by_skill["adp-management-panel"][output_index],
-            "{project-root}/_bmad-output/adp/memory/views/management-panel",
+            row_by_capability[("adp-management-panel", "archive")][output_index],
+            "{project-root}/_bmad-output/adp/memory/snapshots/management-panel",
         )
-        self.assertIn("--scopes <json>", row_by_skill["adp-flow-graph"][args_index])
-        self.assertIn("internal-full|shareable-summary", row_by_skill["adp-management-panel"][args_index])
-        self.assertIn("action-flow relation", row_by_skill["adp-status-sync"][outputs_index])
-        self.assertIn("migrate-receipt", row_by_skill["adp-status-sync"][args_index])
-        self.assertIn("durable status-sync receipt", row_by_skill["adp-status-sync"][outputs_index])
-        self.assertIn("risk-flow relation", row_by_skill["adp-risk-dependency-change-review"][outputs_index])
+        self.assertIn("--scopes <json>", row_by_capability[("adp-flow-graph", "generate")][args_index])
+        self.assertIn(
+            "internal-full|shareable-summary",
+            row_by_capability[("adp-management-panel", "archive")][args_index],
+        )
         self.assertEqual(
-            row_by_skill["adp-plan-baseline"][output_index],
+            [row[action_index] for row in rows_by_skill["adp-bmm-checkpoint-sync"]],
+            ["discover", "confirm", "sync", "packet-sync"],
+        )
+        self.assertEqual(
+            [row[action_index] for row in rows_by_skill["adp-status-sync"]],
+            ["update", "create", "patch", "repair", "migrate-receipt", "stale"],
+        )
+        self.assertEqual(
+            [row[action_index] for row in rows_by_skill["adp-panel-refresh"]],
+            ["policy", "detect", "plan", "apply", "inspect"],
+        )
+        self.assertEqual(
+            [row[action_index] for row in rows_by_skill["adp-management-panel"]],
+            ["refresh", "inspect", "archive"],
+        )
+        self.assertEqual(
+            [row[action_index] for row in rows_by_skill["adp-agent-program-lead"]],
+            [
+                "overall",
+                "period-review",
+                "meeting-preparation",
+                "operational-detail",
+                "recovery-routing",
+                "panel-readiness",
+                "panel-refresh",
+                "panel-open",
+                "panel-archive",
+            ],
+        )
+        self.assertIn("exact action IDs", " ".join(row[outputs_index] for row in rows_by_skill["adp-status-sync"]))
+        self.assertIn(
+            "risk-flow relation",
+            row_by_capability[("adp-risk-dependency-change-review", "review")][outputs_index],
+        )
+        self.assertEqual(
+            row_by_capability[("adp-plan-baseline", "baseline")][output_index],
             "{project-root}/_bmad-output/adp/memory/plans",
         )
-        self.assertIn("immutable program-status snapshot", row_by_skill["adp-program-status"][-1])
-        self.assertIn("--candidate-id <id>", row_by_skill["adp-bmm-checkpoint-sync"][args_index])
-        self.assertNotIn("--execute", row_by_skill["adp-status-sync"][args_index])
-        self.assertEqual(row_by_skill["adp-agent-program-lead"][output_index], "")
-        self.assertNotIn("project lead and weekly views", row_by_skill["adp-agent-program-lead"][outputs_index])
+        self.assertIn(
+            "immutable program-status snapshot",
+            row_by_capability[("adp-program-status", "status")][-1],
+        )
+        self.assertIn(
+            "--candidate-id <id>",
+            row_by_capability[("adp-bmm-checkpoint-sync", "confirm")][args_index],
+        )
+        self.assertNotIn("--execute", " ".join(row[args_index] for row in rows_by_skill["adp-status-sync"]))
+        self.assertTrue(all(row[output_index] == "" for row in rows_by_skill["adp-agent-program-lead"]))
+        self.assertNotIn(
+            "project lead and weekly views",
+            " ".join(row[outputs_index] for row in rows_by_skill["adp-agent-program-lead"]),
+        )
+
+    def test_module_help_capability_dependencies_form_a_dag(self) -> None:
+        header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
+        skill_index = header.index("skill")
+        action_index = header.index("action")
+        preceded_by_index = header.index("preceded-by")
+        followed_by_index = header.index("followed-by")
+        nodes = {f"{row[skill_index]}:{row[action_index]}" for row in rows}
+        edges: set[tuple[str, str]] = set()
+
+        for row in rows:
+            node = f"{row[skill_index]}:{row[action_index]}"
+            predecessors = [item.strip() for item in row[preceded_by_index].split(",") if item.strip()]
+            followers = [item.strip() for item in row[followed_by_index].split(",") if item.strip()]
+            for predecessor in predecessors:
+                self.assertIn(predecessor, nodes)
+                edges.add((predecessor, node))
+            for follower in followers:
+                self.assertIn(follower, nodes)
+                edges.add((node, follower))
+
+        self.assertEqual(len(nodes), 40)
+        self.assertEqual(len(edges), 58)
+        adjacency = {node: set() for node in nodes}
+        indegree = {node: 0 for node in nodes}
+        for source, target in edges:
+            if target not in adjacency[source]:
+                adjacency[source].add(target)
+                indegree[target] += 1
+        ready = sorted(node for node, degree in indegree.items() if degree == 0)
+        visited: list[str] = []
+        while ready:
+            node = ready.pop(0)
+            visited.append(node)
+            for target in sorted(adjacency[node]):
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+            ready.sort()
+
+        self.assertEqual(set(visited), nodes, "module-help capability dependencies contain a cycle")
 
     def test_vnext_module_defaults_and_installed_resources_are_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -198,7 +317,7 @@ class AdpSetupScriptTests(unittest.TestCase):
                 ).stdout
             )
 
-            self.assertEqual(result["module"]["version"], "1.3.0")
+            self.assertEqual(result["module"]["version"], "1.4.0")
             self.assertEqual(
                 result["effective_defaults"]["module"],
                 {
@@ -225,6 +344,8 @@ class AdpSetupScriptTests(unittest.TestCase):
             expected_resources = {
                 "adp-flow-graph/assets/adp-flow-graph-v1.schema.json",
                 "adp-status-sync/assets/action-flow-relation-v1.schema.json",
+                "adp-status-sync/assets/panel-sync-contracts.schema.json",
+                "adp-status-sync/assets/CONTRACT-REGISTRY.json",
                 "adp-risk-dependency-change-review/assets/risk-flow-relation-v1.schema.json",
                 "adp-program-status/assets/program-status-flow-state-v1.schema.json",
                 "adp-program-status/assets/program-status-progress-v3.schema.json",
@@ -307,7 +428,7 @@ class AdpSetupScriptTests(unittest.TestCase):
             skill_index = header.index("skill")
             for row in rows:
                 skill_dir = skills_dir / row[skill_index]
-                skill_dir.mkdir()
+                skill_dir.mkdir(exist_ok=True)
                 (skill_dir / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
             (skills_dir / "adp-program-status" / "SKILL.md").unlink()
 
@@ -454,6 +575,7 @@ class AdpSetupScriptTests(unittest.TestCase):
                 json.dumps({"module": {"required_value": "provided"}}),
                 encoding="utf-8",
             )
+            validated_answers_path = root / "validated-answers.json"
             validated = json.loads(
                 run_script(
                     INSPECT_STATE,
@@ -462,12 +584,46 @@ class AdpSetupScriptTests(unittest.TestCase):
                     str(module_yaml),
                     "--answers",
                     str(answers),
+                    "--validated-answers-output",
+                    str(validated_answers_path),
                 ).stdout
             )
 
             self.assertTrue(validated["headless_ready"])
             self.assertEqual(validated["missing_required_inputs"], [])
             self.assertEqual(validated["validated_answers"]["module"]["required_value"], "provided")
+            self.assertEqual(validated["validated_answers_output"], str(validated_answers_path.resolve()))
+            self.assertEqual(
+                json.loads(validated_answers_path.read_text(encoding="utf-8")),
+                validated["validated_answers"],
+            )
+
+    def test_inspection_rejects_colliding_result_and_validated_answer_outputs_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module_yaml = root / "module.yaml"
+            write_module_yaml(module_yaml)
+            collision = root / "shared-output.json"
+            collision.write_text("preserve-me\n", encoding="utf-8")
+
+            completed = run_script(
+                INSPECT_STATE,
+                str(root),
+                "--module-yaml",
+                str(module_yaml),
+                "--output",
+                str(collision),
+                "--validated-answers-output",
+                str(collision),
+                check=False,
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertFalse(result["headless_ready"])
+            self.assertIsNone(result["validated_answers_output"])
+            self.assertIn("must resolve to different files", result["error"])
+            self.assertEqual(collision.read_text(encoding="utf-8"), "preserve-me\n")
 
     def test_scripts_reject_unknown_answer_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -782,7 +938,7 @@ class AdpSetupScriptTests(unittest.TestCase):
                 )
             )
             self.assertEqual(merged["status"], "success")
-            self.assertIn("version: 1.3.0", config_text)
+            self.assertIn("version: 1.4.0", config_text)
             self.assertIn("default_reporting_cadence: custom", config_text)
             self.assertIn("status_stale_after_days: 21", config_text)
             self.assertIn("meeting_pack_item_limit: 12", config_text)

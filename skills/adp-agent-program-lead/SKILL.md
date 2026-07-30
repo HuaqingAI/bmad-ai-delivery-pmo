@@ -1,6 +1,6 @@
 ---
 name: adp-agent-program-lead
-description: Interprets canonical ADP status and routes workflows. Use when user says "ADP program lead", "ADP project readout", "open ADP panel", "refresh ADP panel", or "ADP meeting preparation".
+description: Interprets canonical ADP status and routes workflows. Use when user says "ADP program lead", "ADP project readout", "open ADP panel", or "ADP meeting preparation".
 ---
 
 # ADP Program Lead
@@ -35,24 +35,7 @@ With no supplied scope, greet briefly and offer readout and routing capabilities
 
 ## Capabilities
 
-| Capability | Outcome |
-| --- | --- |
-| Canonical Overall | Recorded status, confidence, constraints, variance, and lineage. |
-| Period Review | Recorded `period_delta` against `previous_snapshot_id`; no inferred comparison. |
-| Meeting Preparation | Lineage check and route to `adp-meeting-pack`. |
-| Panel Readiness | Verify current panel identity against canonical status and expose recovery without stale explanation. |
-| Panel Refresh / Open / Archive | Route the owning `adp-management-panel` operation, direct view hash, and distribution profile without rendering or changing browser state. |
-| View-Specific Explanation | Explain project-lead, confirmed-window FDE, or business decision content from the embedded canonical panel model. |
-| Recovery Routing | Owning workflow for unavailable status, audit, baseline, actual mapping, lineage, or views. |
-| Global Project Readout | Canonical judgment plus detail blockers, risks, dependencies, readiness gaps, and actions. |
-| FDE Action List | Owner actions sourced first from `actions/action-ledger.md`. |
-| Acceptance Readiness | Separate acceptance and cutover evidence, confirmations, L0 constraints, and decisions. |
-| Risk And Dependency Synthesis | Cross-line risks, dependencies, L0 impact, blockers, and changes. |
-| Weekly Report Consumption | Canonical weekly report and snapshot lineage. |
-| Roadmap Timeline | Consume `views/roadmap.md/json` or route to `adp-roadmap-sync`. |
-| Gap-Driven Coaching | Exact WDR, evidence, decision, or readiness content an FDE must add. |
-| L0 Impact Sweep | L0 impact and evidence-rule gaps across summaries and WDRs. |
-| Decision Closure Review | Unclosed meeting, daily-log, decision, packet, action, and WDR items. |
+Support canonical overall and period readouts, meeting and panel preparation, action/readiness/risk/roadmap synthesis, view-specific explanation, and gap-driven recovery. Use canonical snapshots for judgment, source-backed detail for explanation, and the owning-workflow map below for durable change.
 
 ## Operating Contract
 
@@ -70,7 +53,8 @@ Route durable state changes as follows:
 - Missing or new workstream -> `adp-workstream-register`
 - BMM artifact or lifecycle checkpoint -> `adp-bmm-checkpoint-sync`
 - Meeting preparation -> `adp-meeting-pack`
-- Panel readiness, refresh, open, or archive -> `adp-management-panel`; an archived meeting panel becomes official only through a successful `adp-meeting-sync` receipt
+- Panel readiness, end-to-end refresh, or freshness-gated open -> `adp-panel-refresh`
+- Immutable panel distribution archive -> `adp-management-panel`; an archived meeting panel becomes official only through a successful `adp-meeting-sync` receipt
 - Lightweight owner update or action create/close -> `adp-status-sync`
 - Meeting, chat, or offline update closure -> `adp-meeting-sync`
 - Risk, dependency, blocker, scope change, or business decision -> `adp-risk-dependency-change-review`

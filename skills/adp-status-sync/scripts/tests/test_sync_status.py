@@ -84,11 +84,14 @@ class SyncStatusTests(unittest.TestCase):
                                 "id": "l1-checkout",
                                 "actions": [
                                     {
+                                        "operation": "create",
+                                        "command_id": "CMD-A-FLOW-1",
                                         "action_id": "A-FLOW-1",
                                         "status": "in-progress",
                                         "owner": "FDE-A",
                                         "action": "Close checkout gate",
                                         "source": "meeting#1",
+                                        "evidence": [{"source": "meeting#1"}],
                                         "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
                                         "related_flow_edge_ids": ["E-CHECKOUT-MERGE"],
                                     }
@@ -151,19 +154,25 @@ class SyncStatusTests(unittest.TestCase):
                                 "id": "l1-checkout",
                                 "actions": [
                                     {
+                                        "operation": "create",
+                                        "command_id": "CMD-A-OPEN-TIME",
                                         "action_id": "A-OPEN-TIME",
                                         "status": "open",
                                         "owner": "FDE-A",
                                         "action": "Open action",
                                         "source": "meeting#time",
+                                        "evidence": [{"source": "meeting#time#open"}],
                                         "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
                                     },
                                     {
+                                        "operation": "create",
+                                        "command_id": "CMD-A-BLOCKED-TIME",
                                         "action_id": "A-BLOCKED-TIME",
                                         "status": "blocked",
                                         "owner": "FDE-A",
                                         "action": "Blocked action",
                                         "source": "meeting#time",
+                                        "evidence": [{"source": "meeting#time#blocked"}],
                                         "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
                                     },
                                 ],
@@ -200,11 +209,14 @@ class SyncStatusTests(unittest.TestCase):
                                 "id": "l1-checkout",
                                 "actions": [
                                     {
+                                        "operation": "create",
+                                        "command_id": "CMD-A-VALID-TIME",
                                         "action_id": "A-VALID-TIME",
                                         "status": "open",
                                         "owner": "FDE-A",
                                         "action": "Valid action",
                                         "source": "meeting#time",
+                                        "evidence": [{"source": "meeting#time#valid"}],
                                         "related_plan_item_ids": ["MS-CHECKOUT-COMPLETE"],
                                     }
                                 ],
@@ -214,14 +226,18 @@ class SyncStatusTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            second = self.run_script(project_root, "update", str(project_root), "--updates-file", str(updates_file))
-            action_ids = {
-                item["action_id"]
-                for item in json.loads(Path(second["action_flow"]).read_text(encoding="utf-8"))["actions"]
-            }
-            self.assertIn("A-VALID-TIME", action_ids)
-            self.assertNotIn("A-BLOCKED-TIME", action_ids)
-            self.assertNotIn("A-OPEN-TIME", action_ids)
+            second = self.run_script(
+                project_root,
+                "update",
+                str(project_root),
+                "--updates-file",
+                str(updates_file),
+                check=False,
+            )
+            self.assertFalse(second["ok"])
+            self.assertEqual(second["error_code"], "ACTION_LEDGER_STATE_MISMATCH")
+            action_ids = {item["action_id"] for item in first_contract["actions"]}
+            self.assertNotIn("A-VALID-TIME", action_ids)
 
     def run_script(self, project_root: Path, *args: str, check: bool = True) -> dict:
         completed = subprocess.run(
@@ -979,7 +995,7 @@ class SyncStatusTests(unittest.TestCase):
                 )
                 self.assertIn(expected_error, json.loads(completed.stdout)["error"])
 
-    def test_explicit_next_actions_do_not_merge_ledger_projection(self) -> None:
+    def test_legacy_create_replay_is_noop_but_changed_input_gets_new_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             record = self.create_record(project_root)
@@ -1020,7 +1036,6 @@ class SyncStatusTests(unittest.TestCase):
             )
             first_result = json.loads(first.stdout)
             ledger = project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md"
-            ledger_after_first = ledger.read_bytes()
             second = subprocess.run(
                 [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
                 check=True,
@@ -1043,18 +1058,74 @@ class SyncStatusTests(unittest.TestCase):
 
             self.assertTrue(first_result["ok"])
             self.assertEqual(len(first_result["actions_registered"]), 1)
+            self.assertEqual(second_result["status"], "already-applied")
             self.assertEqual(second_result["actions_registered"], [])
             self.assertEqual(second_result["actions_updated"], [])
+            self.assertEqual(len(third_result["actions_registered"]), 1)
             self.assertEqual(third_result["actions_updated"], [])
-            self.assertEqual(ledger.read_bytes(), ledger_after_first)
+            action_ids = [
+                first_result["actions_registered"][0],
+                third_result["actions_registered"][0],
+            ]
+            self.assertEqual(len(set(action_ids)), 2)
             ledger_text = ledger.read_text(encoding="utf-8")
-            self.assertEqual(ledger_text.count("Add checkout validation evidence"), 1)
+            self.assertEqual(ledger_text.count("Add checkout validation evidence"), 2)
             self.assertIn(f"| {first_result['actions_registered'][0]} | open |", ledger_text)
+            self.assertIn(f"| {third_result['actions_registered'][0]} | blocked |", ledger_text)
             self.assertIn("Closure Criteria Verifiable", ledger_text)
             self.assertIn("| true |", ledger_text)
             updated = record.read_text(encoding="utf-8")
             self.assertIn("FDE-A send summary", updated)
             self.assertNotIn("Add checkout validation evidence", updated)
+
+    def test_command_id_replays_generated_action_id_without_text_matching(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            updates_file = project_root / "command-create.json"
+            updates_file.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "command_id": "CMD-GENERATED-ID-001",
+                                        "owner": "FDE-A",
+                                        "action": "Publish command-bound evidence",
+                                        "source": "meeting#command",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            first = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            second = subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(updates_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            first_result = json.loads(first.stdout)
+            second_result = json.loads(second.stdout)
+            action_id = first_result["actions_registered"][0]
+            ledger = Path(first_result["action_ledger"])
+
+            self.assertEqual(second_result["actions_registered"], [])
+            self.assertEqual(second_result["actions_no_op"], [action_id])
+            self.assertEqual(ledger.read_text(encoding="utf-8").count("Publish command-bound evidence"), 1)
 
     def test_explicit_empty_next_actions_clears_without_generated_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

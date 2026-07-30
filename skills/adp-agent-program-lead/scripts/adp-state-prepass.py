@@ -779,12 +779,16 @@ def parse_date(value: str) -> date | None:
 
 def collect_wdr_actions(ws: Workstream) -> None:
     if is_meaningful(ws.next_actions):
+        action_ids = extract_action_ids(ws.next_actions)
         ws.actions.append(
             {
+                "action_id": action_ids[0] if len(action_ids) == 1 else "",
+                "action_ids": action_ids,
                 "owner": ws.owner if is_meaningful(ws.owner) else "TBD",
                 "workstream": ws.workstream_id,
                 "action": ws.next_actions,
                 "source": "delivery-record.md",
+                "source_type": "wdr-next-actions",
                 "due_or_trigger": extract_labeled_due_or_trigger(ws.next_actions),
             }
         )
@@ -998,25 +1002,28 @@ def split_next_actions(value: str) -> list[str]:
 
 
 def merge_actions(
-    ledger_actions: list[dict[str, str]],
-    wdr_actions: list[dict[str, str]],
-) -> list[dict[str, str]]:
+    ledger_actions: list[dict[str, Any]],
+    wdr_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     merged = list(ledger_actions)
-    seen = {
-        action_match_key(action.get("owner", ""), action.get("workstream", ""), action.get("action", ""))
+    ledger_ids = {
+        str(action.get("action_id", "")).strip().upper()
         for action in ledger_actions
+        if str(action.get("action_id", "")).strip()
     }
     for action in wdr_actions:
-        key = action_match_key(action.get("owner", ""), action.get("workstream", ""), action.get("action", ""))
-        if key in seen:
+        action_id = str(action.get("action_id", "")).strip().upper()
+        if action_id and action_id in ledger_ids:
             continue
-        seen.add(key)
+        embedded_ids = {
+            str(item).strip().upper()
+            for item in action.get("action_ids", [])
+            if str(item).strip()
+        }
+        if embedded_ids and embedded_ids.issubset(ledger_ids):
+            continue
         merged.append(action)
     return merged
-
-
-def action_match_key(owner: str, workstream: str, action: str) -> str:
-    return "|".join(normalize_match_text(value) for value in [owner, workstream, action])
 
 
 def workstream_payload(ws: Workstream, memory_root: Path) -> dict[str, Any]:

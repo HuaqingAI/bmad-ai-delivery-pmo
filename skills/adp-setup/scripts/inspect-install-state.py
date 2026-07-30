@@ -68,6 +68,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional answers JSON to validate after overlaying inline or collected values.",
     )
     parser.add_argument(
+        "--validated-answers-output",
+        help="Write the complete validated answers object only when headless_ready is true.",
+    )
+    parser.add_argument(
         "--module-help",
         help="Source module-help.csv. Defaults beside module.yaml.",
     )
@@ -694,10 +698,25 @@ def main() -> None:
             ("--user-config-path", args.user_config_path),
             ("--legacy-dir", args.legacy_dir),
             ("--answers", args.answers),
+            ("--validated-answers-output", args.validated_answers_output),
             ("--module-help", args.module_help),
             ("--installed-skills-dir", args.installed_skills_dir),
         ]
     )
+    if (
+        args.output
+        and args.validated_answers_output
+        and Path(args.output).resolve() == Path(args.validated_answers_output).resolve()
+    ):
+        emit(
+            {
+                "status": "validation-error",
+                "error": "--output and --validated-answers-output must resolve to different files",
+                "headless_ready": False,
+                "validated_answers_output": None,
+            }
+        )
+        sys.exit(1)
 
     project_root = Path(args.project_root).resolve()
     config_path = Path(args.config_path).resolve() if args.config_path else project_root / "_bmad" / "config.yaml"
@@ -818,6 +837,14 @@ def main() -> None:
         "installed_skill_inspection": installation,
         "upgrade_report": upgrade_report,
     }
+    validated_output = (
+        Path(args.validated_answers_output).resolve()
+        if args.validated_answers_output and result["headless_ready"]
+        else None
+    )
+    if validated_output:
+        emit(validated_answers, str(validated_output))
+    result["validated_answers_output"] = str(validated_output) if validated_output else None
     if args.verbose:
         print(
             f"Install state: {result['install_state']}; headless_ready={result['headless_ready']}",

@@ -1,7 +1,7 @@
 code: adp
 name: "AI Delivery PMO"
 description: "帮助多条 FDE 工作线用统一状态模型、交付节奏和 AI 协作方式推进复杂交付项目。"
-module_version: 1.3.0
+module_version: 1.4.0
 default_selected: false
 module_greeting: >
   AI Delivery PMO 已安装。新项目先运行 adp-project-kickoff 初始化共享项目记忆，
@@ -63,6 +63,14 @@ shared_resources:
   - owner_skill: adp-status-sync
     path: assets/action-flow-relation-v1.schema.json
     purpose: stable action identity, lifecycle, and explicit flow relations
+  - owner_skill: adp-status-sync
+    path: assets/panel-sync-contracts.schema.json
+    purpose: installed action-ledger state and WDR action-projection runtime schema
+    sha256: 513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27
+  - owner_skill: adp-status-sync
+    path: assets/CONTRACT-REGISTRY.json
+    purpose: installed status-sync runtime contract registry used for sidecar integrity pins
+    sha256: ac72ae177a858390d1e7489735f1a817fac0657093b971ca65625c27a552fa10
   - owner_skill: adp-risk-dependency-change-review
     path: assets/risk-flow-relation-v1.schema.json
     purpose: stable risk identity, lifecycle, and explicit flow relations

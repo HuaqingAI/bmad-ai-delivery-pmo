@@ -1,0 +1,1268 @@
+{
+  "registry_id": "urn:adp:panel-sync-contract-registry:1.0.0",
+  "registry_version": "1.0.0",
+  "canonical_json_profile": "RFC8785-with-safe-integers-and-pinned-schema-fractions",
+  "runtime_policy": {
+    "cpython": {"minimum_inclusive": "3.10.0", "maximum_exclusive": "4.0.0", "support_review_before": "2026-09-01T00:00:00Z", "python_3_10_security_support_month": "2026-10"},
+    "node": {"minimum_inclusive": "22.0.0", "maximum_exclusive": "25.0.0", "allowed_major_versions": [22, 24]}
+  },
+  "evidence_trust": {
+    "signature_algorithm": "Ed25519",
+    "signed_payload": "entire-conformance-result-excluding-result_id-and-provenance.signature",
+    "evidence_blob_rule": "test-log-fault-matrix-and-lock-log-raw-bytes-must-resolve-by-sha256",
+    "replay_key": "signer_key_id,ci_run_id,ci_attempt,evidence_nonce",
+    "production_root_provisioning": "reviewed-registry-update-required-before-status-passed",
+    "root_rotation_policy": "add-new-public-root-then-reissue-native-evidence-before-removing-old-root",
+    "revocation_policy": "remove-or-expire-compromised-root-and-immediately-revert-status-to-pending",
+    "independence_policy": "each-counted-implementation-requires-a-distinct-signer-key-distinct-owner-id-and-root-allowlist-binding",
+    "minimum_production_trust_roots": 2,
+    "trust_roots": []
+  },
+  "lock_profile": {
+    "profile_version": "1.0.0",
+    "fact_lock": {"path": "state/locks/fact.lock", "modes": ["shared", "exclusive"]},
+    "panel_lock": {"path": "state/locks/panel.lock", "modes": ["exclusive"]},
+    "primitives": {"posix": "flock", "windows": "LockFileEx"},
+    "acquisition_order": ["fact", "panel"],
+    "timeout_ms": 30000,
+    "crash_release": "os-handle-release",
+    "reentrant": false,
+    "upgrade": "reject",
+    "supported_filesystems": ["local"],
+    "profile_id": "sha256:dff2d8f9cb1bcbb19e1a45a250d3bdeb10d019961fa5bc685ffefb4e1947a5d9"
+  },
+  "runtime_authority_profile": {
+    "profile_version": "1.0.0",
+    "capability_registry_path_key": "writer_capability_registry",
+    "fact_lock_path_key": "fact_lock",
+    "activation_state_path_key": "strict_activation_state",
+    "attestation_path_key": "writer_fence_attestation",
+    "required_lock_mode": "exclusive",
+    "principal_id_algorithm": "sha256-jcs-authority-profile-platform-trusted-native-preimage-v2",
+    "adapter_boundary": "trusted-native-authority-adapter-v1",
+    "aggregate_hash_input_policy": "reject-caller-aggregate-without-typed-native-preimage-and-verification",
+    "environment_override_policy": "reject",
+    "impersonation_policy": "effective-identity-only-and-reject-unattested-transition",
+    "principal_adapters": {
+      "posix": {"id": "posix-effective-uid-executable-v1", "preimage_fields": ["adapter_id", "effective_uid_decimal", "executable_device_decimal", "executable_inode_decimal", "executable_sha256", "service_manager", "service_unit"], "effective_uid_rule": "base10-no-leading-zero-except-zero", "service_manager": "launchd-or-systemd", "service_unit_rule": "manager-native-stable-unit-id-nfc", "executable_source": "opened-running-executable-fstat-identity-and-raw-sha256", "namespace_policy": "host-effective-uid-only-user-namespace-rejected"},
+      "windows": {"id": "windows-effective-token-sid-executable-v1", "preimage_fields": ["adapter_id", "token_user_sid_sddl", "token_elevation_type", "token_impersonation_level", "executable_volume_serial_hex", "executable_file_id_hex", "executable_sha256", "service_name"], "sid_rule": "ConvertSidToStringSidW-uppercase-SDDL", "token_rule": "effective-thread-token-else-process-token-impersonation-must-equal-SecurityImpersonation", "service_name_rule": "SCM-key-name-NFC", "executable_source": "opened-running-image-handle-file-id-and-raw-sha256", "impersonation_policy": "anonymous-identification-delegation-or-token-switch-rejected"}
+    },
+    "profile_id": "sha256:18a5203e683404f398de02bc1509b5db7d540175695c87512cb26e0fc518218d"
+  },
+  "strict_rollout": {
+    "authoritative_writers": [
+      "adp-acceptance-readiness-review",
+      "adp-bmm-checkpoint-sync",
+      "adp-l0-reference-sync",
+      "adp-meeting-sync",
+      "adp-plan-baseline",
+      "adp-project-kickoff",
+      "adp-risk-dependency-change-review",
+      "adp-status-sync",
+      "adp-workstream-register"
+    ],
+    "writer_specs": [
+      {"producer_id": "adp-acceptance-readiness-review", "artifact_paths": ["skills/adp-acceptance-readiness-review/scripts/render_readiness_report.py"], "manifest_path": "state/writers/adp-acceptance-readiness-review/build-manifest.json", "receipt_path": "state/writers/adp-acceptance-readiness-review/fence-receipt.json", "allowed_operations": ["patch"], "allowed_fields": ["owned_sections"], "allowed_sections": ["acceptance"], "delegated_only": false},
+      {"producer_id": "adp-bmm-checkpoint-sync", "artifact_paths": ["skills/adp-bmm-checkpoint-sync/scripts/checkpoint_discovery.py", "skills/adp-bmm-checkpoint-sync/scripts/checkpoint_extractors.py", "skills/adp-bmm-checkpoint-sync/scripts/checkpoint_registry.py", "skills/adp-bmm-checkpoint-sync/scripts/resolve_bmad_config.py", "skills/adp-bmm-checkpoint-sync/scripts/sync_bmm_checkpoint.py"], "manifest_path": "state/writers/adp-bmm-checkpoint-sync/build-manifest.json", "receipt_path": "state/writers/adp-bmm-checkpoint-sync/fence-receipt.json", "allowed_operations": ["patch"], "allowed_fields": ["owned_sections", "status_intents"], "allowed_sections": ["checkpoint-sync-log"], "delegated_only": false},
+      {"producer_id": "adp-l0-reference-sync", "artifact_paths": ["skills/adp-l0-reference-sync/scripts/sync_l0_references.py"], "manifest_path": "state/writers/adp-l0-reference-sync/build-manifest.json", "receipt_path": "state/writers/adp-l0-reference-sync/fence-receipt.json", "allowed_operations": ["patch"], "allowed_fields": ["owned_sections"], "allowed_sections": ["cross-workstream-links", "decisions-evidence"], "delegated_only": false},
+      {"producer_id": "adp-meeting-sync", "artifact_paths": ["skills/adp-meeting-sync/scripts/dingtalk_intake.py", "skills/adp-meeting-sync/scripts/sync_meeting.py"], "manifest_path": "state/writers/adp-meeting-sync/build-manifest.json", "receipt_path": "state/writers/adp-meeting-sync/fence-receipt.json", "allowed_operations": ["append-intents", "patch"], "allowed_fields": ["meeting_history_append", "status_intents"], "allowed_sections": ["meeting-sync-history"], "delegated_only": false},
+      {"producer_id": "adp-plan-baseline", "artifact_paths": ["skills/adp-plan-baseline/scripts/adp_effective_config.py", "skills/adp-plan-baseline/scripts/baseline.py", "skills/adp-plan-baseline/scripts/scope_contract.py"], "manifest_path": "state/writers/adp-plan-baseline/build-manifest.json", "receipt_path": "state/writers/adp-plan-baseline/fence-receipt.json", "allowed_operations": ["patch"], "allowed_fields": ["owned_sections"], "allowed_sections": ["acceptance", "scope"], "delegated_only": false},
+      {"producer_id": "adp-project-kickoff", "artifact_paths": ["skills/adp-project-kickoff/scripts/bootstrap_adp.py"], "manifest_path": "state/writers/adp-project-kickoff/build-manifest.json", "receipt_path": "state/writers/adp-project-kickoff/fence-receipt.json", "allowed_operations": ["bootstrap", "create"], "allowed_fields": ["owned_sections"], "allowed_sections": ["acceptance", "bmm-artifact-index", "cross-workstream-links", "decisions-evidence", "identity", "next-actions", "project-status", "record-rule", "roadmap", "scope"], "delegated_only": false},
+      {"producer_id": "adp-risk-dependency-change-review", "artifact_paths": ["skills/adp-risk-dependency-change-review/scripts/review_risk_dependency_change.py"], "manifest_path": "state/writers/adp-risk-dependency-change-review/build-manifest.json", "receipt_path": "state/writers/adp-risk-dependency-change-review/fence-receipt.json", "allowed_operations": ["create", "patch"], "allowed_fields": ["owned_facts", "status_intents"], "allowed_sections": [], "delegated_only": false},
+      {"producer_id": "adp-status-sync", "artifact_paths": ["skills/adp-status-sync/scripts/sync_status.py"], "manifest_path": "state/writers/adp-status-sync/build-manifest.json", "receipt_path": "state/writers/adp-status-sync/fence-receipt.json", "allowed_operations": ["bootstrap", "create", "patch"], "allowed_fields": ["action", "affected_workstreams", "blockers", "change_notes", "closure_criteria", "consumed_intent_ids", "dependencies", "due_trigger", "last_status_sync", "owner", "phase", "progress", "refresh_actions", "risks", "roadmap", "routing_scope_id", "status"], "allowed_sections": ["identity", "next-actions", "project-status", "roadmap"], "delegated_only": false},
+      {"producer_id": "adp-workstream-register", "artifact_paths": ["skills/adp-workstream-register/scripts/register_workstream.py"], "manifest_path": "state/writers/adp-workstream-register/build-manifest.json", "receipt_path": "state/writers/adp-workstream-register/fence-receipt.json", "allowed_operations": ["create"], "allowed_fields": ["owned_sections"], "allowed_sections": ["acceptance", "bmm-artifact-index", "cross-workstream-links", "decisions-evidence", "identity", "next-actions", "project-status", "record-rule", "roadmap", "scope"], "delegated_only": false}
+    ],
+    "required_fence": "fact-transaction-coordinator/1.0.0",
+    "activation_administrator_producer_id": "adp-project-kickoff",
+    "capability_lifecycle_rule": "strict-mode-prohibits-runtime-create-rotate-revoke;rollback-to-legacy-increment-activation-epoch-reviewed-reprovision-and-full-refresh-required",
+    "capability_lifecycle_error": "CAPABILITY_LIFECYCLE_REQUIRES_ROLLBACK",
+    "activation_algorithm": "release-gate-passed-and-content-addressed-current-root-release-authority-capability-epoch-writer-build-fence-activation-epoch-exact-match-with-mutable-facts-and-publication-state-live-receipt-cas-validated",
+    "rollback_rule": "increment-activation-epoch-and-require-new-live-full-refresh-attestation"
+  },
+  "runtime_paths": {
+    "journal_dir_template": "state/transactions/{transaction_token}",
+    "journal_manifest_template": {"root": "memory", "path": "state/transactions/{transaction_token}/manifest.json"},
+    "journal_prepared_marker_template": {"root": "memory", "path": "state/transactions/{transaction_token}/prepared.json"},
+    "journal_terminal_marker_template": {"root": "memory", "path": "state/transactions/{transaction_token}/terminal.json"},
+    "journal_recovery_receipt_template": {"root": "memory", "path": "state/transactions/{transaction_token}/recovery.json"},
+    "journal_tombstone_template": {"root": "memory", "path": "state/transactions/{transaction_token}/tombstones/{apply_order}.bin"},
+    "journal_before_image_template": {"root": "memory", "path": "state/transactions/{transaction_token}/images/{apply_order}-before"},
+    "journal_after_image_template": {"root": "memory", "path": "state/transactions/{transaction_token}/images/{apply_order}-after"},
+    "action_ledger": {"root": "memory", "path": "actions/action-ledger.md"},
+    "action_ledger_state": {"root": "memory", "path": "state/action-ledger.json"},
+    "action_flow_index": {"root": "memory", "path": "views/action-flow.json"},
+    "fact_generation": {"root": "memory", "path": "state/fact-generation.json"},
+    "root_registry_state": {"root": "memory", "path": "state/root-registry.json"},
+    "writer_capability_registry": {"root": "memory", "path": "state/writer-capabilities.json"},
+    "panel_current_pointer": {"root": "memory", "path": "views/management-panel/current-pointer.json"},
+    "panel_state": {"root": "memory", "path": "state/panel-generation.json"},
+    "strict_activation_state": {"root": "memory", "path": "state/strict-activation.json"},
+    "writer_fence_attestation": {"root": "memory", "path": "state/writer-fence-migration-attestation.json"},
+    "fact_lock": {"root": "memory", "path": "state/locks/fact.lock"},
+    "panel_lock": {"root": "memory", "path": "state/locks/panel.lock"},
+    "panel_refresh_status": {"root": "memory", "path": "state/panel-refresh-status.json"},
+    "fact_receipt_template": {"root": "memory", "path": "receipts/fact/{transaction_token}.json"},
+    "fact_command_receipt_index": {"root": "memory", "path": "state/fact-command-receipt-index.json"},
+    "mutation_intent_outbox": {"root": "memory", "path": "state/mutation-intent-outbox.json"},
+    "intent_convergence_verdict": {"root": "memory", "path": "state/intent-convergence-verdict.json"},
+    "panel_receipt_template": {"root": "memory", "path": "receipts/panel/{transaction_token}.json"},
+    "repair_fact_receipt_template": {"root": "memory", "path": "receipts/repair/{transaction_token}-fact.json"},
+    "repair_receipt_template": {"root": "memory", "path": "receipts/repair/{transaction_token}.json"},
+    "repair_nonce_template": {"root": "memory", "path": "state/nonces/{nonce_token}.json"},
+    "repair_receipt_index": {"root": "memory", "path": "state/repair-receipt-index.json"},
+    "repair_attempt_ledger": {"root": "memory", "path": "state/repair-attempt-ledger.json"},
+    "release_evidence_set": {"root": "memory", "path": "state/release-evidence/current.json"},
+    "release_evidence_history_index": {"root": "memory", "path": "state/release-evidence/history-index.json"},
+    "release_evidence_set_archive_template": {"root": "memory", "path": "state/release-evidence/sets/{release_set_token}.json"},
+    "release_evidence_transition_receipt_template": {"root": "memory", "path": "receipts/release-evidence/{transaction_token}.json"},
+    "release_evidence_journal_template": {"root": "memory", "path": "state/release-evidence/journals/{transaction_token}/manifest.json"},
+    "release_evidence_terminal_marker_template": {"root": "memory", "path": "state/release-evidence/journals/{transaction_token}/terminal.json"},
+    "activation_transition_receipt_template": {"root": "memory", "path": "receipts/activation/{transaction_token}.json"},
+    "activation_transition_state_template": {"root": "memory", "path": "state/activation-transitions/{transaction_token}.json"},
+    "activation_lifecycle_index_template": {"root": "memory", "path": "state/activation-lifecycles/{lifecycle_token}.json"},
+    "refresh_request_template": {"root": "memory", "path": "state/refresh-requests/{transaction_token}.json"},
+    "snapshot_lock_receipt_template": {"root": "memory", "path": "state/snapshots/{snapshot_token}/lock-receipt.json"},
+    "release_evidence_receipt_template": {"root": "memory", "path": "receipts/conformance/{result_token}.json"},
+    "release_evidence_blob_template": {"root": "memory", "path": "evidence/conformance/{blob_token}.bin"},
+    "generation_lineage_index_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/index.json"},
+    "generation_envelope_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/generation.json"},
+    "selection_policy_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/selection-policy.json"},
+    "physical_inventory_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/physical-inventory.json"},
+    "panel_binding_catalog_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/panel-binding-catalog.json"},
+    "dependency_manifest_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/manifests/{projection_kind_token}/{instance_token}.json"},
+    "producer_receipt_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/producer-receipts/{projection_kind_token}/{instance_token}.json"},
+    "refresh_receipt_generation_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/refresh-receipt.json"},
+    "publication_receipt_generation_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/publication-receipt.json"},
+    "publication_journal_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/publication-journal.json"},
+    "publication_marker_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/publication-marker.json"},
+    "before_pointer_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/before-pointer.json"},
+    "before_panel_state_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/before-panel-state.json"},
+    "publication_absence_proof_template": {"root": "memory", "path": "views/generations/{generation_token}/lineage/publication-absence-proof.json"},
+    "canonical_projection_template": {"root": "memory", "path": "views/generations/{generation_token}/projections/{projection_kind_token}/{instance_token}.json"},
+    "management_panel_template": {"root": "memory", "path": "views/generations/{generation_token}/management-panel/{instance_token}.json"}
+  },
+  "wdr_field_section_map": [
+    {"field": "status", "sections": ["identity"]},
+    {"field": "phase", "sections": ["identity"]},
+    {"field": "progress", "sections": ["project-status"]},
+    {"field": "blockers", "sections": ["project-status"]},
+    {"field": "risks", "sections": ["project-status"]},
+    {"field": "dependencies", "sections": ["project-status"]},
+    {"field": "change_notes", "sections": ["project-status"]},
+    {"field": "last_status_sync", "sections": ["project-status"]},
+    {"field": "refresh_actions", "sections": ["project-status", "next-actions"]},
+    {"field": "roadmap", "sections": ["roadmap"]},
+    {"field": "meeting_history_append", "sections": ["meeting-sync-history"]},
+    {"field": "owned_sections", "sections_from_payload": true}
+  ],
+  "owned_fact_path_segment_rules": {
+    "workstream-id": {"schema_ref": "urn:adp:panel-sync-contracts:2026-07-24#workstream-id", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"},
+    "file-token": {"pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"}
+  },
+  "owned_fact_content_rules": {
+    "markdown-byte-invariants-v1": {"encoding": "utf-8", "nonempty": true, "unicode_normalization": "NFC", "line_ending": "LF", "final_lf": true, "forbidden_code_points": ["U+0000", "U+000D"], "structural_grammar": null, "canonical_renderer": null}
+  },
+  "owned_fact_target_profiles": [
+    {"profile_id": "risk-flow-index-v1", "producer_id": "adp-risk-dependency-change-review", "root": "memory", "path_rule": {"kind": "exact", "value": "views/risk-flow.json"}, "operations": ["create", "patch"], "content_rule": "json-schema", "schema_root": "project", "schema_path": "skills/adp-risk-dependency-change-review/assets/risk-flow-relation-v1.schema.json", "schema_id": "urn:adp:risk-review:risk-flow-relation-v1", "schema_sha256": "sha256:03d4d249ef1563365b5cfe1f7cbed999fc4bc6d1a918c3d52066d8f5170bf67f"},
+    {"profile_id": "workstream-decision-v1", "producer_id": "adp-risk-dependency-change-review", "root": "memory", "path_rule": {"kind": "workstream-file", "base": "workstreams", "segment_rule": "workstream-id", "filename": "decisions.md"}, "operations": ["create", "patch"], "content_rule": "markdown-byte-invariants-v1"},
+    {"profile_id": "decision-log-v1", "producer_id": "adp-risk-dependency-change-review", "root": "memory", "path_rule": {"kind": "exact", "value": "decisions/decision-log.md"}, "operations": ["create", "patch"], "content_rule": "markdown-byte-invariants-v1"},
+    {"profile_id": "business-decision-packet-v1", "producer_id": "adp-risk-dependency-change-review", "root": "memory", "path_rule": {"kind": "directory-file", "base": "decisions/business-decision-packets", "segment_rule": "file-token", "suffix": ".md"}, "operations": ["create", "patch"], "content_rule": "markdown-byte-invariants-v1"}
+  ],
+  "source_time_bindings": [
+    {"contract": "management-panel-payload/2.0.0", "selector": "exact", "pointer": "/sync/source_as_of"},
+    {"contract": "state-audit-payload/2.0.0", "selector": "exact", "pointer": "/source_as_of"},
+    {"contract": "program-status-payload/2.0.0", "selector": "exact", "pointer": "/source_as_of"},
+    {"contract": "roadmap-payload/2.0.0", "selector": "exact", "pointer": "/source_as_of"},
+    {"contract": "meeting-pack-payload/2.0.0", "selector": "all-instances", "pointer": "/source_as_of"},
+    {"contract": "flow-graph-payload/1.0.0", "selector": "exact", "pointer": "/state/as_of"},
+    {"contract": "flow-graph-payload/1.0.0", "selector": "all-array-elements", "pointer": "/overlays/scopes/*/as_of"},
+    {"contract": "refresh-run-receipt/1.0.0", "selector": "exact", "pointer": "/source_as_of"}
+  ],
+  "live_inspect_read_profile": {
+    "fixed_runtime_path_keys": ["root_registry_state", "strict_activation_state", "writer_fence_attestation", "writer_capability_registry", "release_evidence_set", "release_evidence_history_index", "panel_current_pointer", "panel_state", "fact_generation", "action_ledger", "action_ledger_state", "action_flow_index", "fact_command_receipt_index", "mutation_intent_outbox", "intent_convergence_verdict"],
+    "dynamic_sets": ["release-evidence-history-chain", "release-evidence-active-set", "writer-build-and-fence-inventory", "generation-lineage-index-and-exact-objects", "physical-workstream-wdr-state-sidecars", "generation-live-leaves"],
+    "write_runtime_path_keys": ["panel_refresh_status"]
+  },
+  "schema_bundle": {
+    "path": "contracts/panel-sync-contracts.schema.json",
+    "id": "urn:adp:panel-sync-contracts:2026-07-24",
+    "sha256": "sha256:513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27"
+  },
+  "protocol": {
+    "path": "contracts/WDR-AND-TRANSACTION-PROTOCOL.md",
+    "id": "urn:adp:wdr-action-renderer:1.0.0",
+    "sha256": "sha256:f1de3e7a6c41b45a695494510414dc1e4b01fd03597fccf5aa1d2f012cf8ebe2"
+  },
+  "conformance_suite": {
+    "path": "contracts/fixtures/CONFORMANCE-VECTORS.json",
+    "id": "urn:adp:panel-sync-conformance:1.0.0",
+    "sha256": "sha256:2a7a2374bd896aff950850185462e84239385fa4183bc1ff93b0c358f11208cc",
+    "design_fixture_check_status": "passed",
+    "implementation_conformance_status": "pending",
+    "minimum_independent_implementations": 2,
+    "native_windows_evidence_required": true,
+      "release_gate_validator": {
+      "id": "conformance-release-gate/1.0.0",
+      "algorithm": "protocol-section-9-authenticated-ed25519-exact-suite-native-evidence-runtime-lock-v2",
+      "protocol_section": "9",
+      "protocol_sha256": "sha256:f1de3e7a6c41b45a695494510414dc1e4b01fd03597fccf5aa1d2f012cf8ebe2",
+      "required_platforms": ["native-posix", "native-windows"],
+      "required_evidence_classes": ["production-adapter", "real-posix-fault-injection", "native-windows-ci"]
+    },
+    "result_evidence": [
+      {
+        "implementation_id": "python-reference-adapter",
+        "evidence_kind": "design-fixture-check",
+        "platform": "posix-design-model",
+        "runner_path": "contracts/conformance/python_runner.py",
+        "runner_sha256": "sha256:fd438f049cb05d3b993d9422af8a18d9415365318be5e2c4703c44e15c4eb96f",
+        "result_path": "contracts/conformance/python-result.json",
+        "result_binding": "result.registry_sha256-must-equal-raw-registry-hash"
+      },
+      {
+        "implementation_id": "node-reference-adapter",
+        "evidence_kind": "design-fixture-check",
+        "platform": "posix-design-model",
+        "runner_path": "contracts/conformance/node_runner.mjs",
+        "runner_sha256": "sha256:4841f86e4c8545b0fa3011cb7d8b9954d60cf7b0eacfd71435a0228b14d8b7f6",
+        "result_path": "contracts/conformance/node-result.json",
+        "result_binding": "result.registry_sha256-must-equal-raw-registry-hash"
+      }
+    ]
+  },
+  "pinned_source_artifacts": [
+    {
+      "id": "workstream-delivery-record/1.0.0",
+      "path": "skills/adp-workstream-register/assets/workstream-templates/delivery-record.md",
+      "sha256": "sha256:ae36419be7d9d6b7239d943c459c27bbf990cb2a0ed8f1b1c6fb89277253ccf4"
+    },
+    {
+      "id": "meeting-sync-plan/1.x",
+      "path": "skills/adp-meeting-sync/references/sync-plan-schema.md",
+      "sha256": "sha256:b28f1f4eb714580ca7b2e779e65ad434ccd9f4ab66fdd85e51e28c20372120e3"
+    },
+    {
+      "id": "status-sync-batch/1.x",
+      "path": "skills/adp-status-sync/references/batch-status-updates.md",
+      "sha256": "sha256:570c3c729d0fb96474c24206020fa2984b588328e0bd4d5c9adf33d0ad7a3587"
+    },
+    {
+      "id": "action-ledger-template/1.0.0",
+      "path": "skills/adp-project-kickoff/assets/adp-memory-templates/actions/action-ledger.md",
+      "sha256": "sha256:9048db09d7dc37f473c9032e22b60c9eb2ee1f8c11fe097d129545e27f2eb722"
+    },
+    {
+      "id": "action-flow-relation/1.0.0",
+      "path": "skills/adp-status-sync/assets/action-flow-relation-v1.schema.json",
+      "sha256": "sha256:f883a479f4b5bf50ad6ce3a501b5744b46dce4473e9d31398e43dffe2105f8e7"
+    },
+    {
+      "id": "management-panel-model/1.0.0",
+      "path": "skills/adp-management-panel/assets/adp-management-panel-v1.schema.json",
+      "sha256": "sha256:b607f0c142e22c247726db002ce0a305f744d7c367b2c65e1ef8074dec9f72f1"
+    },
+    {
+      "id": "management-panel-manifest/1.0.0",
+      "path": "skills/adp-management-panel/assets/adp-management-panel-manifest-v1.schema.json",
+      "sha256": "sha256:3a0e5a436d87316da23d76bf1a565d88723e18e511f7aeaa8f55b4ef878770f0"
+    },
+    {
+      "id": "flow-graph-payload/1.0.0",
+      "path": "skills/adp-flow-graph/assets/adp-flow-graph-v1.schema.json",
+      "sha256": "sha256:aee7bc26ebfd6d2b475cdddc8f005f149ea1eea0506155e7790ab688f72a3a04"
+    },
+    {
+      "id": "program-status-progress/3.0.0",
+      "path": "skills/adp-program-status/assets/program-status-progress-v3.schema.json",
+      "sha256": "sha256:d8feaf0766e8e5881fc69c4a23d85cde08a73c465c01f73e413fe9602a04436a"
+    },
+    {
+      "id": "program-status-flow-state/1.0.0",
+      "path": "skills/adp-program-status/assets/program-status-flow-state-v1.schema.json",
+      "sha256": "sha256:46a146b12319fb71554d01076570530042d98d70ea79385e801acfdddf465a38"
+    },
+    {
+      "id": "program-status-progress/3.0.0-golden",
+      "path": "skills/adp-program-status/assets/fixtures/progress-v3/golden-measurable-boundary.json",
+      "sha256": "sha256:106134e6316767e3a7e487276fa8c8ab6b57da3b6e3bdd5b7bbbfc2151ecd998"
+    },
+    {
+      "id": "management-panel-v1-compatibility/1.0.0",
+      "path": "_bmad-output/planning-artifacts/architecture/architecture-bmad-ai-delivery-pmo-2026-07-24/contracts/fixtures/PANEL-V1-COMPATIBILITY.json",
+      "sha256": "sha256:3b96b7806e3027df17f12cc48668d13980245dc9fb34fcb8a226525a962b6fe7"
+    },
+    {
+      "id": "management-panel-composer/1.0.9",
+      "path": "skills/adp-management-panel/scripts/panel_model.py",
+      "sha256": "sha256:59f804c9264b754223e451700172a085116e8adc5fd2079fe3d4b34662d4edf7"
+    },
+    {
+      "id": "management-panel-v2-current-consumer/1.0.0",
+      "path": "_bmad-output/planning-artifacts/architecture/architecture-bmad-ai-delivery-pmo-2026-07-24/contracts/conformance/panel_v2_consumer.mjs",
+      "sha256": "sha256:eaf497fbf79eaedface1408b1ea1679aec7d7e85709fd9e3a386550855bbc423"
+    },
+    {
+      "id": "brownfield-meeting-sync-source/2026-07-25",
+      "path": "skills/adp-meeting-sync/scripts/sync_meeting.py",
+      "sha256": "sha256:60c1bded9cccefe4adab9c88bd139f3fa51df17588558c7eae35eecac87a8ea9"
+    },
+    {
+      "id": "brownfield-status-sync-source/2026-07-25",
+      "path": "skills/adp-status-sync/scripts/sync_status.py",
+      "sha256": "sha256:0eedd5e5a94eb54cdee24dae7924bf33afdf3ab37be8d5e1b53a557c607e387d"
+    },
+    {
+      "id": "brownfield-bmm-checkpoint-source/2026-07-25",
+      "path": "skills/adp-bmm-checkpoint-sync/scripts/sync_bmm_checkpoint.py",
+      "sha256": "sha256:f6f4834538a3aa1ecd836e7a1f41cb5b62e3c34279737772e2c2a1fa452ee543"
+    },
+    {
+      "id": "brownfield-risk-review-source/2026-07-25",
+      "path": "skills/adp-risk-dependency-change-review/scripts/review_risk_dependency_change.py",
+      "sha256": "sha256:c9b1d68bfb3ada18a55420a90483498969f4bb4675a95563389d39bc2af9ae2d"
+    },
+    {
+      "id": "brownfield-workstream-register-source/2026-07-25",
+      "path": "skills/adp-workstream-register/scripts/register_workstream.py",
+      "sha256": "sha256:67e07457138157e5417d53365ad8bcd543aa3d33d81a16e386f64477fdec1d68"
+    },
+    {
+      "id": "brownfield-state-audit-source/2026-07-25",
+      "path": "skills/adp-state-audit/scripts/audit_state.py",
+      "sha256": "sha256:95adb401b8e5a986bc70a87acd434e68e05fedcef6b5c63732016ed4bb6d6310"
+    },
+    {
+      "id": "brownfield-panel-audit-source/2026-07-25",
+      "path": "skills/adp-state-audit/scripts/panel_audit.py",
+      "sha256": "sha256:7fc3e6e3e460e1d5eb34fd0180639abfb2ba57ca4f51e8db6eb4bc677d200f20"
+    },
+    {
+      "id": "brownfield-program-lead-prepass-source/2026-07-25",
+      "path": "skills/adp-agent-program-lead/scripts/adp-state-prepass.py",
+      "sha256": "sha256:65cb00cbfdd49147cde49cec3dc27b703bd1bd28d7bff4b64223eba32c935ef4"
+    },
+    {
+      "id": "brownfield-management-panel-source/2026-07-25",
+      "path": "skills/adp-management-panel/scripts/management_panel.py",
+      "sha256": "sha256:f70657ffa15dc833ac2ab2195ecc3ea7042da14bfa1842aa268ffc114c6d8171"
+    }
+  ],
+  "contracts": [
+    {
+      "name": "meeting-sync-plan",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#meeting-sync-plan-v2",
+      "schema_pointer": "#/$defs/meetingSyncPlanV2",
+      "writers": ["adp-meeting-sync"],
+      "readers": ["adp-status-sync"]
+    },
+    {
+      "name": "status-mutation-intent",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#status-mutation-intent-v1",
+      "schema_pointer": "#/$defs/statusMutationIntentV1",
+      "writers": ["adp-meeting-sync", "adp-bmm-checkpoint-sync", "adp-risk-dependency-change-review"],
+      "readers": ["adp-status-sync"]
+    },
+    {
+      "name": "producer-intent-outbox-command",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#producer-intent-outbox-command-v1",
+      "schema_pointer": "#/$defs/producerIntentOutboxCommandV1",
+      "writers": ["adp-meeting-sync"],
+      "readers": ["fact-transaction-coordinator", "adp-state-audit"]
+    },
+    {
+      "name": "status-sync-batch",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#status-sync-batch-v2",
+      "schema_pointer": "#/$defs/statusSyncBatchV2",
+      "writers": ["adp-status-sync"],
+      "readers": ["adp-status-sync", "fact-transaction-coordinator"]
+    },
+    {
+      "name": "mutation-intent-outbox",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#mutation-intent-outbox-v1",
+      "schema_pointer": "#/$defs/mutationIntentOutboxV1",
+      "writers": ["fact-transaction-coordinator", "adp-status-sync"],
+      "readers": ["adp-status-sync", "adp-state-audit", "adp-panel-refresh", "transaction-recovery"]
+    },
+    {
+      "name": "intent-convergence-verdict",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#intent-convergence-verdict-v1",
+      "schema_pointer": "#/$defs/intentConvergenceVerdictV1",
+      "writers": ["adp-state-audit"],
+      "readers": ["adp-panel-refresh", "adp-management-panel"]
+    },
+    {
+      "name": "action-ledger-mutation",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#action-command-v2",
+      "schema_pointer": "#/$defs/actionCommandV2",
+      "writers": ["adp-meeting-sync", "adp-bmm-checkpoint-sync", "owner-workflow"],
+      "readers": ["adp-status-sync"]
+    },
+    {
+      "name": "owned-fact-command",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#owned-fact-command-v1",
+      "schema_pointer": "#/$defs/ownedFactCommandV1",
+      "writers": ["adp-risk-dependency-change-review"],
+      "readers": ["fact-transaction-coordinator", "transaction-recovery"]
+    },
+    {
+      "name": "bootstrap-migration-command",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#bootstrap-migration-command-v1",
+      "schema_pointer": "#/$defs/bootstrapMigrationCommandV1",
+      "writers": ["adp-status-sync"],
+      "readers": ["fact-transaction-coordinator", "adp-runtime-bootstrap"]
+    },
+    {
+      "name": "action-ledger-state",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#action-ledger-state-v1",
+      "schema_pointer": "#/$defs/actionLedgerStateV1",
+      "writers": ["adp-status-sync"],
+      "readers": ["adp-status-sync", "adp-state-audit", "adp-panel-refresh"]
+    },
+    {
+      "name": "action-flow-index",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#action-flow-index-v1",
+      "schema_pointer": "#/$defs/actionFlowIndexV1",
+      "writers": ["adp-status-sync"],
+      "readers": ["adp-flow-graph", "adp-state-audit", "adp-panel-refresh"]
+    },
+    {
+      "name": "workstream-create-input",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#workstream-create-input-v1",
+      "schema_pointer": "#/$defs/workstreamCreateInputV1",
+      "writers": ["adp-workstream-register"],
+      "readers": ["adp-workstream-register"]
+    },
+    {
+      "name": "wdr-mutation",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#wdr-command-v1",
+      "schema_pointer": "#/$defs/wdrCommandV1",
+      "writers": ["adp-workstream-register", "adp-meeting-sync", "adp-status-sync", "adp-bmm-checkpoint-sync", "adp-risk-dependency-change-review"],
+      "readers": ["adp-wdr-mutation"]
+    },
+    {
+      "name": "writer-capability-registry",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#writer-capability-registry-v1",
+      "schema_pointer": "#/$defs/writerCapabilityRegistryV1",
+      "writers": ["adp-runtime-bootstrap"],
+      "readers": ["adp-wdr-mutation", "fact-transaction-coordinator", "transaction-recovery", "adp-status-sync"]
+    },
+    {
+      "name": "runtime-authority-context",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#runtime-authority-context-v1",
+      "schema_pointer": "#/$defs/runtimeAuthorityContextV1",
+      "writers": ["native-runtime-authority-adapter"],
+      "readers": ["fact-transaction-coordinator", "transaction-recovery", "adp-status-sync"]
+    },
+    {
+      "name": "writer-build-manifest",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#writer-build-manifest-v1",
+      "schema_pointer": "#/$defs/writerBuildManifestV1",
+      "writers": ["adp-runtime-bootstrap"],
+      "readers": ["fact-transaction-coordinator", "panel-runtime", "adp-state-audit"]
+    },
+    {
+      "name": "writer-fence-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#writer-fence-receipt-v1",
+      "schema_pointer": "#/$defs/writerFenceReceiptV1",
+      "writers": ["fact-transaction-coordinator"],
+      "readers": ["panel-runtime", "adp-state-audit", "adp-panel-refresh"]
+    },
+    {
+      "name": "wdr-file-state",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#wdr-file-state-v1",
+      "schema_pointer": "#/$defs/wdrFileStateV1",
+      "writers": ["adp-wdr-mutation"],
+      "readers": ["adp-wdr-mutation", "adp-state-audit", "adp-panel-refresh"]
+    },
+    {
+      "name": "wdr-action-projection",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#wdr-action-projection-v1",
+      "schema_pointer": "#/$defs/wdrActionProjectionV1",
+      "writers": ["adp-status-sync"],
+      "readers": ["adp-state-audit", "adp-wdr-mutation"]
+    },
+    {
+      "name": "projection-dependency-manifest",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#dependency-manifest-v1",
+      "schema_pointer": "#/$defs/dependencyManifestV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["adp-state-audit", "adp-management-panel", "adp-panel-refresh"]
+    },
+    {
+      "name": "action-projection-drift-verdict",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#action-projection-drift-verdict-v1",
+      "schema_pointer": "#/$defs/actionProjectionDriftVerdictV1",
+      "writers": ["adp-state-audit"],
+      "readers": ["adp-management-panel", "adp-panel-refresh"]
+    },
+    {
+      "name": "audit-finding-repair",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#audit-finding-repair-v2",
+      "schema_pointer": "#/$defs/auditFindingRepairV2",
+      "writers": ["adp-state-audit"],
+      "readers": ["adp-status-sync", "adp-management-panel", "adp-panel-refresh"]
+    },
+    {
+      "name": "physical-workstream-inventory",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#physical-workstream-inventory-v1",
+      "schema_pointer": "#/$defs/physicalWorkstreamInventoryV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["adp-panel-refresh", "all-canonical-producers"]
+    },
+    {
+      "name": "selection-policy",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#selection-policy-v1",
+      "schema_pointer": "#/$defs/selectionPolicyV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["adp-panel-refresh", "all-canonical-producers"]
+    },
+    {
+      "name": "panel-binding-catalog",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#panel-binding-catalog-v1",
+      "schema_pointer": "#/$defs/panelBindingCatalogV1",
+      "writers": ["adp-management-panel"],
+      "readers": ["adp-panel-refresh", "adp-management-panel"]
+    },
+    {
+      "name": "generation-envelope",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#generation-envelope-v1",
+      "schema_pointer": "#/$defs/generationEnvelopeV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["all-canonical-producers", "adp-management-panel"]
+    },
+    {
+      "name": "generation-lineage-index",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#generation-lineage-index-v1",
+      "schema_pointer": "#/$defs/generationLineageIndexV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["panel-runtime", "adp-management-panel", "adp-state-audit"]
+    },
+    {
+      "name": "publication-absence-proof",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#publication-absence-proof-v1",
+      "schema_pointer": "#/$defs/publicationAbsenceProofV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["panel-runtime", "adp-management-panel", "adp-state-audit"]
+    },
+    {
+      "name": "producer-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#producer-receipt-v1",
+      "schema_pointer": "#/$defs/producerReceiptV1",
+      "writers": ["all-canonical-producers"],
+      "readers": ["adp-panel-refresh", "adp-management-panel"]
+    },
+    {
+      "name": "canonical-projection-envelope",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#canonical-projection-envelope-v1",
+      "schema_pointer": "#/$defs/canonicalProjectionEnvelopeV1",
+      "writers": ["all-canonical-producers"],
+      "readers": ["adp-panel-refresh", "adp-management-panel"]
+    },
+    {
+      "name": "state-audit-payload",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#state-audit-payload-v2",
+      "schema_pointer": "#/$defs/stateAuditPayloadV2",
+      "writers": ["adp-state-audit"],
+      "readers": ["adp-program-status", "adp-roadmap-sync", "adp-meeting-pack", "adp-management-panel"]
+    },
+    {
+      "name": "program-status-payload",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#program-status-payload-v2",
+      "schema_pointer": "#/$defs/programStatusPayloadV2",
+      "writers": ["adp-program-status"],
+      "readers": ["adp-roadmap-sync", "adp-flow-graph", "adp-meeting-pack", "adp-management-panel"]
+    },
+    {
+      "name": "roadmap-payload",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#roadmap-payload-v2",
+      "schema_pointer": "#/$defs/roadmapPayloadV2",
+      "writers": ["adp-roadmap-sync"],
+      "readers": ["adp-meeting-pack", "adp-management-panel"]
+    },
+    {
+      "name": "meeting-pack-payload",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#meeting-pack-payload-v2",
+      "schema_pointer": "#/$defs/meetingPackPayloadV2",
+      "writers": ["adp-meeting-pack"],
+      "readers": ["adp-management-panel"]
+    },
+    {
+      "name": "management-panel-payload",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#management-panel-payload-v2",
+      "schema_pointer": "#/$defs/managementPanelPayloadV2",
+      "writers": ["adp-management-panel"],
+      "readers": ["adp-panel-refresh", "panel-runtime"]
+    },
+    {
+      "name": "root-registry-state",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#root-registry-state-v1",
+      "schema_pointer": "#/$defs/rootRegistryStateV1",
+      "writers": ["adp-runtime-bootstrap"],
+      "readers": ["all-state-writers", "adp-panel-refresh"]
+    },
+    {
+      "name": "writer-fence-migration-attestation",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#writer-fence-migration-attestation-v1",
+      "schema_pointer": "#/$defs/writerFenceMigrationAttestationV1",
+      "writers": ["adp-runtime-bootstrap"],
+      "readers": ["panel-runtime", "adp-state-audit", "adp-panel-refresh", "fact-transaction-coordinator"]
+    },
+    {
+      "name": "activation-transition-command",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#activation-transition-command-v1",
+      "schema_pointer": "#/$defs/activationTransitionCommandV1",
+      "writers": ["adp-runtime-bootstrap"],
+      "readers": ["fact-transaction-coordinator", "transaction-recovery"]
+    },
+    {
+      "name": "activation-transition-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#activation-transition-receipt-v1",
+      "schema_pointer": "#/$defs/activationTransitionReceiptV1",
+      "writers": ["fact-transaction-coordinator"],
+      "readers": ["adp-runtime-bootstrap", "panel-runtime", "transaction-recovery"]
+    },
+    {
+      "name": "activation-lifecycle-index",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#activation-lifecycle-index-v1",
+      "schema_pointer": "#/$defs/activationLifecycleIndexV1",
+      "writers": ["adp-runtime-bootstrap"],
+      "readers": ["panel-runtime", "transaction-recovery", "adp-state-audit"]
+    },
+    {
+      "name": "strict-activation-state",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#strict-activation-state-v1",
+      "schema_pointer": "#/$defs/strictActivationStateV1",
+      "writers": ["adp-runtime-bootstrap"],
+      "readers": ["panel-runtime", "adp-state-audit", "adp-panel-refresh", "fact-transaction-coordinator"]
+    },
+    {
+      "name": "fact-generation-state",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#fact-generation-state-v1",
+      "schema_pointer": "#/$defs/factGenerationStateV1",
+      "writers": ["fact-transaction-coordinator"],
+      "readers": ["all-state-readers", "adp-panel-refresh"]
+    },
+    {
+      "name": "panel-state",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#panel-state-v1",
+      "schema_pointer": "#/$defs/panelStateV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["adp-management-panel", "adp-agent-program-lead"]
+    },
+    {
+      "name": "panel-current-pointer",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#panel-current-pointer-v1",
+      "schema_pointer": "#/$defs/panelCurrentPointerV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["all-canonical-readers"]
+    },
+    {
+      "name": "transaction-journal-manifest",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#transaction-journal-manifest-v1",
+      "schema_pointer": "#/$defs/transactionJournalManifestV1",
+      "writers": ["fact-transaction-coordinator", "adp-panel-refresh"],
+      "readers": ["transaction-recovery"]
+    },
+    {
+      "name": "journal-marker",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#journal-marker-v1",
+      "schema_pointer": "#/$defs/journalMarkerV1",
+      "writers": ["fact-transaction-coordinator", "adp-panel-refresh", "transaction-recovery"],
+      "readers": ["transaction-recovery", "all-state-readers"]
+    },
+    {
+      "name": "recovery-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#recovery-receipt-v1",
+      "schema_pointer": "#/$defs/recoveryReceiptV1",
+      "writers": ["transaction-recovery"],
+      "readers": ["all-state-readers", "adp-state-audit"]
+    },
+    {
+      "name": "fact-mutation-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#fact-mutation-receipt-v1",
+      "schema_pointer": "#/$defs/factMutationReceiptV1",
+      "writers": ["fact-transaction-coordinator"],
+      "readers": ["all-state-readers", "adp-panel-refresh"]
+    },
+    {
+      "name": "fact-mutation-proof",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#fact-mutation-proof-v1",
+      "schema_pointer": "#/$defs/factMutationProofV1",
+      "writers": ["fact-transaction-coordinator"],
+      "readers": ["transaction-recovery", "adp-state-audit", "adp-panel-refresh"]
+    },
+    {
+      "name": "fact-command-receipt-index",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#fact-command-receipt-index-v1",
+      "schema_pointer": "#/$defs/factCommandReceiptIndexV1",
+      "writers": ["fact-transaction-coordinator"],
+      "readers": ["fact-transaction-coordinator", "transaction-recovery", "adp-state-audit"]
+    },
+    {
+      "name": "panel-publication-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#panel-publication-receipt-v1",
+      "schema_pointer": "#/$defs/panelPublicationReceiptV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["adp-management-panel", "adp-agent-program-lead"]
+    },
+    {
+      "name": "repair-dry-run-request",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#repair-dry-run-request-v1",
+      "schema_pointer": "#/$defs/repairDryRunRequestV1",
+      "writers": ["repair-client"],
+      "readers": ["adp-status-sync"]
+    },
+    {
+      "name": "repair-dry-run-result",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#repair-dry-run-result-v1",
+      "schema_pointer": "#/$defs/repairDryRunResultV1",
+      "writers": ["adp-status-sync"],
+      "readers": ["repair-client"]
+    },
+    {
+      "name": "repair-apply-request",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#repair-apply-request-v1",
+      "schema_pointer": "#/$defs/repairApplyRequestV1",
+      "writers": ["repair-client"],
+      "readers": ["adp-status-sync"]
+    },
+    {
+      "name": "repair-run-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#repair-run-receipt-v1",
+      "schema_pointer": "#/$defs/repairRunReceiptV1",
+      "writers": ["adp-status-sync"],
+      "readers": ["repair-client", "adp-state-audit"]
+    },
+    {
+      "name": "repair-nonce-state",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#repair-nonce-state-v1",
+      "schema_pointer": "#/$defs/repairNonceStateV1",
+      "writers": ["adp-status-sync", "transaction-recovery"],
+      "readers": ["adp-status-sync", "transaction-recovery"]
+    },
+    {
+      "name": "repair-receipt-index",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#repair-receipt-index-v1",
+      "schema_pointer": "#/$defs/repairReceiptIndexV1",
+      "writers": ["fact-transaction-coordinator"],
+      "readers": ["adp-status-sync", "transaction-recovery"]
+    },
+    {
+      "name": "repair-attempt-ledger",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#repair-attempt-ledger-v1",
+      "schema_pointer": "#/$defs/repairAttemptLedgerV1",
+      "writers": ["transaction-recovery"],
+      "readers": ["adp-status-sync", "transaction-recovery", "adp-state-audit"]
+    },
+    {
+      "name": "refresh-run-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#refresh-run-receipt-v1",
+      "schema_pointer": "#/$defs/refreshRunReceiptV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["adp-management-panel", "adp-agent-program-lead"]
+    },
+    {
+      "name": "refresh-request",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#refresh-request-v1",
+      "schema_pointer": "#/$defs/refreshRequestV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["adp-panel-refresh", "adp-state-audit"]
+    },
+    {
+      "name": "snapshot-lock-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#snapshot-lock-receipt-v1",
+      "schema_pointer": "#/$defs/snapshotLockReceiptV1",
+      "writers": ["adp-panel-refresh"],
+      "readers": ["all-canonical-producers", "adp-panel-refresh", "adp-state-audit"]
+    },
+    {
+      "name": "panel-refresh-status",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#panel-refresh-status-v1",
+      "schema_pointer": "#/$defs/panelRefreshStatusV1",
+      "writers": ["adp-panel-refresh", "adp-panel-inspect"],
+      "readers": ["adp-management-panel", "adp-agent-program-lead"]
+    },
+    {
+      "name": "management-panel-current-view",
+      "version": "2.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#management-panel-current-view-v2",
+      "schema_pointer": "#/$defs/managementPanelCurrentViewV2",
+      "writers": ["management-panel-v2-current-consumer"],
+      "readers": ["management-panel-browser"]
+    },
+    {
+      "name": "conformance-result",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#conformance-result-v1",
+      "schema_pointer": "#/$defs/conformanceResultV1",
+      "writers": ["independent-conformance-adapter"],
+      "readers": ["contract-release-gate"]
+    },
+    {
+      "name": "release-evidence-set",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#release-evidence-set-v1",
+      "schema_pointer": "#/$defs/releaseEvidenceSetV1",
+      "writers": ["contract-release-gate"],
+      "readers": ["panel-runtime", "adp-panel-inspect", "adp-panel-refresh"]
+    },
+    {
+      "name": "release-evidence-transition-receipt",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#release-evidence-transition-receipt-v1",
+      "schema_pointer": "#/$defs/releaseEvidenceTransitionReceiptV1",
+      "writers": ["contract-release-gate"],
+      "readers": ["panel-runtime", "transaction-recovery", "adp-panel-refresh"]
+    },
+    {
+      "name": "release-evidence-history-index",
+      "version": "1.0.0",
+      "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#release-evidence-history-index-v1",
+      "schema_pointer": "#/$defs/releaseEvidenceHistoryIndexV1",
+      "writers": ["contract-release-gate"],
+      "readers": ["panel-runtime", "transaction-recovery", "adp-panel-refresh"]
+    }
+  ],
+  "legacy_ingress_adapters": [
+    {
+      "name": "meeting-sync-plan-v1-to-v2",
+      "version": "1.0.0",
+      "source_contract": "meeting-sync-plan/1.x",
+      "source_artifact_id": "meeting-sync-plan/1.x",
+      "target_contract": "meeting-sync-plan/2.0.0",
+      "presence_preserving": true,
+      "mapping_algorithm": "meeting-sync-v1-mapping-v1",
+      "legacy_wdr_update_policy": "history-only-unless-additive-typed-status-payload",
+      "missing_typed_status_gap": "LEGACY_STATUS_INTENT_REQUIRED",
+      "observed_at_derivation": "rfc3339-offset-to-utc-floor-second-or-date-midnight-utc-else-error",
+      "command_id_derivation": "legacy-adapter-jcs-sha256-v1",
+      "action_id_derivation": "explicit-id-else-act-plus-uppercase-first-20-sha256-v1",
+      "revision_capture": "shared-lock",
+      "missing_provenance_error": "LEGACY_PROVENANCE_REQUIRED",
+      "incomplete_create_error": "LEGACY_CREATE_INCOMPLETE"
+    },
+    {
+      "name": "status-sync-v1-to-v2",
+      "version": "1.0.0",
+      "source_contract": "status-sync-batch/1.x",
+      "source_artifact_id": "status-sync-batch/1.x",
+      "target_contract": "status-sync-batch/2.0.0",
+      "presence_preserving": true,
+      "mapping_algorithm": "status-sync-v1-mapping-v1",
+      "observed_at_derivation": "explicit-adapter-metadata-required",
+      "command_id_derivation": "legacy-adapter-jcs-sha256-v1",
+      "action_id_derivation": "explicit-id-else-act-plus-uppercase-first-20-sha256-v1",
+      "action_scope_mapping": "workstream-or-program-routing-scope-v1",
+      "revision_capture": "shared-lock",
+      "missing_target_error": "ACTION_NOT_FOUND",
+      "unsupported_id_error": "LEGACY_ACTION_ID_UNSUPPORTED"
+    }
+  ],
+  "dependency_enumerators": [
+    {"id": "exact-path-v1", "version": "1.0.0", "algorithm": "require-one-regular-nonsymlink-file-at-normalized-nfc-posix-relative-path;missing-unreadable-or-nonregular-is-error"},
+    {"id": "physical-workstream-inventory-v1", "version": "1.0.0", "algorithm": "under-locked-memory-root-single-read-enumerate-visible-one-level-workstreams-star-delivery-record-md;require-shared-workstream-id-grammar-and-complete-pinned-wdr-grammar-plus-exact-contract-bound-wdr-action-projection-v1-sidecar;hidden-nested-unreadable-unpaired-or-duplicate-physical-entry-is-error;emit-content-addressed-physical-workstream-inventory-v1-attestation-sorted-workstream-id-nfc-utf8;empty-is-error"},
+    {"id": "selected-workstreams-v1", "version": "1.0.0", "algorithm": "require-selection-policy-physical-inventory-byte-equal-derived-workstream-catalog;resolve-all-before-projection;exclude-after-include;sort-nfc-utf8;empty-is-error"},
+    {"id": "selected-sidecars-v1", "version": "1.0.0", "algorithm": "one-regular-nonsymlink-named-sidecar-for-each-resolved-workstream;missing-or-unreadable-is-error"},
+    {"id": "selected-receipts-v1", "version": "1.0.0", "algorithm": "regular-nonsymlink-json-files-one-directory-depth;hidden-excluded;schema-valid;filter-selected-meeting-kinds;sort-nfc-posix-path"},
+    {"id": "selected-immutable-snapshot-v1", "version": "1.0.0", "algorithm": "null-selection-id-yields-empty;else-exact-snapshots-kind-h_lowerhex.json-regular-nonsymlink-file"},
+    {"id": "selected-workstream-file-v1", "version": "1.0.0", "algorithm": "one-regular-nonsymlink-named-file-for-each-resolved-workstream;missing-or-unreadable-is-error"},
+    {"id": "selected-baseline-history-v1", "version": "1.0.0", "algorithm": "revision-zero-or-one-yields-empty;else-exact-current-minus-one-regular-nonsymlink-file"},
+    {"id": "glob-kind-v1", "version": "1.0.0", "algorithm": "posix-glob-on-nfc-relative-paths;star-does-not-cross-slash;double-star-matches-zero-or-more-segments;hidden-segment-excluded;regular-nonsymlink-readable-files-only;unreadable-is-error;sort-nfc-utf8"}
+  ],
+  "semantic_validators": [
+    {"id": "panel-publication-eligibility/1.0.0", "scope": ["physical-workstream-inventory/1.0.0", "selection-policy/1.0.0", "panel-binding-catalog/1.0.0", "generation-envelope/1.0.0", "management-panel-payload/2.0.0", "state-audit-payload/2.0.0", "intent-convergence-verdict/1.0.0", "action-projection-drift-verdict/1.0.0", "projection-dependency-manifest/1.0.0", "producer-receipt/1.0.0", "writer-fence-migration-attestation/1.0.0"], "algorithm": "fresh-physical-inventory-attestation-byte-equal-policy-catalog-generation-bidirectional-first-nonempty-selection-and-generation-audit-drift-intent-convergence-manifest-receipt-exact-scope-plus-strict-writer-fence-gate"},
+    {"id": "projection-registry-closure/1.0.0", "scope": ["dependency_enumerators", "projection_input_profiles", "projection_dag", "canonical_array_ordering", "identity_set_fields", "semantic_sequence_fields", "runtime_paths", "wdr_field_section_map", "owned_fact_target_profiles", "source_time_bindings", "live_inspect_read_profile"], "algorithm": "execute-all-enumerators-and-leaf-plus-instance-expanded-changed-input-dag-invalidation-and-exact-read-sets-typed-all-ordering-rules-owned-fact-targets-source-times-and-runtime-path-known-answers-from-registry"},
+    {"id": "fact-receipt-attribution/1.0.0", "scope": ["runtime-authority-context/1.0.0", "root-registry-state/1.0.0", "writer-capability-registry/1.0.0", "strict-activation-state/1.0.0", "writer-fence-migration-attestation/1.0.0", "action-ledger-mutation/2.0.0", "owned-fact-command/1.0.0", "status-mutation-intent/1.0.0", "action-ledger-state/1.0.0", "action-flow-index/1.0.0", "wdr-mutation/1.0.0", "wdr-file-state/1.0.0", "wdr-action-projection/1.0.0", "fact-command-receipt-index/1.0.0", "mutation-intent-outbox/1.0.0", "transaction-journal-manifest/1.0.0", "journal-marker/1.0.0", "fact-generation-state/1.0.0", "fact-mutation-receipt/1.0.0", "fact-mutation-proof/1.0.0", "strict_rollout", "runtime_authority_profile", "runtime_paths", "lock_profile", "wdr_field_section_map", "owned_fact_target_profiles"], "algorithm": "exact-contract-negotiation-typed-native-preimage-authority-command-derived-targets-byte-proof-command-receipt-index-plus-command-bound-exact-emitted-intents-or-complete-sorted-aggregated-consumed-intent-set-in-one-recoverable-fact-transaction"},
+    {"id": "owned-fact-command-semantics/1.0.0", "scope": ["owned-fact-command/1.0.0", "owned_fact_target_profiles", "runtime-authority-context/1.0.0", "root-registry-state/1.0.0", "writer-capability-registry/1.0.0", "strict-activation-state/1.0.0", "writer-fence-migration-attestation/1.0.0", "fact-mutation-receipt/1.0.0", "fact-mutation-proof/1.0.0", "runtime_authority_profile", "lock_profile", "runtime_paths"], "algorithm": "registry-profile-exact-producer-operation-root-path-content-schema-cas-before-after-generation-journal-receipt-and-restart"},
+    {"id": "transaction-journal-semantics/1.0.0", "scope": ["transaction-journal-manifest/1.0.0", "journal-marker/1.0.0", "runtime_paths"], "algorithm": "transaction-kind-role-closure-journal-local-images-contiguous-order-unique-target-exact-receipts-and-terminal-marker"},
+    {"id": "repair-graph-semantics/1.0.0", "scope": ["action-projection-drift-verdict/1.0.0", "audit-finding-repair/2.0.0", "action-ledger-state/1.0.0", "runtime-authority-context/1.0.0", "writer-capability-registry/1.0.0", "strict-activation-state/1.0.0", "writer-fence-migration-attestation/1.0.0", "wdr-mutation/1.0.0", "wdr-file-state/1.0.0", "wdr-action-projection/1.0.0", "repair-dry-run-request/1.0.0", "repair-dry-run-result/1.0.0", "repair-apply-request/1.0.0", "repair-run-receipt/1.0.0", "repair-nonce-state/1.0.0", "repair-receipt-index/1.0.0", "repair-attempt-ledger/1.0.0", "transaction-journal-manifest/1.0.0", "journal-marker/1.0.0", "recovery-receipt/1.0.0", "fact-generation-state/1.0.0", "fact-mutation-receipt/1.0.0", "fact-mutation-proof/1.0.0", "strict_rollout", "runtime_authority_profile", "runtime_paths", "lock_profile", "wdr_field_section_map", "identity_set_fields"], "algorithm": "derive-lossless-typed-audit-findings-from-exact-validated-drift-reparse-raw-ledger-state-wdr-and-sidecar-to-prove-presence-revision-and-diffs-then-separate-business-and-attempt-journals-with-deterministic-terminal-marker-bound-attempt-identity-and-idempotent-registered-path-recovery"},
+    {"id": "release-evidence-transition-semantics/1.0.0", "scope": ["release-evidence-set/1.0.0", "release-evidence-transition-receipt/1.0.0", "release-evidence-history-index/1.0.0", "transaction-journal-manifest/1.0.0", "journal-marker/1.0.0", "recovery-receipt/1.0.0", "runtime_paths", "runtime_policy", "evidence_trust"], "algorithm": "validate-every-historical-receipt-blob-signature-policy-and-monotonic-chronology-plus-content-addressed-journal-marker-chain-and-fresh-process-image-recovery"},
+    {"id": "activation-transition-semantics/1.0.0", "scope": ["activation-transition-command/1.0.0", "activation-transition-receipt/1.0.0", "activation-lifecycle-index/1.0.0", "runtime-authority-context/1.0.0", "root-registry-state/1.0.0", "strict-activation-state/1.0.0", "writer-capability-registry/1.0.0", "writer-fence-migration-attestation/1.0.0", "refresh-run-receipt/1.0.0", "transaction-journal-manifest/1.0.0", "journal-marker/1.0.0", "recovery-receipt/1.0.0", "runtime_authority_profile", "lock_profile", "runtime_paths", "strict_rollout"], "algorithm": "recompute-fixed-five-step-lifecycle-id-first-step-creates-index-later-steps-exact-prefix-cas-each-entry-derived-from-committed-receipt-raw-hash-and-registered-path-plus-state-attestation-cas-and-fresh-process-recovery"},
+    {"id": "panel-publication-graph/1.0.0", "scope": ["transaction-journal-manifest/1.0.0", "journal-marker/1.0.0", "generation-lineage-index/1.0.0", "panel-current-pointer/1.0.0", "panel-state/1.0.0", "panel-publication-receipt/1.0.0", "canonical-projection-envelope/1.0.0", "runtime_paths"], "algorithm": "complete-immutable-lineage-and-index-in-same-journal-before-pointer-last-plus-durable-command-fingerprint-replay-lookup-and-fresh-process-recovery"},
+    {"id": "panel-binding-semantics/1.0.0", "scope": ["panel-binding-catalog/1.0.0", "canonical-projection-envelope/1.0.0", "management-panel-payload/2.0.0"], "algorithm": "resolve-every-binding-from-exact-same-generation-upstream-envelope-and-compare-panel-target"},
+    {"id": "panel-v1-same-generation-composition/1.0.0", "scope": ["management-panel-payload/2.0.0", "management-panel-current-view/2.0.0", "management-panel-model/1.0.0", "management-panel-manifest/1.0.0", "panel_v1_composition", "panel_v2_consumer"], "algorithm": "recompose-legacy-aggregate-model-from-canonical-overlay-and-compatibility-corpus;execute-pinned-v2-current-consumer-from-sync-only"},
+    {"id": "status-intent-application/1.0.0", "scope": ["status-mutation-intent/1.0.0", "status-sync-batch/2.0.0", "wdr-mutation/1.0.0", "mutation-intent-outbox/1.0.0"], "algorithm": "exact-canonical-intent-hash-content-field-evidence-workstream-to-single-reauthorized-wdr-command-and-complete-sorted-consumed-id-binding-reject-conflicts-and-ordered-stop-on-first-failure-no-rollback"},
+    {"id": "meeting-plan-intent-carriers/1.0.0", "scope": ["meeting-sync-plan/2.0.0", "producer-intent-outbox-command/1.0.0", "status-mutation-intent/1.0.0"], "algorithm": "meeting-plan-intents-equal-exact-deduplicated-command-carried-intents-with-same-meeting-origin-workstream-evidence-and-canonical-bytes-including-zero-history"},
+    {"id": "program-status-current-from-wdr/1.0.0", "scope": ["program-status-payload/2.0.0", "wdr-file-state/1.0.0", "selection-policy/1.0.0"], "algorithm": "parse-complete-selected-wdr-current-labels-and-require-exact-program-status-workstream-row-plus-wdr-fingerprint-revision-generation"},
+    {"id": "action-projection-drift-content/1.0.0", "scope": ["action-ledger-state/1.0.0", "wdr-file-state/1.0.0", "wdr-action-projection/1.0.0", "action-projection-drift-verdict/1.0.0", "audit-finding-repair/2.0.0", "selection-policy/1.0.0"], "algorithm": "exact-active-ledger-routing-or-affected-membership-to-sidecar-record-rendered-wdr-summary-and-lossless-content-addressed-typed-finding-verdict-no-false-green"}
+    ,{"id": "bootstrap-migration-attribution/1.0.0", "scope": ["bootstrap-migration-command/1.0.0", "action-ledger-state/1.0.0", "action-flow-index/1.0.0", "wdr-file-state/1.0.0", "wdr-action-projection/1.0.0", "writer-capability-registry/1.0.0", "transaction-journal-manifest/1.0.0", "journal-marker/1.0.0", "fact-generation-state/1.0.0", "fact-mutation-receipt/1.0.0", "fact-mutation-proof/1.0.0", "runtime_paths"], "algorithm": "declared-pinned-absent-or-legacy12-or-legacy20-and-legacy-wdr-preimages-to-command-derived-mixed-create-replace-canonical-state-flow-sidecar-byte-proof-journal-receipt"}
+    ,{"id": "strict-writer-fence-activation/1.0.0", "scope": ["writer-fence-migration-attestation/1.0.0", "release-evidence-set/1.0.0", "release-evidence-transition-receipt/1.0.0", "release-evidence-history-index/1.0.0", "conformance-result/1.0.0", "writer-build-manifest/1.0.0", "writer-fence-receipt/1.0.0", "strict-activation-state/1.0.0", "root-registry-state/1.0.0", "writer-capability-registry/1.0.0", "strict_rollout", "runtime_paths", "lock_profile", "runtime_policy", "evidence_trust"], "algorithm": "external-trusted-time-and-durable-release-authority-plus-current-root-capability-epoch-writer-build-and-fence-byte-closure-authorize-immutable-writer-fence-only-while-mutable-facts-pointer-lineage-and-panel-generation-are-live-receipt-cas-validated"}
+    ,{"id": "live-inspect-semantics/1.0.0", "scope": ["strict-writer-fence-activation/1.0.0", "writer-fence-migration-attestation/1.0.0", "release-evidence-set/1.0.0", "release-evidence-history-index/1.0.0", "conformance-result/1.0.0", "writer-build-manifest/1.0.0", "writer-fence-receipt/1.0.0", "strict-activation-state/1.0.0", "root-registry-state/1.0.0", "writer-capability-registry/1.0.0", "action-ledger-state/1.0.0", "action-flow-index/1.0.0", "wdr-file-state/1.0.0", "wdr-action-projection/1.0.0", "refresh-run-receipt/1.0.0", "panel-publication-receipt/1.0.0", "panel-state/1.0.0", "generation-lineage-index/1.0.0", "publication-absence-proof/1.0.0", "panel-refresh-status/1.0.0", "panel-current-pointer/1.0.0", "fact-generation-state/1.0.0", "generation-envelope/1.0.0", "projection-dependency-manifest/1.0.0", "producer-receipt/1.0.0", "canonical-projection-envelope/1.0.0", "management-panel-payload/2.0.0", "strict_rollout", "runtime_paths", "lock_profile", "runtime_policy", "evidence_trust", "live_inspect_read_profile", "source_time_bindings"], "algorithm": "compose-and-execute-complete-registered-strict-writer-fence-gate-with-external-trusted-time-then-restart-safe-instrumented-resolve-pointer-generation-index-load-canonical-raw-bytes-under-fact-shared-lock-reenumerate-leaves-compare-actual-root-path-contract-read-set-before-read-lock-release-then-write-only-refresh-status"}
+    ,{"id": "snapshot-time-authority/1.0.0", "scope": ["refresh-request/1.0.0", "snapshot-lock-receipt/1.0.0", "selection-policy/1.0.0", "refresh-run-receipt/1.0.0", "source_time_bindings", "lock_profile"], "algorithm": "request-time-host-time-lock-acquisition-maximum-fact-time-and-all-registered-source-time-carriers-equal-one-trusted-snapshot-boundary"}
+    ,{"id": "intent-outbox-convergence/1.0.0", "scope": ["mutation-intent-outbox/1.0.0", "intent-convergence-verdict/1.0.0", "status-mutation-intent/1.0.0", "status-sync-batch/2.0.0", "wdr-mutation/1.0.0", "fact-mutation-receipt/1.0.0", "state-audit-payload/2.0.0", "management-panel-payload/2.0.0"], "algorithm": "producer-command-binds-exact-typed-intent-by-canonical-hash-and-aggregated-status-sync-command-atomically-consumes-complete-sorted-same-workstream-pending-set-with-one-receipt-while-prefix-preserving-unrelated-rows-and-only-pending-or-consumed-states-are-allowed-failed-waived-arrays-are-empty-and-any-pending-blocks-fresh-eligible"}
+    ,{"id": "fact-command-replay/1.0.0", "scope": ["fact-command-receipt-index/1.0.0", "fact-mutation-receipt/1.0.0", "transaction-journal-manifest/1.0.0", "runtime_paths"], "algorithm": "global-monotonic-sequence-command-id-plus-fingerprint-to-exact-receipt-path-same-fingerprint-noop-different-fingerprint-conflict"}
+  ],
+  "identity_set_fields": [
+    {"contract": "writer-capability-registry/1.0.0", "pointer_template": "/capabilities/*/allowed_operations", "key": "utf8-nfc-scalar"},
+    {"contract": "writer-capability-registry/1.0.0", "pointer_template": "/capabilities/*/allowed_fields", "key": "utf8-nfc-scalar"},
+    {"contract": "writer-capability-registry/1.0.0", "pointer_template": "/capabilities/*/allowed_sections", "key": "utf8-nfc-scalar"},
+    {"contract": "repair-dry-run-request/1.0.0", "pointer_template": "/authorization_scopes", "key": "utf8-nfc-scalar"},
+    {"contract": "audit-finding-repair/2.0.0", "pointer_template": "/findings/*/action_ids", "key": "utf8-nfc-scalar"},
+    {"contract": "audit-finding-repair/2.0.0", "pointer_template": "/repair_batches/*/finding_ids", "key": "utf8-nfc-scalar"},
+    {"contract": "audit-finding-repair/2.0.0", "pointer_template": "/repair_batches/*/command/action_ids", "key": "utf8-nfc-scalar"},
+    {"contract": "fact-mutation-receipt/1.0.0", "pointer_template": "/action_deltas/*/changed_fields", "key": "utf8-nfc-scalar"},
+    {"contract": "fact-mutation-receipt/1.0.0", "pointer_template": "/action_deltas/*/evidence_fingerprints", "key": "utf8-nfc-scalar"},
+    {"contract": "action-flow-index/1.0.0", "pointer_template": "/actions/*/related_plan_item_ids", "key": "utf8-nfc-scalar"},
+    {"contract": "action-flow-index/1.0.0", "pointer_template": "/actions/*/related_flow_edge_ids", "key": "utf8-nfc-scalar"},
+    {"contract": "wdr-action-projection/1.0.0", "pointer_template": "/actions/*/affected_workstreams", "key": "utf8-nfc-scalar"},
+    {"contract": "wdr-mutation/1.0.0", "pointer_template": "/action_snapshot/actions/*/affected_workstreams", "key": "utf8-nfc-scalar"},
+    {"contract": "status-sync-batch/2.0.0", "pointer_template": "/intent_bindings/*/fields", "key": "utf8-nfc-scalar"}
+    ,{"contract": "panel-refresh-status/1.0.0", "pointer_template": "/latest_inspect/changed_sources", "key": "utf8-nfc-scalar"}
+    ,{"contract": "activation-transition-command/1.0.0", "pointer_template": "/approved_by", "key": "utf8-nfc-scalar"}
+    ,{"contract": "mutation-intent-outbox/1.0.0", "pointer_template": "/entries/*/field_set", "key": "utf8-nfc-scalar"}
+    ,{"contract": "intent-convergence-verdict/1.0.0", "pointer_template": "/pending_intent_ids", "key": "utf8-nfc-scalar"}
+    ,{"contract": "intent-convergence-verdict/1.0.0", "pointer_template": "/failed_intent_ids", "key": "utf8-nfc-scalar"}
+    ,{"contract": "intent-convergence-verdict/1.0.0", "pointer_template": "/waived_intent_ids", "key": "utf8-nfc-scalar"}
+  ],
+  "canonical_array_ordering": [
+    {"contract": "physical-workstream-inventory/1.0.0", "pointer": "/workstreams", "key": "workstream_id", "key_types": ["string"], "duplicate_policy": "reject"},
+    {"contract": "selection-policy/1.0.0", "pointer": "/physical_workstream_inventory", "key": "workstream_id", "duplicate_policy": "reject"},
+    {"contract": "selection-policy/1.0.0", "pointer": "/workstream_catalog", "key": "workstream_id", "duplicate_policy": "reject"},
+    {"contract": "selection-policy/1.0.0", "pointer": "/include_workstreams", "key": "utf8-nfc-scalar", "duplicate_policy": "reject"},
+    {"contract": "selection-policy/1.0.0", "pointer": "/exclude_workstreams", "key": "utf8-nfc-scalar", "duplicate_policy": "reject"},
+    {"contract": "selection-policy/1.0.0", "pointer": "/meeting_kinds", "key": "utf8-nfc-scalar", "duplicate_policy": "reject"},
+    {"contract": "generation-envelope/1.0.0", "pointer": "/roots", "key": "root", "duplicate_policy": "reject"},
+    {"contract": "generation-envelope/1.0.0", "pointer": "/leaf_sources", "key": "root_instance_id,path", "duplicate_policy": "reject"},
+    {"contract": "projection-dependency-manifest/1.0.0", "pointer": "/sources", "key": "root_instance_id,path", "duplicate_policy": "reject"},
+    {"contract": "projection-dependency-manifest/1.0.0", "pointer": "/upstreams", "key": "kind,id,manifest_id", "duplicate_policy": "reject"},
+    {"contract": "panel-current-pointer/1.0.0", "pointer": "/projections", "key": "kind,instance_key", "duplicate_policy": "reject"},
+    {"contract": "transaction-journal-manifest/1.0.0", "pointer": "/targets", "key": "apply_order", "key_types": ["integer"], "duplicate_policy": "reject"},
+    {"contract": "audit-finding-repair/2.0.0", "pointer": "/findings", "key": "workflow,workstream_id,operation,finding_id", "duplicate_policy": "reject"},
+    {"contract": "audit-finding-repair/2.0.0", "pointer": "/repair_batches", "key": "batch_id", "duplicate_policy": "reject"},
+    {"contract": "refresh-run-receipt/1.0.0", "pointer": "/nodes", "key": "instance_key", "duplicate_policy": "reject"},
+    {"contract": "fact-mutation-receipt/1.0.0", "pointer": "/action_deltas", "key": "action_id", "duplicate_policy": "reject"},
+    {"contract": "action-projection-drift-verdict/1.0.0", "pointer": "/selected_workstreams", "key": "utf8-nfc-scalar", "duplicate_policy": "reject"},
+    {"contract": "action-projection-drift-verdict/1.0.0", "pointer": "/workstreams", "key": "workstream_id", "duplicate_policy": "reject"},
+    {"contract": "program-status-payload/2.0.0", "pointer": "/workstream_current", "key": "workstream_id", "duplicate_policy": "reject"},
+    {"contract": "roadmap-payload/2.0.0", "pointer": "/milestone_timeline", "key": "milestone_id", "duplicate_policy": "reject"},
+    {"contract": "roadmap-payload/2.0.0", "pointer": "/unscheduled_milestones", "key": "milestone_id", "duplicate_policy": "reject"},
+    {"contract": "meeting-pack-payload/2.0.0", "pointer": "/boards", "key": "board_id", "duplicate_policy": "reject"},
+    {"contract": "management-panel-payload/2.0.0", "pointer": "/model_v1/views", "key": "view_id", "duplicate_policy": "reject"},
+    {"contract": "state-audit-payload/2.0.0", "pointer": "/source_preview", "key": "path", "duplicate_policy": "reject"},
+    {"contract": "program-status-payload/2.0.0", "pointer": "/source_preview", "key": "path", "duplicate_policy": "reject"},
+    {"contract": "roadmap-payload/2.0.0", "pointer": "/source_preview", "key": "path", "duplicate_policy": "reject"},
+    {"contract": "meeting-pack-payload/2.0.0", "pointer": "/source_preview", "key": "path", "duplicate_policy": "reject"},
+    {"contract": "action-ledger-state/1.0.0", "pointer": "/actions", "key": "action_id", "duplicate_policy": "reject"},
+    {"contract": "action-ledger-state/1.0.0", "pointer": "/applied_commands", "key": "command_id", "duplicate_policy": "reject"},
+    {"contract": "action-flow-index/1.0.0", "pointer": "/actions", "key": "action_id", "duplicate_policy": "reject"},
+    {"contract": "wdr-action-projection/1.0.0", "pointer": "/actions", "key": "action_id", "duplicate_policy": "reject"},
+    {"contract": "wdr-mutation/1.0.0", "pointer": "/action_snapshot/actions", "key": "action_id", "duplicate_policy": "reject"},
+    {"contract": "status-sync-batch/2.0.0", "pointer": "/accepted_intent_ids", "key": "utf8-nfc-scalar", "duplicate_policy": "reject"},
+    {"contract": "status-sync-batch/2.0.0", "pointer": "/accepted_intents", "key": "workstream_id,intent_id", "duplicate_policy": "reject"},
+    {"contract": "status-sync-batch/2.0.0", "pointer": "/intent_bindings", "key": "intent_id", "duplicate_policy": "reject"},
+    {"contract": "status-sync-batch/2.0.0", "pointer": "/action_commands", "key": "command_id", "duplicate_policy": "reject"},
+    {"contract": "status-sync-batch/2.0.0", "pointer": "/wdr_patches", "key": "workstream_id,command_id", "duplicate_policy": "reject"},
+    {"contract": "status-mutation-intent/1.0.0", "pointer": "/evidence", "key": "source_path,source_fingerprint,observed_at", "duplicate_policy": "reject"},
+    {"contract": "action-ledger-mutation/2.0.0", "pointer": "/evidence", "key": "source_path,source_fingerprint,observed_at", "duplicate_policy": "reject"},
+    {"contract": "wdr-mutation/1.0.0", "pointer": "/evidence", "key": "source_path,source_fingerprint,observed_at", "duplicate_policy": "reject"},
+    {"contract": "bootstrap-migration-command/1.0.0", "pointer": "/workstreams", "key": "workstream_id", "duplicate_policy": "reject"},
+    {"contract": "writer-fence-migration-attestation/1.0.0", "pointer": "/writer_inventory", "key": "producer_id", "duplicate_policy": "reject"},
+    {"contract": "writer-fence-migration-attestation/1.0.0", "pointer": "/workstreams", "key": "workstream_id", "duplicate_policy": "reject"}
+    ,{"contract": "writer-build-manifest/1.0.0", "pointer": "/artifacts", "key": "path", "duplicate_policy": "reject"}
+    ,{"contract": "generation-lineage-index/1.0.0", "pointer": "/objects", "key": "object_kind,projection_kind,instance_key", "duplicate_policy": "reject"}
+    ,{"contract": "panel-refresh-status/1.0.0", "pointer": "/latest_inspect/changed_sources", "key": "utf8-nfc-scalar", "duplicate_policy": "reject"}
+    ,{"contract": "release-evidence-set/1.0.0", "pointer": "/entries", "key": "result_id", "duplicate_policy": "reject"}
+    ,{"contract": "release-evidence-set/1.0.0", "pointer": "/entries/*/evidence_blobs", "key": "sha256,path", "duplicate_policy": "reject"}
+    ,{"contract": "owned-fact-command/1.0.0", "pointer": "/evidence", "key": "source_path,source_fingerprint,observed_at", "duplicate_policy": "reject"}
+    ,{"contract": "repair-receipt-index/1.0.0", "pointer": "/entries", "key": "sequence", "key_types": ["integer"], "duplicate_policy": "reject"}
+    ,{"contract": "repair-attempt-ledger/1.0.0", "pointer": "/attempts", "key": "sequence", "key_types": ["integer"], "duplicate_policy": "reject"}
+    ,{"contract": "fact-command-receipt-index/1.0.0", "pointer": "/entries", "key": "sequence", "key_types": ["integer"], "duplicate_policy": "reject"}
+    ,{"contract": "mutation-intent-outbox/1.0.0", "pointer": "/entries", "key": "sequence", "key_types": ["integer"], "duplicate_policy": "reject"}
+    ,{"contract": "activation-lifecycle-index/1.0.0", "pointer": "/entries", "key": "step_ordinal", "key_types": ["integer"], "duplicate_policy": "reject"}
+    ,{"contract": "action-projection-drift-verdict/1.0.0", "pointer": "/workstreams/*/action_diffs", "key": "action_id", "duplicate_policy": "reject"}
+    ,{"contract": "release-evidence-history-index/1.0.0", "pointer": "/entries", "key": "set_generation", "key_types": ["integer"], "duplicate_policy": "reject"}
+  ],
+  "semantic_sequence_fields": [
+    {"contract": "status-sync-batch/2.0.0", "pointer": "/command_order", "meaning": "execution-order"},
+    {"contract": "fact-mutation-proof/1.0.0", "pointer": "/business_artifacts", "meaning": "journal-business-target-apply-order"},
+    {"contract": "fact-mutation-proof/1.0.0", "pointer": "/read_artifacts", "meaning": "registered-read-dependency-order"}
+  ],
+  "projection_dag": [
+    {"from": "action-projection-drift-verdict", "to": "state-audit"},
+    {"from": "state-audit", "to": "program-status"},
+    {"from": "program-status", "to": "roadmap"},
+    {"from": "state-audit", "to": "roadmap"},
+    {"from": "program-status", "to": "flow-graph"},
+    {"from": "program-status", "to": "meeting-pack"},
+    {"from": "roadmap", "to": "meeting-pack"},
+    {"from": "flow-graph", "to": "meeting-pack"},
+    {"from": "state-audit", "to": "meeting-pack"},
+    {"from": "state-audit", "to": "management-panel"},
+    {"from": "action-projection-drift-verdict", "to": "management-panel"},
+    {"from": "program-status", "to": "management-panel"},
+    {"from": "roadmap", "to": "management-panel"},
+    {"from": "flow-graph", "to": "management-panel"},
+    {"from": "meeting-pack", "to": "management-panel"}
+  ],
+  "panel_binding_map": [
+    {"projection_kind": "state-audit", "source_pointer": "", "panel_pointer": "/sync/audit", "required": true, "cardinality": "one", "merge_mode": "replace", "key_pointer": null, "order_by": "projection-id"},
+    {"projection_kind": "action-projection-drift-verdict", "source_pointer": "", "panel_pointer": "/sync/action_projection", "required": true, "cardinality": "one", "merge_mode": "replace", "key_pointer": null, "order_by": "projection-id"},
+    {"projection_kind": "program-status", "source_pointer": "", "panel_pointer": "/sync/canonical/status", "required": true, "cardinality": "one", "merge_mode": "replace", "key_pointer": null, "order_by": "projection-id"},
+    {"projection_kind": "roadmap", "source_pointer": "", "panel_pointer": "/sync/canonical/roadmap", "required": true, "cardinality": "one", "merge_mode": "replace", "key_pointer": null, "order_by": "projection-id"},
+    {"projection_kind": "flow-graph", "source_pointer": "", "panel_pointer": "/sync/canonical/flow", "required": true, "cardinality": "one", "merge_mode": "replace", "key_pointer": null, "order_by": "projection-id"},
+    {"projection_kind": "meeting-pack", "source_pointer": "", "panel_pointer": "/sync/canonical/meetings", "required": true, "cardinality": "one-per-meeting-kind", "merge_mode": "object-by-key", "key_pointer": "/scenario", "order_by": "meeting-kind"}
+  ],
+  "panel_v1_composition": {
+    "id": "panel-v1-compose-from-same-generation/1.0.0",
+    "composer_artifact_id": "management-panel-composer/1.0.9",
+    "static_inputs_pointer": "/sync/compatibility_inputs",
+    "legacy_semantics": "aggregate-only",
+    "current_workstream_ui_pointer": "/sync/canonical/status/workstream_current",
+    "program_status_overlay": ["overall_status", "progress"],
+    "source_bindings": [
+      {"input_key": "program_status", "projection_kind": "program-status", "source_pointer": "/extensions/panel_v1_source"},
+      {"input_key": "roadmap", "projection_kind": "roadmap", "source_pointer": "/extensions/panel_v1_source"},
+      {"input_key": "flow_graph", "projection_kind": "flow-graph", "source_pointer": ""},
+      {"input_key": "meeting_packs/fde-morning", "projection_kind": "meeting-pack", "instance_key": "fde-morning", "source_pointer": "/extensions/panel_v1_source"},
+      {"input_key": "meeting_packs/business-biweekly", "projection_kind": "meeting-pack", "instance_key": "business-biweekly", "source_pointer": "/extensions/panel_v1_source"}
+    ]
+  },
+  "panel_v2_consumer": {
+    "id": "management-panel-v2-current-consumer/1.0.0",
+    "artifact_id": "management-panel-v2-current-consumer/1.0.0",
+    "input_contract": "management-panel-payload/2.0.0",
+    "output_contract": "management-panel-current-view/2.0.0",
+    "source_pointers": ["/panel_id", "/sync/canonical/status/workstream_current"],
+    "primary_source_pointer": "/sync/canonical/status/workstream_current",
+    "forbidden_source_prefixes": ["/model_v1"],
+    "access_mode": "instrumented-rfc6901-resolver-exact-read-set",
+    "required_fields": ["workstream_id", "progress", "blockers", "risks"],
+    "rendering": "deterministic-escaped-html-current-workstream-sections-v1"
+  },
+  "projection_payload_bindings": [
+    {"projection_kind": "action-projection-drift-verdict", "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#action-projection-drift-verdict-v1", "schema_root": "document-workspace", "schema_path": "contracts/panel-sync-contracts.schema.json", "schema_pointer": "#/$defs/actionProjectionDriftVerdictV1", "schema_sha256": "sha256:513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27"},
+    {"projection_kind": "state-audit", "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#state-audit-payload-v2", "schema_root": "document-workspace", "schema_path": "contracts/panel-sync-contracts.schema.json", "schema_pointer": "#/$defs/stateAuditPayloadV2", "schema_sha256": "sha256:513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27"},
+    {"projection_kind": "program-status", "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#program-status-payload-v2", "schema_root": "document-workspace", "schema_path": "contracts/panel-sync-contracts.schema.json", "schema_pointer": "#/$defs/programStatusPayloadV2", "schema_sha256": "sha256:513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27"},
+    {"projection_kind": "roadmap", "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#roadmap-payload-v2", "schema_root": "document-workspace", "schema_path": "contracts/panel-sync-contracts.schema.json", "schema_pointer": "#/$defs/roadmapPayloadV2", "schema_sha256": "sha256:513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27"},
+    {"projection_kind": "flow-graph", "schema_id": "urn:adp:flow-graph:v1", "schema_root": "project", "schema_path": "skills/adp-flow-graph/assets/adp-flow-graph-v1.schema.json", "schema_pointer": "", "schema_sha256": "sha256:aee7bc26ebfd6d2b475cdddc8f005f149ea1eea0506155e7790ab688f72a3a04"},
+    {"projection_kind": "meeting-pack", "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#meeting-pack-payload-v2", "schema_root": "document-workspace", "schema_path": "contracts/panel-sync-contracts.schema.json", "schema_pointer": "#/$defs/meetingPackPayloadV2", "schema_sha256": "sha256:513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27"},
+    {"projection_kind": "management-panel", "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#management-panel-payload-v2", "schema_root": "document-workspace", "schema_path": "contracts/panel-sync-contracts.schema.json", "schema_pointer": "#/$defs/managementPanelPayloadV2", "schema_sha256": "sha256:513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27"}
+  ],
+  "nested_payload_bindings": [
+    {"projection_kind": "program-status", "payload_pointer": "/progress", "schema_id": "urn:adp:schema:program-status-progress:3.0.0", "schema_root": "project", "schema_path": "skills/adp-program-status/assets/program-status-progress-v3.schema.json", "schema_pointer": "", "schema_sha256": "sha256:d8feaf0766e8e5881fc69c4a23d85cde08a73c465c01f73e413fe9602a04436a"},
+    {"projection_kind": "program-status", "payload_pointer": "/flow_state", "schema_id": "urn:adp:program-status:flow-state-v1", "schema_root": "project", "schema_path": "skills/adp-program-status/assets/program-status-flow-state-v1.schema.json", "schema_pointer": "", "schema_sha256": "sha256:46a146b12319fb71554d01076570530042d98d70ea79385e801acfdddf465a38"},
+    {"projection_kind": "management-panel", "payload_pointer": "/model_v1", "schema_id": "urn:adp:management-panel:model:v1", "schema_root": "project", "schema_path": "skills/adp-management-panel/assets/adp-management-panel-v1.schema.json", "schema_pointer": "", "schema_sha256": "sha256:b607f0c142e22c247726db002ce0a305f744d7c367b2c65e1ef8074dec9f72f1"},
+    {"projection_kind": "management-panel", "payload_pointer": "/model_v1/manifest", "schema_id": "urn:adp:management-panel:manifest:v1", "schema_root": "project", "schema_path": "skills/adp-management-panel/assets/adp-management-panel-manifest-v1.schema.json", "schema_pointer": "", "schema_sha256": "sha256:3a0e5a436d87316da23d76bf1a565d88723e18e511f7aeaa8f55b4ef878770f0"}
+  ],
+  "projection_input_profiles": [
+    {
+      "profile_id": "action-projection-drift-verdict/1.0.0",
+      "projection": "action-projection-drift-verdict",
+      "selection_keys": ["include_workstreams", "exclude_workstreams"],
+      "required_sources": [
+        {"category": "fact", "source_kind": "action-ledger", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "actions/action-ledger.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "action-ledger-state", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "state/action-ledger.json"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "selected-physical-wdr", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstreams-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "wdr-file-state", "cardinality": "one-per-selected", "enumerator": {"id": "selected-sidecars-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.state.json"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "wdr-action-sidecar", "cardinality": "one-per-selected", "enumerator": {"id": "selected-sidecars-v1", "root": "memory", "base": "workstreams", "filename": "action-projection.json"}, "affects": ["/"]}
+      ],
+      "direct_upstreams": [],
+      "allowed_affects": ["/"],
+      "output_kind": "action-projection-drift-verdict"
+    },
+    {
+      "profile_id": "state-audit/1.0.0",
+      "projection": "state-audit",
+      "selection_keys": ["include_workstreams", "exclude_workstreams", "as_of"],
+      "required_sources": [
+        {"category": "fact", "source_kind": "action-ledger", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "actions/action-ledger.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "program-baseline", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "plans/program-baseline.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "core-memory-file", "cardinality": "zero-or-one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "index.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "core-memory-file", "cardinality": "zero-or-one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "project-charter.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "cadence-record", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "cadence.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "selected-physical-wdr", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstreams-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.md"}, "affects": ["/"]},
+        {"category": "evidence", "source_kind": "workstream-evidence", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "evidence.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "workstream-decision", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "decisions.md"}, "affects": ["/"]},
+        {"category": "evidence", "source_kind": "workstream-readiness", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "readiness.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "wdr-file-state", "cardinality": "one-per-selected", "enumerator": {"id": "selected-sidecars-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.state.json"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "wdr-action-sidecar", "cardinality": "one-per-selected", "enumerator": {"id": "selected-sidecars-v1", "root": "memory", "base": "workstreams", "filename": "action-projection.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "status-taxonomy", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-project-kickoff/assets/adp-memory-templates/schemas/status-taxonomy.md"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "effective-config", "cardinality": "one-or-more", "enumerator": {"id": "glob-kind-v1", "root": "project", "base": "_bmad/bmm", "glob": "config*.yaml"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "daily-log", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "daily", "glob": "*.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "decision-log", "cardinality": "zero-or-one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "decisions/decision-log.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "business-decision-packet", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "decisions/business-decision-packets", "glob": "*.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "l0-reference", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "l0", "glob": "**/*"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "pending-intake", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "intake", "glob": "**/*.json"}, "affects": ["/"]},
+        {"category": "audit", "source_kind": "operation-receipt", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "receipts/status-sync", "glob": "*.json"}, "affects": ["/"]}
+      ],
+      "direct_upstreams": [{"kind": "action-projection-drift-verdict", "cardinality": "one", "affects": ["/"]}],
+      "allowed_affects": ["/"],
+      "output_kind": "state-audit"
+    },
+    {
+      "profile_id": "program-status/1.0.0",
+      "projection": "program-status",
+      "selection_keys": ["include_workstreams", "exclude_workstreams", "as_of", "previous_program_status_id"],
+      "required_sources": [
+        {"category": "fact", "source_kind": "program-baseline", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "plans/program-baseline.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "selected-physical-wdr", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstreams-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "wdr-file-state", "cardinality": "one-per-selected", "enumerator": {"id": "selected-sidecars-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.state.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "effective-config", "cardinality": "one-or-more", "enumerator": {"id": "glob-kind-v1", "root": "project", "base": "_bmad/bmm", "glob": "config*.yaml"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "locale-catalog", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-plan-baseline/assets/locale-catalog.json"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "status-signals", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "signals", "glob": "**/*.json"}, "affects": ["/"]},
+        {"category": "evidence", "source_kind": "delivery-evidence", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "evidence", "glob": "**/*"}, "affects": ["/"]},
+        {"category": "audit", "source_kind": "immutable-program-status", "cardinality": "zero-or-one", "enumerator": {"id": "selected-immutable-snapshot-v1", "root": "memory", "base": "snapshots/program-status", "selection_key": "previous_program_status_id"}, "affects": ["/"]}
+      ],
+      "direct_upstreams": [{"kind": "state-audit", "cardinality": "one", "affects": ["/"]}],
+      "allowed_affects": ["/"],
+      "output_kind": "program-status"
+    },
+    {
+      "profile_id": "roadmap/1.0.0",
+      "projection": "roadmap",
+      "selection_keys": ["include_workstreams", "exclude_workstreams", "as_of"],
+      "required_sources": [
+        {"category": "fact", "source_kind": "program-baseline", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "plans/program-baseline.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "baseline-history", "cardinality": "zero-or-one", "enumerator": {"id": "selected-baseline-history-v1", "root": "memory", "base": "plans/baseline-history"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "action-ledger", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "actions/action-ledger.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "selected-physical-wdr", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstreams-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "decision-log", "cardinality": "zero-or-one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "decisions/decision-log.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "business-decision-packet", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "decisions/business-decision-packets", "glob": "*.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "checkpoint-candidate", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "intake/bmm-checkpoints/candidates", "glob": "CHK-*.json"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "l0-reference", "cardinality": "zero-or-one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "l0/extracted-gates.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "l0-reference", "cardinality": "zero-or-one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "l0/extracted-decision-gates.md"}, "affects": ["/"]},
+        {"category": "evidence", "source_kind": "workstream-evidence", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "evidence.md"}, "affects": ["/"]},
+        {"category": "evidence", "source_kind": "workstream-readiness", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "readiness.md"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "locale-catalog", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-plan-baseline/assets/locale-catalog.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "effective-config", "cardinality": "one-or-more", "enumerator": {"id": "glob-kind-v1", "root": "project", "base": "_bmad/bmm", "glob": "config*.yaml"}, "affects": ["/"]}
+      ],
+      "direct_upstreams": [
+        {"kind": "program-status", "cardinality": "one", "affects": ["/"]},
+        {"kind": "state-audit", "cardinality": "one", "affects": ["/"]}
+      ],
+      "allowed_affects": ["/"],
+      "output_kind": "roadmap"
+    },
+    {
+      "profile_id": "flow-graph/1.0.0",
+      "projection": "flow-graph",
+      "selection_keys": ["include_workstreams", "exclude_workstreams", "as_of"],
+      "required_sources": [
+        {"category": "fact", "source_kind": "program-baseline", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "plans/program-baseline.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "action-flow-index", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "views/action-flow.json"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "risk-flow-index", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "views/risk-flow.json"}, "affects": ["/"]}
+      ],
+      "direct_upstreams": [
+        {"kind": "program-status", "cardinality": "one", "affects": ["/"]}
+      ],
+      "allowed_affects": ["/"],
+      "output_kind": "flow-graph"
+    },
+    {
+      "profile_id": "meeting-pack/1.0.0",
+      "projection": "meeting-pack",
+      "selection_keys": ["include_workstreams", "exclude_workstreams", "meeting_kinds", "as_of"],
+      "required_sources": [
+        {"category": "fact", "source_kind": "selected-physical-wdr", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstreams-v1", "root": "memory", "base": "workstreams", "filename": "delivery-record.md"}, "affects": ["/"]},
+        {"category": "evidence", "source_kind": "workstream-evidence", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "evidence.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "workstream-decision", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "decisions.md"}, "affects": ["/"]},
+        {"category": "evidence", "source_kind": "workstream-readiness", "cardinality": "one-per-selected", "enumerator": {"id": "selected-workstream-file-v1", "root": "memory", "base": "workstreams", "filename": "readiness.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "daily-log", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "daily", "glob": "*.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "meeting-archive", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "meetings", "glob": "*.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "meeting-cursor", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "meetings/cursors", "glob": "*.json"}, "affects": ["/"]},
+        {"category": "audit", "source_kind": "meeting-receipt", "cardinality": "zero-or-more", "enumerator": {"id": "selected-receipts-v1", "root": "memory", "base": "meetings/receipts", "glob": "*.json"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "action-ledger", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "actions/action-ledger.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "decision-log", "cardinality": "zero-or-one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "decisions/decision-log.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "business-decision-packet", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "decisions/business-decision-packets", "glob": "*.md"}, "affects": ["/"]},
+        {"category": "fact", "source_kind": "cadence-record", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "memory", "path": "cadence.md"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "locale-catalog", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-plan-baseline/assets/locale-catalog.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "effective-config", "cardinality": "one-or-more", "enumerator": {"id": "glob-kind-v1", "root": "project", "base": "_bmad/bmm", "glob": "config*.yaml"}, "affects": ["/"]}
+      ],
+      "direct_upstreams": [
+        {"kind": "state-audit", "cardinality": "one", "affects": ["/"]},
+        {"kind": "program-status", "cardinality": "one", "affects": ["/"]},
+        {"kind": "roadmap", "cardinality": "one", "affects": ["/"]},
+        {"kind": "flow-graph", "cardinality": "one", "affects": ["/"]}
+      ],
+      "allowed_affects": ["/"],
+      "output_kind": "meeting-pack"
+    },
+    {
+      "profile_id": "management-panel/1.0.0",
+      "projection": "management-panel",
+      "selection_keys": ["include_workstreams", "exclude_workstreams", "meeting_kinds", "as_of"],
+      "required_sources": [
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/markdown-resource-v1.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/panel-locale-catalog-v1.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/elk-resource-v1.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/panel-template.html"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/adp-management-panel-manifest-v1.schema.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/panel.js"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/adp-management-panel-v1.schema.json"}, "affects": ["/"]},
+        {"category": "config", "source_kind": "panel-renderer-asset", "cardinality": "one", "enumerator": {"id": "exact-path-v1", "root": "project", "path": "skills/adp-management-panel/assets/panel.css"}, "affects": ["/"]}
+      ],
+      "direct_upstreams": [
+        {"kind": "state-audit", "cardinality": "one", "affects": ["/sync/audit"]},
+        {"kind": "action-projection-drift-verdict", "cardinality": "one", "affects": ["/sync/action_projection"]},
+        {"kind": "program-status", "cardinality": "one", "affects": ["/sync/canonical/status"]},
+        {"kind": "roadmap", "cardinality": "one", "affects": ["/sync/canonical/roadmap"]},
+        {"kind": "flow-graph", "cardinality": "one", "affects": ["/sync/canonical/flow"]},
+        {"kind": "meeting-pack", "cardinality": "one-per-meeting-kind", "affects": ["/sync/canonical/meetings"]}
+      ],
+      "allowed_affects": ["/sync/audit", "/sync/action_projection", "/sync/canonical/status", "/sync/canonical/roadmap", "/sync/canonical/flow", "/sync/canonical/meetings"],
+      "output_kind": "management-panel"
+    }
+  ]
+}

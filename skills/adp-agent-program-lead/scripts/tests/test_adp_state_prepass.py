@@ -314,6 +314,82 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertEqual(result["action_cross_check"][0]["ledger_action_ids_without_wdr_reference"], ["ACT-20260702-001"])
             self.assertNotIn("Closed historical task", json.dumps(result, ensure_ascii=False))
 
+    def test_fde_action_list_keeps_same_text_wdr_action_without_stable_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            record = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+            record.write_text(
+                RECORD.replace(
+                    "FDE-A confirm payment owner by 2026-07-05",
+                    "Add checkout validation evidence",
+                ),
+                encoding="utf-8",
+            )
+            ledger = memory_root / "actions" / "action-ledger.md"
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text(
+                "# Action Ledger\n\n"
+                "| Action ID | Status | Owner | Workstream | Action | Source | Reason | Due / Trigger | Closure Criteria | Last Updated | Owning Workflow |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| ACT-20260702-001 | open | FDE-A | l1-checkout | Add checkout validation evidence | meetings/2026-07-02-sync.md#M-001 | Meeting action | 2026-07-05 | Evidence linked | 2026-07-02T09:00:00+08:00 | adp-status-sync |\n",
+                encoding="utf-8",
+            )
+
+            completed = self.run_script(
+                project_root,
+                "--capability",
+                "fde-action-list",
+                "--as-of",
+                "2026-07-02",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(result["counts"]["actions"], 2)
+            self.assertEqual(result["actions"][0]["action_id"], "ACT-20260702-001")
+            self.assertEqual(result["actions"][1]["action_id"], "")
+            self.assertEqual(result["actions"][1]["source_type"], "wdr-next-actions")
+
+    def test_fde_action_list_suppresses_multi_marker_wdr_aggregate_when_ledger_covers_all_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+            record.write_text(
+                RECORD.replace(
+                    "FDE-A confirm payment owner by 2026-07-05",
+                    "[action_id:ACT-20260702-001] Publish evidence; "
+                    "[action_id:ACT-20260702-002] Confirm owner",
+                ),
+                encoding="utf-8",
+            )
+            ledger = memory_root / "actions/action-ledger.md"
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text(
+                "# Action Ledger\n\n"
+                "| Action ID | Status | Owner | Workstream | Action | Source | Reason | Due / Trigger | Closure Criteria | Last Updated | Owning Workflow |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| ACT-20260702-001 | open | FDE-A | l1-checkout | Publish evidence | meeting#1 | Meeting action | Friday | Evidence linked | 2026-07-02T09:00:00+08:00 | adp-status-sync |\n"
+                "| ACT-20260702-002 | blocked | FDE-B | l1-checkout | Confirm owner | meeting#2 | Meeting action | Monday | Owner confirmed | 2026-07-02T09:00:00+08:00 | adp-status-sync |\n",
+                encoding="utf-8",
+            )
+
+            completed = self.run_script(
+                project_root,
+                "--capability",
+                "fde-action-list",
+                "--as-of",
+                "2026-07-02",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(result["counts"]["actions"], 2)
+            self.assertEqual(
+                [row["action_id"] for row in result["actions"]],
+                ["ACT-20260702-001", "ACT-20260702-002"],
+            )
+            self.assertNotIn("", [row["action_id"] for row in result["actions"]])
+
     def test_program_action_uses_affected_workstreams_for_cross_check(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)

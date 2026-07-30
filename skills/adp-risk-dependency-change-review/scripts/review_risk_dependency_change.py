@@ -50,6 +50,7 @@ RISK_SOURCE_FIELDS = {
     "Project Status.risk": ("Risks", "risk"),
     "Project Status.change": ("Scope or change notes", "change"),
 }
+RISK_CANONICAL_SOURCE_SECTIONS = {"## project status"}
 DECISION_SOURCE_FIELDS = {"Decision / Question", "Project Status.decision/change"}
 
 
@@ -798,7 +799,10 @@ def update_project_status_relation(
     field_label, entry_type = RISK_SOURCE_FIELDS[update["source_field"]]
     workstream = parse_workstream(record_path)
     lines = record_path.read_text(encoding="utf-8").splitlines()
-    start = next((index for index, line in enumerate(lines) if line.strip().lower() == "## project status"), None)
+    start = next(
+        (index for index, line in enumerate(lines) if line.strip().lower() in RISK_CANONICAL_SOURCE_SECTIONS),
+        None,
+    )
     if start is None:
         raise ValueError(f"risk {update['risk_id']} source has no Project Status section")
     end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")), len(lines))

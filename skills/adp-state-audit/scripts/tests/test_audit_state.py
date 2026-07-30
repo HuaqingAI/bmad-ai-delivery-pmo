@@ -572,9 +572,9 @@ class AdpStateAuditTests(unittest.TestCase):
             result = json.loads(completed.stdout)
             audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
 
-            self.assertEqual(result["audit_status"], "pass")
-            self.assertEqual(result["execution_disposition"], "ready")
-            self.assertTrue(audit["safe_to_generate_green_report"])
+            self.assertEqual(result["audit_status"], "warning")
+            self.assertEqual(result["execution_disposition"], "degraded")
+            self.assertFalse(audit["safe_to_generate_green_report"])
             self.assertNotIn("actual.missing", {item.get("code") for item in audit["warnings"]})
 
     def test_mapped_actual_must_match_current_baseline_revision(self) -> None:
@@ -1158,7 +1158,8 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertTrue(audit["findings"]["freshness"]["views_requiring_refresh"])
             self.assertTrue(audit["findings"]["closure"]["unconsumed_intake_files"])
             self.assertTrue(audit["findings"]["closure"]["open_business_packets"])
-            self.assertTrue(audit["findings"]["merge_quality"]["duplicate_candidates"])
+            self.assertEqual(audit["findings"]["merge_quality"]["duplicate_candidates"], [])
+            self.assertTrue(audit["merge_review_evidence"]["action_field_collisions"])
             self.assertEqual(audit["findings"]["merge_quality"]["conflict_candidates"], [])
             self.assertTrue(audit["merge_review_evidence"]["readiness_gap_pairs"])
             self.assertTrue(audit["findings"]["consistency"]["source_disagreements"])
@@ -1966,7 +1967,7 @@ class AdpStateAuditTests(unittest.TestCase):
 
             self.assertEqual(audit["counts"]["active_ledger_actions"], 1)
 
-    def test_duplicate_finding_ids_are_unique_across_groups(self) -> None:
+    def test_exact_action_field_collisions_are_non_gating_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             memory_root = self.scaffold(project_root)
@@ -1980,11 +1981,18 @@ class AdpStateAuditTests(unittest.TestCase):
             completed = self.run_script(project_root, "--as-of", "2026-07-10")
             result = json.loads(completed.stdout)
             audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
-            ids = [item["id"] for item in audit["duplicate_candidates"]]
+            collisions = audit["merge_review_evidence"]["action_field_collisions"]
+            matching = next(
+                item
+                for item in collisions
+                if {"ACT-20260702-004", "ACT-20260702-005"}.issubset(item["action_ids"])
+            )
 
-            self.assertGreaterEqual(len(ids), 2)
-            self.assertEqual(len(ids), len(set(ids)))
-            self.assertTrue(all(item["source_type"] == "structural" for item in audit["duplicate_candidates"]))
+            self.assertEqual(matching["evidence_type"], "exact-action-field-collision")
+            self.assertEqual(audit["duplicate_candidates"], [])
+            self.assertFalse(
+                any(item.get("kind") == "duplicate" for item in audit["warning_findings"])
+            )
 
     def test_shared_references_and_ready_gaps_are_non_gating_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

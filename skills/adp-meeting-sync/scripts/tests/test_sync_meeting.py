@@ -254,6 +254,18 @@ with module.meeting_sync_lock(Path(sys.argv[2])):
             self.assertEqual(intake["updates"][0]["actions"][0]["owner"], "FDE-A")
             archive_rel = Path(result["touched"]["meeting_archives"][0]).resolve().relative_to(memory_root.resolve()).as_posix()
             self.assertEqual(intake["updates"][0]["actions"][0]["source"], f"{archive_rel}#M-001")
+            self.assertEqual(
+                result["next_command_args"],
+                [
+                    "adp-status-sync",
+                    "update",
+                    str(project_root.resolve()),
+                    "--memory-root",
+                    str(memory_root.resolve()),
+                    "--updates-file",
+                    result["touched"]["status_sync_intake_files"][0],
+                ],
+            )
             self.assertIn("--updates-file", result["next_actions"][0])
             decision_log = (memory_root / "decisions" / "decision-log.md").read_text(encoding="utf-8")
             self.assertIn("Choose checkout fallback copy", decision_log)
@@ -593,13 +605,17 @@ with module.meeting_sync_lock(Path(sys.argv[2])):
             self.assertEqual(audit["ledger_ready_actions"], 1)
             self.assertEqual(audit["fanout_suppressed"], 1)
             intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
-            self.assertEqual(len(intake["updates"]), 1)
-            self.assertEqual(intake["updates"][0]["id"], "program")
-            self.assertEqual(intake["updates"][0]["next_actions"], [])
-            action = intake["updates"][0]["actions"][0]
+            self.assertEqual([update["id"] for update in intake["updates"]], ["program", "l1-checkout", "l2-search"])
+            program_update = intake["updates"][0]
+            self.assertEqual(program_update["next_actions"], [])
+            self.assertFalse(program_update["refresh_actions"])
+            action = program_update["actions"][0]
             self.assertEqual(action["workstream"], "program")
             self.assertEqual(action["affected_workstreams"], ["l1-checkout", "l2-search"])
             self.assertIn("Affected workstreams: l1-checkout, l2-search", action["reason"])
+            for projection_update in intake["updates"][1:]:
+                self.assertTrue(projection_update["refresh_actions"])
+                self.assertEqual(projection_update["actions"], [])
 
     def test_action_quality_uses_explicit_gaps_not_phrase_matching(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -643,8 +659,21 @@ with module.meeting_sync_lock(Path(sys.argv[2])):
             intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
             actions = {action["action"]: action for update in intake["updates"] for action in update["actions"]}
             self.assertEqual(actions["Publish the signed acceptance record."]["status"], "open")
-            self.assertEqual(actions["Close the rollout evidence gap."]["status"], "blocked")
+            self.assertEqual(actions["Close the rollout evidence gap."]["status"], "open")
             self.assertEqual(actions["Close the rollout evidence gap."]["closure_criteria"], "TBD")
+            self.assertEqual(audit["status_review_required_count"], 1)
+            self.assertTrue(audit["action_quality_signals"][0]["source"].endswith("#M-002"))
+            self.assertEqual(
+                {key: value for key, value in audit["action_quality_signals"][0].items() if key != "source"},
+                {
+                    "id": "M-002",
+                    "supplied_status": "open",
+                    "closure_missing": True,
+                    "due_date": "2099-07-16",
+                    "overdue": False,
+                    "status_confirmation_missing": False,
+                },
+            )
 
     def test_invalid_plan_fails_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -688,6 +717,56 @@ with module.meeting_sync_lock(Path(sys.argv[2])):
             errors = "\n".join(result["validation_errors"])
             self.assertIn("no_op requires no_op_reason", errors)
             self.assertIn("meeting.lineage is missing", errors)
+
+    def test_unknown_action_status_fails_closed_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-30",
+                    "type": "FDE internal sync",
+                    "title": "Invalid action status",
+                    "source": "notes.md",
+                },
+                "items": [
+                    {
+                        "id": "M-001",
+                        "classification": "action",
+                        "text": "Publish checkout evidence.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "owner": "FDE-A",
+                        "due": "2026-08-01",
+                        "status": "almost-done",
+                    }
+                ],
+            }
+            plan_path = project_root / "invalid-status-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--plan",
+                    str(plan_path),
+                    "--meeting-note-template",
+                    str(DEFAULT_MEETING_TEMPLATE),
+                    "--business-decision-packet-template",
+                    str(DEFAULT_PACKET_TEMPLATE),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("action status must be one of", result["error"])
+            self.assertEqual(list((memory_root / "meetings").iterdir()), [])
+            self.assertEqual(list((memory_root / "daily").iterdir()), [])
 
     def test_impossible_calendar_meeting_date_fails_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1221,6 +1300,321 @@ with module.meeting_sync_lock(Path(sys.argv[2])):
         self.assertIn("## Summary", english_text)
         self.assertIn("Payment API remains candidate.", english_text)
         self.assertIn("ps-meeting-pack-fixture", english_text)
+
+
+    def test_existing_action_patch_carries_only_explicit_mutation_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-30",
+                    "type": "FDE internal sync",
+                    "title": "Action ownership correction",
+                    "source": "notes.md",
+                    "participants": ["FDE-B"],
+                    "summary": "Correct the owner without rewriting the action.",
+                },
+                "items": [
+                    {
+                        "id": "M-PATCH-001",
+                        "classification": "action",
+                        "text": "The existing action owner changed to FDE-B.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "action_id": "ACT-EXISTING-001",
+                        "action_operation": "patch",
+                        "expected_action_revision": 4,
+                        "owner": "FDE-B",
+                    }
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+            intake = json.loads(Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8"))
+            action = intake["action_commands"][0]
+            self.assertEqual(action["operation"], "patch")
+            self.assertEqual(action["action_id"], "ACT-EXISTING-001")
+            self.assertEqual(action["expected_action_revision"], 4)
+            self.assertEqual(action["owner"], "FDE-B")
+            for omitted in ("status", "action", "due_or_trigger", "workstream", "affected_workstreams"):
+                self.assertNotIn(omitted, action)
+            self.assertEqual(intake["updates"][0]["actions"][0], action)
+
+    def test_owner_only_patch_routes_from_existing_ledger_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            ledger = memory_root / "actions/action-ledger.md"
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            headers = [
+                "Action ID", "Status", "Owner", "Workstream", "Affected Workstreams",
+                "Action", "Source", "Reason", "Due / Trigger", "Closure Criteria",
+                "Closure Criteria Verifiable", "Created At", "Started At", "Done At",
+                "Cancelled At", "Baseline Revision", "Related Plan Items", "Related Flow Edges",
+                "Last Updated", "Owning Workflow", "Action Revision",
+            ]
+            values = [
+                "ACT-EXISTING-001", "open", "FDE-A", "l1-checkout", "l1-checkout",
+                "Validate checkout", "meeting", "approved", "Friday", "Evidence attached",
+                "yes", "2026-07-29T01:00:00Z", "", "", "", "1", "", "",
+                "2026-07-29T01:00:00Z", "adp-status-sync", "4",
+            ]
+            ledger.write_text(
+                "# Action Ledger\n\n"
+                + "| " + " | ".join(headers) + " |\n"
+                + "| " + " | ".join(["---"] * len(headers)) + " |\n"
+                + "| " + " | ".join(values) + " |\n",
+                encoding="utf-8",
+            )
+            plan = {
+                "meeting": {
+                    "date": "2026-07-30",
+                    "type": "FDE internal sync",
+                    "title": "Owner-only correction",
+                    "source": "notes.md",
+                    "participants": ["FDE-B"],
+                    "summary": "Correct owner by stable action identity.",
+                },
+                "items": [
+                    {
+                        "id": "M-PATCH-OWNER",
+                        "classification": "action",
+                        "text": "The existing action owner changed to FDE-B.",
+                        "action_id": "ACT-EXISTING-001",
+                        "action_operation": "patch",
+                        "expected_action_revision": 4,
+                        "owner": "FDE-B",
+                    }
+                ],
+            }
+
+            result = self.run_script(project_root, plan)
+            intake = json.loads(
+                Path(result["touched"]["status_sync_intake_files"][0]).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual([update["id"] for update in intake["updates"]], ["l1-checkout"])
+            action = intake["updates"][0]["actions"][0]
+            self.assertEqual(action["action_id"], "ACT-EXISTING-001")
+            self.assertEqual(action["owner"], "FDE-B")
+            self.assertNotIn("affected_workstreams", action)
+
+    def test_current_field_intent_persists_and_converges_through_status_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+            record.write_text(
+                """# Workstream Delivery Record
+
+## Identity
+
+- Workstream ID: l1-checkout
+- Name: Checkout
+- FDE owner: FDE-A
+- Business owner: Biz-A
+- Current BMM phase: PRD
+- Current ADP status: draft
+
+## Project Status
+
+- Progress: TBD
+- Blockers: TBD
+- Risks: TBD
+- Dependencies: TBD
+- Scope or change notes: TBD
+- Next actions: fill missing state
+""",
+                encoding="utf-8",
+            )
+            plan = {
+                "meeting": {
+                    "date": "2026-07-30",
+                    "type": "FDE internal sync",
+                    "title": "Checkout current state",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "Record current delivery state.",
+                },
+                "items": [
+                    {
+                        "id": "M-STATUS-001",
+                        "classification": "wdr_update",
+                        "text": "Checkout validation is progressing with one blocker.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "current_field_update": {
+                            "status": "in-progress",
+                            "progress": "Validation suite is 80% complete",
+                            "blockers": ["Business copy approval pending"],
+                            "risks": [],
+                            "refresh_actions": True,
+                        },
+                    }
+                ],
+            }
+
+            meeting_result = self.run_script(project_root, plan)
+            intake_path = Path(meeting_result["touched"]["status_sync_intake_files"][0])
+            intake = json.loads(intake_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(intake["status_intents"]), 1)
+            intent_id = intake["status_intents"][0]["intent_id"]
+            outbox_path = memory_root / "state/status-intent-outbox.json"
+            outbox = json.loads(outbox_path.read_text(encoding="utf-8"))
+            self.assertEqual(outbox["pending"], [intent_id])
+            self.assertTrue(meeting_result["refresh_required"])
+            self.assertIn("adp-status-sync", meeting_result["next_actions"][0])
+
+            status_script = SCRIPT.parents[2] / "adp-status-sync/scripts/sync_status.py"
+            completed = subprocess.run(
+                [sys.executable, str(status_script), "update", str(project_root), "--updates-file", str(intake_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            status_result = json.loads(completed.stdout)
+            self.assertEqual(status_result["intent_convergence"]["status"], "converged")
+            self.assertEqual(status_result["intent_convergence"]["consumed_intent_ids"], [intent_id])
+            converged = json.loads(outbox_path.read_text(encoding="utf-8"))
+            self.assertEqual(converged["pending"], [])
+            self.assertEqual(converged["consumed"], [intent_id])
+            updated = record.read_text(encoding="utf-8")
+            self.assertIn("- Current ADP status: in-progress", updated)
+            self.assertIn("- Progress: Validation suite is 80% complete", updated)
+            self.assertIn("- Blockers: Business copy approval pending", updated)
+            self.assertIn("- Risks: ", updated)
+            self.assertEqual(
+                status_result["next_command_args"],
+                [
+                    "adp-panel-refresh",
+                    "plan",
+                    str(project_root.resolve()),
+                    "--memory-root",
+                    str(memory_root.resolve()),
+                ],
+            )
+
+    def test_rejects_unsupported_action_operation(self) -> None:
+        module = load_sync_meeting_module()
+        normalized = module.normalize_plan(
+            {
+                "meeting": {
+                    "date": "2026-07-30",
+                    "type": "FDE internal sync",
+                    "title": "Unsupported action command",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "Validate action operation.",
+                },
+                "items": [
+                    {
+                        "id": "M-OP-001",
+                        "classification": "action",
+                        "operation": "delete",
+                        "text": "Delete an action",
+                        "owner": "FDE-A",
+                        "due": "2026-08-01",
+                        "closure_criteria": "Action is removed",
+                        "affected_workstreams": ["l1-checkout"],
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("item M-OP-001: unsupported action operation 'delete'", module.validate_plan(normalized))
+
+    def test_conflicting_status_intents_fail_before_business_fact_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.make_memory(project_root)
+            plan = {
+                "meeting": {
+                    "date": "2026-07-30",
+                    "type": "FDE internal sync",
+                    "title": "Conflicting status intents",
+                    "source": "notes.md",
+                    "participants": ["FDE-A"],
+                    "summary": "Two incompatible status claims.",
+                },
+                "items": [
+                    {
+                        "id": "M-CONFLICT-001",
+                        "classification": "wdr_update",
+                        "text": "Checkout is active.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "current_field_update": {"status": "in-progress"},
+                    },
+                    {
+                        "id": "M-CONFLICT-002",
+                        "classification": "wdr_update",
+                        "text": "Checkout is blocked.",
+                        "affected_workstreams": ["l1-checkout"],
+                        "current_field_update": {"status": "blocked"},
+                    },
+                ],
+            }
+            plan_path = project_root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(project_root),
+                    "--plan",
+                    str(plan_path),
+                    "--meeting-note-template",
+                    str(DEFAULT_MEETING_TEMPLATE),
+                    "--business-decision-packet-template",
+                    str(DEFAULT_PACKET_TEMPLATE),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("meeting status intents conflict", json.loads(completed.stdout)["error"])
+            self.assertEqual(list((memory_root / "meetings").glob("*.md")), [])
+            self.assertFalse((memory_root / "daily/2026-07-30.md").exists())
+            self.assertNotIn(
+                "Meeting Sync Update",
+                (memory_root / "workstreams/l1-checkout/delivery-record.md").read_text(encoding="utf-8"),
+            )
+
+    def test_overdue_audit_uses_meeting_date(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.make_memory(project_root)
+            result = self.run_script(
+                project_root,
+                {
+                    "meeting": {
+                        "date": "2099-01-02",
+                        "type": "FDE internal sync",
+                        "title": "Future replay fixture",
+                        "source": "notes.md",
+                        "participants": ["FDE-A"],
+                        "summary": "Use source date for overdue checks.",
+                    },
+                    "items": [
+                        {
+                            "id": "M-DATE-001",
+                            "classification": "action",
+                            "text": "Publish evidence",
+                            "owner": "FDE-A",
+                            "due": "2099-01-01",
+                            "status": "open",
+                            "closure_criteria": "Evidence is published",
+                            "affected_workstreams": ["l1-checkout"],
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(result["action_quality_audit"]["past_due_open_count"], 1)
+            self.assertTrue(result["action_quality_audit"]["action_quality_signals"][0]["overdue"])
 
 
 if __name__ == "__main__":

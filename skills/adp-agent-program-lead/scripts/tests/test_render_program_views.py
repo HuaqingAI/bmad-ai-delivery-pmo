@@ -111,8 +111,11 @@ class RenderProgramViewsCompatibilityTests(unittest.TestCase):
         release_notes = RELEASE_NOTES.read_text(encoding="utf-8")
 
         self.assertIn("lock-inspect|lock-recover", module_help)
-        self.assertIn("lineage-validates canonical management Markdown", module_help)
-        self.assertIn("ADP-PL-LEGACY-RENDERER-MIGRATION-REQUIRED", module_help)
+        self.assertIn("--intent panel-readiness", module_help)
+        self.assertIn("--intent panel-refresh", module_help)
+        self.assertIn("--intent panel-open", module_help)
+        self.assertIn("--intent panel-archive", module_help)
+        self.assertIn("--distribution-profile internal-full|shareable-summary", module_help)
         self.assertIn("stale baseline lock", release_notes)
         self.assertIn("management Markdown lineage", release_notes)
         self.assertIn("ADP-PL-LEGACY-RENDERER-MIGRATION-REQUIRED", release_notes)

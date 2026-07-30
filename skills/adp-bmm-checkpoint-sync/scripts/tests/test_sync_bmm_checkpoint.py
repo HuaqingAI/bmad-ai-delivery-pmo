@@ -14,7 +14,7 @@ REGISTER = Path(__file__).resolve().parents[3] / "adp-workstream-register" / "sc
 
 sys.path.insert(0, str(SCRIPT.parent))
 
-from sync_bmm_checkpoint import candidate_to_sync_args
+from sync_bmm_checkpoint import candidate_to_sync_args, status_sync_intake_payload
 
 
 class SyncBmmCheckpointTests(unittest.TestCase):
@@ -560,6 +560,11 @@ class SyncBmmCheckpointTests(unittest.TestCase):
                 "FDE-A|Link checkout smoke test evidence|before acceptance readiness review|Evidence row links the smoke test report",
             )
             intake = result["status_sync_intake_files"][0]
+            intake_action = json.loads(Path(intake).read_text(encoding="utf-8"))["updates"][0]["actions"][0]
+            self.assertEqual(intake_action["operation"], "create")
+            self.assertRegex(intake_action["action_id"], r"^ACT-BMM-[0-9a-f]{24}$")
+            self.assertRegex(intake_action["command_id"], r"^cmd-bmm-[0-9a-f]{24}$")
+            self.assertEqual(intake_action["evidence"], [{"source": intake_action["source"]}])
 
             first = subprocess.run(
                 [sys.executable, str(STATUS_SYNC), "update", str(project_root), "--updates-file", intake],
@@ -576,13 +581,76 @@ class SyncBmmCheckpointTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertTrue(json.loads(first.stdout)["ok"])
-            self.assertTrue(json.loads(second.stdout)["ok"])
+            first_result = json.loads(first.stdout)
+            second_result = json.loads(second.stdout)
+            self.assertTrue(first_result["ok"])
+            self.assertTrue(second_result["ok"])
+            self.assertEqual(first_result["actions_registered"], [intake_action["action_id"]])
+            self.assertEqual(second_result["actions_registered"], [])
             ledger = project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md"
             ledger_text = ledger.read_text(encoding="utf-8")
             self.assertEqual(ledger_text.count("Link checkout smoke test evidence"), 1)
             record_text = (Path(setup["workstream_root"]) / "delivery-record.md").read_text(encoding="utf-8")
             self.assertIn("Link checkout smoke test evidence", record_text)
+
+    def test_status_sync_intake_preserves_explicit_ids_and_rejects_changed_replay(self) -> None:
+        action = {
+            "owner": "FDE-A",
+            "workstream": "l1-checkout",
+            "action": "Link checkpoint evidence",
+            "source": "candidate.json#claims.actions",
+            "reason": "Checkpoint action",
+            "due_or_trigger": "before acceptance review",
+            "status": "open",
+            "closure_criteria": "Evidence is linked",
+            "owning_workflow": "adp-bmm-checkpoint-sync",
+            "action_id": "ACT-EXPLICIT-BMM-001",
+            "command_id": "cmd-explicit-bmm-001",
+        }
+        explicit = status_sync_intake_payload([action], "l1-checkout", "candidate-stable-key")
+        explicit_action = explicit["updates"][0]["actions"][0]
+        self.assertEqual(explicit_action["action_id"], "ACT-EXPLICIT-BMM-001")
+        self.assertEqual(explicit_action["command_id"], "cmd-explicit-bmm-001")
+        self.assertEqual(explicit_action["operation"], "create")
+        self.assertEqual(explicit_action["evidence"], [{"source": "candidate.json#claims.actions"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.register_workstream(project_root)
+            generated = status_sync_intake_payload(
+                [{key: value for key, value in action.items() if key not in {"action_id", "command_id"}}],
+                "l1-checkout",
+                "candidate-stable-key",
+            )
+            changed = json.loads(json.dumps(generated))
+            changed["updates"][0]["actions"][0]["action"] = "Link changed checkpoint evidence"
+            first_path = project_root / "first-intake.json"
+            changed_path = project_root / "changed-intake.json"
+            first_path.write_text(json.dumps(generated), encoding="utf-8")
+            changed_path.write_text(json.dumps(changed), encoding="utf-8")
+
+            first = subprocess.run(
+                [sys.executable, str(STATUS_SYNC), "update", str(project_root), "--updates-file", str(first_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            conflict = subprocess.run(
+                [sys.executable, str(STATUS_SYNC), "update", str(project_root), "--updates-file", str(changed_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+            self.assertTrue(json.loads(first.stdout)["ok"])
+            self.assertNotEqual(conflict.returncode, 0)
+            self.assertIn("already applied with different bytes", conflict.stdout)
+            ledger = project_root / "_bmad-output" / "adp" / "memory" / "actions" / "action-ledger.md"
+            ledger_text = ledger.read_text(encoding="utf-8")
+            self.assertIn("Link checkpoint evidence", ledger_text)
+            self.assertNotIn("Link changed checkpoint evidence", ledger_text)
 
     def test_dry_run_reports_planned_intake_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

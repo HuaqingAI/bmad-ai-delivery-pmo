@@ -1406,6 +1406,593 @@ def run_prepass(args: argparse.Namespace, project_root: Path, as_of: date) -> di
     return payload
 
 
+def audit_action_projection_drift(memory_root: Path, prepass: dict[str, Any]) -> dict[str, Any]:
+    ledger_path = memory_root / "actions/action-ledger.md"
+    ledger_state_path = memory_root / "actions/action-ledger.state.json"
+    ledger_fingerprint = sha256_file_id(ledger_path)
+    ledger_state = load_optional_json(ledger_state_path)
+    ledger_revision = ledger_state.get("ledger_revision") if isinstance(ledger_state.get("ledger_revision"), int) else 0
+    revision_by_action = parse_action_revisions(ledger_path)
+    active_actions = [
+        item
+        for item in prepass.get("ledger_actions", [])
+        if isinstance(item, dict) and str(item.get("status", "")).lower() in ACTIVE_ACTION_STATUSES
+    ]
+    registered = prepass.get("registered_workstreams")
+    virtual_scopes = prepass.get("virtual_scopes")
+    if isinstance(registered, list) and registered:
+        workstream_ids = sorted({str(item) for item in registered if str(item)})
+    elif isinstance(virtual_scopes, list) and virtual_scopes:
+        workstream_ids = []
+    else:
+        workstream_ids = sorted(
+            path.parent.name
+            for path in (memory_root / "workstreams").glob("*/delivery-record.md")
+            if path.is_file() and not path.parent.name.startswith(".")
+        )
+    findings: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+
+    active_by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for action in active_actions:
+        action_id = str(action.get("action_id") or "")
+        if action_id:
+            active_by_id[action_id].append(action)
+    for action_id, duplicates in sorted(active_by_id.items()):
+        if len(duplicates) < 2:
+            continue
+        target_ids = sorted(
+            {
+                workstream_id
+                for action in duplicates
+                for workstream_id in workstream_ids
+                if action_targets_workstream(action, workstream_id)
+            }
+        ) or ([workstream_ids[0]] if workstream_ids else ["program"])
+        for workstream_id in target_ids:
+            findings.append(
+                drift_finding(
+                    kind="duplicate-active-ledger-action-id",
+                    repairability="non-repairable",
+                    severity="blocked",
+                    workstream_id=workstream_id,
+                    action_id=action_id,
+                    action_diff={
+                        "action_id": action_id,
+                        "drift_kind": "duplicate-active-ledger-action-id",
+                        "ledger_present": True,
+                        "wdr_present": False,
+                        "ledger_revision": revision_by_action.get(action_id),
+                        "wdr_rendered_sha256": None,
+                    },
+                    source_path="actions/action-ledger.md",
+                )
+            )
+
+    if ledger_path.is_file() and (
+        not ledger_state
+        or ledger_state.get("ledger_fingerprint") != ledger_fingerprint
+    ):
+        for workstream_id in workstream_ids:
+            findings.append(
+                drift_finding(
+                    kind="ledger-fingerprint-mismatch",
+                    repairability="non-repairable",
+                    severity="warning",
+                    workstream_id=workstream_id,
+                    action_id=None,
+                    action_diff=None,
+                    source_path="actions/action-ledger.state.json",
+                )
+            )
+
+    for workstream_id in workstream_ids:
+        wdr_path = memory_root / "workstreams" / workstream_id / "delivery-record.md"
+        wdr_state_path = wdr_path.with_name("delivery-record.state.json")
+        sidecar_path = wdr_path.with_name("action-projection.json")
+        wdr_state = load_optional_json(wdr_state_path)
+        sidecar = load_optional_json(sidecar_path)
+        expected = {
+            str(action.get("action_id")): expected_projection_record(action, revision_by_action)
+            for action in active_actions
+            if action.get("action_id") and action_targets_workstream(action, workstream_id)
+        }
+        expected = {key: value for key, value in expected.items() if value is not None}
+        actual_rows = sidecar.get("actions", []) if isinstance(sidecar.get("actions"), list) else []
+        actual_ids = [
+            str(item.get("action_id"))
+            for item in actual_rows
+            if isinstance(item, dict) and item.get("action_id")
+        ]
+        actual = {
+            str(item.get("action_id")): item
+            for item in actual_rows
+            if isinstance(item, dict) and item.get("action_id")
+        }
+        row_findings: list[dict[str, Any]] = []
+
+        for action_id in sorted({item for item in actual_ids if actual_ids.count(item) > 1}):
+            row_findings.append(
+                drift_finding(
+                    kind="duplicate-action-id-in-sidecar",
+                    repairability="non-repairable",
+                    severity="blocked",
+                    workstream_id=workstream_id,
+                    action_id=action_id,
+                    action_diff=None,
+                    source_path=f"workstreams/{workstream_id}/action-projection.json",
+                )
+            )
+
+        if not sidecar and (expected or ledger_state):
+            row_findings.append(
+                drift_finding(
+                    kind="sidecar-missing",
+                    repairability="non-repairable",
+                    severity="blocked",
+                    workstream_id=workstream_id,
+                    action_id=None,
+                    action_diff=None,
+                    source_path=f"workstreams/{workstream_id}/action-projection.json",
+                )
+            )
+            for action_id in sorted(expected):
+                row_findings.append(
+                    action_drift_finding(
+                        workstream_id,
+                        action_id,
+                        "missing-from-wdr",
+                        ledger_present=True,
+                        wdr_present=False,
+                        ledger_revision=revision_by_action.get(action_id),
+                        source_path=f"workstreams/{workstream_id}/action-projection.json",
+                    )
+                )
+        else:
+            if sidecar.get("ledger_fingerprint") != ledger_fingerprint:
+                row_findings.append(
+                    drift_finding(
+                        kind="ledger-fingerprint-mismatch",
+                        repairability="non-repairable",
+                        severity="warning",
+                        workstream_id=workstream_id,
+                        action_id=None,
+                        action_diff=None,
+                        source_path=f"workstreams/{workstream_id}/action-projection.json",
+                    )
+                )
+            if ledger_revision and sidecar.get("ledger_revision") != ledger_revision:
+                row_findings.append(
+                    drift_finding(
+                        kind="ledger-revision-mismatch",
+                        repairability="non-repairable",
+                        severity="warning",
+                        workstream_id=workstream_id,
+                        action_id=None,
+                        action_diff=None,
+                        source_path=f"workstreams/{workstream_id}/action-projection.json",
+                    )
+                )
+            if not wdr_state or wdr_state.get("wdr_fingerprint") != sha256_file_id(wdr_path):
+                row_findings.append(
+                    drift_finding(
+                        kind="wdr-lineage-mismatch",
+                        repairability="non-repairable",
+                        severity="warning",
+                        workstream_id=workstream_id,
+                        action_id=None,
+                        action_diff=None,
+                        source_path=f"workstreams/{workstream_id}/delivery-record.state.json",
+                    )
+                )
+            elif (
+                sidecar.get("wdr_revision") != wdr_state.get("wdr_revision")
+                or sidecar.get("file_generation") != wdr_state.get("file_generation")
+            ):
+                row_findings.append(
+                    drift_finding(
+                        kind="wdr-lineage-mismatch",
+                        repairability="non-repairable",
+                        severity="warning",
+                        workstream_id=workstream_id,
+                        action_id=None,
+                        action_diff=None,
+                        source_path=f"workstreams/{workstream_id}/action-projection.json",
+                    )
+                )
+            for action_id in sorted(set(expected) - set(actual)):
+                row_findings.append(
+                    action_drift_finding(
+                        workstream_id,
+                        action_id,
+                        "missing-from-wdr",
+                        ledger_present=True,
+                        wdr_present=False,
+                        ledger_revision=revision_by_action.get(action_id),
+                        source_path=f"workstreams/{workstream_id}/action-projection.json",
+                    )
+                )
+            for action_id in sorted(set(actual) - set(expected)):
+                row_findings.append(
+                    action_drift_finding(
+                        workstream_id,
+                        action_id,
+                        "orphan-in-wdr",
+                        ledger_present=False,
+                        wdr_present=True,
+                        ledger_revision=None,
+                        source_path=f"workstreams/{workstream_id}/action-projection.json",
+                        rendered_hash=content_hash(actual[action_id]),
+                    )
+                )
+            for action_id in sorted(set(expected) & set(actual)):
+                if actual[action_id] != expected[action_id]:
+                    row_findings.append(
+                        action_drift_finding(
+                            workstream_id,
+                            action_id,
+                            "content-mismatch",
+                            ledger_present=True,
+                            wdr_present=True,
+                            ledger_revision=revision_by_action.get(action_id),
+                            source_path=f"workstreams/{workstream_id}/action-projection.json",
+                            rendered_hash=content_hash(actual[action_id]),
+                        )
+                    )
+
+        wdr_summary_rows = parse_wdr_action_summaries(wdr_path)
+        wdr_ids = set(wdr_summary_rows)
+        projected_ids = set(actual)
+        for action_id in sorted(projected_ids - wdr_ids):
+            if not any(item.get("action_id") == action_id for item in row_findings):
+                row_findings.append(
+                    action_drift_finding(
+                        workstream_id,
+                        action_id,
+                        "missing-from-wdr",
+                        ledger_present=action_id in expected,
+                        wdr_present=False,
+                        ledger_revision=revision_by_action.get(action_id),
+                        source_path=f"workstreams/{workstream_id}/delivery-record.md",
+                    )
+                )
+        for action_id in sorted(projected_ids & wdr_ids):
+            projected_summary = str(actual[action_id].get("rendered_summary") or "")
+            wdr_summaries = wdr_summary_rows[action_id]
+            if (len(wdr_summaries) != 1 or wdr_summaries[0] != projected_summary) and not any(
+                    item.get("action_id") == action_id
+                    and item.get("action_diff", {}).get("drift_kind") == "content-mismatch"
+                    and item.get("source_path", "").endswith("delivery-record.md")
+                    for item in row_findings
+            ):
+                row_findings.append(
+                    action_drift_finding(
+                        workstream_id,
+                        action_id,
+                        "content-mismatch",
+                        ledger_present=action_id in expected,
+                        wdr_present=True,
+                        ledger_revision=revision_by_action.get(action_id),
+                        source_path=f"workstreams/{workstream_id}/delivery-record.md",
+                        rendered_hash=content_hash(wdr_summaries),
+                    )
+                )
+        for action_id in sorted(wdr_ids - projected_ids):
+            if not any(item.get("action_id") == action_id for item in row_findings):
+                row_findings.append(
+                    action_drift_finding(
+                        workstream_id,
+                        action_id,
+                        "orphan-in-wdr",
+                        ledger_present=action_id in expected,
+                        wdr_present=True,
+                        ledger_revision=revision_by_action.get(action_id),
+                        source_path=f"workstreams/{workstream_id}/delivery-record.md",
+                    )
+                )
+        findings.extend(row_findings)
+        rows.append(
+            {
+                "workstream_id": workstream_id,
+                "status": "in-sync" if not row_findings else "drift",
+                "finding_ids": sorted(item["finding_id"] for item in row_findings),
+                "expected_action_ids": sorted(expected),
+                "projected_action_ids": sorted(actual),
+                "wdr_action_ids": sorted(wdr_ids),
+                "wdr_revision": wdr_state.get("wdr_revision") if isinstance(wdr_state.get("wdr_revision"), int) else 1,
+                "file_generation": wdr_state.get("file_generation") if isinstance(wdr_state.get("file_generation"), int) else 1,
+                "wdr_fingerprint": sha256_file_id(wdr_path),
+                "wdr_state_fingerprint": sha256_file_id(wdr_state_path),
+                "sidecar_fingerprint": sha256_file_id(sidecar_path),
+            }
+        )
+
+    findings = sorted(
+        {item["finding_id"]: item for item in findings}.values(),
+        key=lambda item: item["finding_id"],
+    )
+    verdict = {
+        "schema_version": "1.0.0",
+        "selected_workstreams": workstream_ids,
+        "ledger_fingerprint": ledger_fingerprint,
+        "ledger_revision": ledger_revision,
+        "rows": rows,
+        "findings": findings,
+        "overall": (
+            "in-sync"
+            if workstream_ids and not findings and all(row["status"] == "in-sync" for row in rows)
+            else "drift"
+        ),
+    }
+    verdict["verdict_id"] = content_hash(verdict)
+    return verdict
+
+
+def expected_projection_record(action: dict[str, Any], revisions: dict[str, int]) -> dict[str, Any] | None:
+    action_id = str(action.get("action_id") or "")
+    revision = revisions.get(action_id)
+    status = str(action.get("status") or "").lower()
+    if not action_id or revision is None or status not in ACTIVE_ACTION_STATUSES:
+        return None
+    owner = str(action.get("owner") or "TBD")
+    text = str(action.get("action") or "TBD")
+    due = str(action.get("due_or_trigger") or "TBD")
+    affected = split_id_list(action.get("affected_workstreams"))
+    routing_scope = normalize_workstream_id(str(action.get("workstream") or "")) or "program"
+    return {
+        "action_id": action_id,
+        "owner": owner,
+        "action": text,
+        "due_trigger": due,
+        "status": status,
+        "action_revision": revision,
+        "routing_scope_id": routing_scope,
+        "affected_workstreams": sorted(affected),
+        "rendered_summary": f"[action_id:{action_id}] {owner}: {text} (due: {due})",
+    }
+
+
+def action_targets_workstream(action: dict[str, Any], workstream_id: str) -> bool:
+    routing = normalize_workstream_id(str(action.get("workstream") or ""))
+    return routing == workstream_id or workstream_id in split_id_list(action.get("affected_workstreams"))
+
+
+def split_id_list(value: Any) -> list[str]:
+    raw = value if isinstance(value, list) else re.split(r"\s*[,;]\s*", str(value or ""))
+    return sorted({normalize_workstream_id(str(item)) for item in raw if normalize_workstream_id(str(item))})
+
+
+def parse_action_revisions(path: Path) -> dict[str, int]:
+    if not path.is_file():
+        return {}
+    lines = [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip().startswith("|")]
+    if len(lines) < 2:
+        return {}
+    headers = [re.sub(r"\s+", " ", cell.strip()).lower() for cell in split_markdown_row(lines[0])]
+    revisions: dict[str, int] = {}
+    for line in lines[1:]:
+        cells = split_markdown_row(line)
+        if len(cells) != len(headers) or all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in cells):
+            continue
+        row = dict(zip(headers, cells, strict=True))
+        action_id = row.get("action id", "").strip()
+        raw_revision = row.get("action revision", "").strip() or "1"
+        if action_id and raw_revision.isdigit() and int(raw_revision) >= 1:
+            revisions[action_id] = int(raw_revision)
+    return revisions
+
+
+def parse_wdr_action_ids(path: Path) -> set[str]:
+    return set(parse_wdr_action_summaries(path))
+
+
+def parse_wdr_action_summaries(path: Path) -> dict[str, list[str]]:
+    if not path.is_file():
+        return {}
+    text = path.read_text(encoding="utf-8-sig")
+    match = re.search(r"^\s*-\s*Next actions\s*:\s*(.*)$", text, flags=re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return {}
+    value = match.group(1).strip()
+    markers = list(re.finditer(r"\[action_id:([^\]]+)\]", value))
+    summaries: dict[str, list[str]] = defaultdict(list)
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(value)
+        summary = value[marker.start():end].strip().rstrip(";").strip()
+        summaries[marker.group(1).strip()].append(summary)
+    return dict(summaries)
+
+
+def load_optional_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def sha256_file_id(path: Path) -> str:
+    return "sha256:" + (hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "0" * 64)
+
+
+def content_hash(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def drift_finding(
+    *,
+    kind: str,
+    repairability: str,
+    severity: str,
+    workstream_id: str,
+    action_id: str | None,
+    action_diff: dict[str, Any] | None,
+    source_path: str,
+) -> dict[str, Any]:
+    body = {
+        "kind": kind,
+        "repairability": repairability,
+        "severity": severity,
+        "workstream_id": workstream_id,
+        "action_id": action_id,
+        "action_diff": action_diff,
+        "source_path": source_path,
+        "source_line": None,
+    }
+    return {"finding_id": content_hash(body), **body}
+
+
+def action_drift_finding(
+    workstream_id: str,
+    action_id: str,
+    drift_kind: str,
+    *,
+    ledger_present: bool,
+    wdr_present: bool,
+    ledger_revision: int | None,
+    source_path: str,
+    rendered_hash: str | None = None,
+) -> dict[str, Any]:
+    return drift_finding(
+        kind="action-projection-drift",
+        repairability="repairable",
+        severity="blocked",
+        workstream_id=workstream_id,
+        action_id=action_id,
+        action_diff={
+            "action_id": action_id,
+            "drift_kind": drift_kind,
+            "ledger_present": ledger_present,
+            "wdr_present": wdr_present,
+            "ledger_revision": ledger_revision,
+            "wdr_rendered_sha256": rendered_hash,
+        },
+        source_path=source_path,
+    )
+
+
+def build_repair_contract(audit_id: str, verdict: dict[str, Any], memory_root: Path) -> dict[str, Any]:
+    repairable = [
+        item
+        for item in verdict.get("findings", [])
+        if item.get("repairability") == "repairable" and item.get("action_id")
+    ]
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for finding in repairable:
+        grouped[str(finding["workstream_id"])].append(finding)
+    batches: list[dict[str, Any]] = []
+    for workstream_id in sorted(grouped):
+        findings = sorted(grouped[workstream_id], key=lambda item: item["finding_id"])
+        action_ids = sorted({str(item["action_id"]) for item in findings})
+        row = next(
+            (item for item in verdict.get("rows", []) if item.get("workstream_id") == workstream_id),
+            {},
+        )
+        command = {
+            "workflow": "adp-status-sync",
+            "workstream_id": workstream_id,
+            "operation": "refresh_actions",
+            "expected_wdr_revision": row.get("wdr_revision", 1),
+            "expected_file_generation": row.get("file_generation", 1),
+            "action_ids": action_ids,
+        }
+        action_revisions = []
+        for action_id in action_ids:
+            matching = [item for item in findings if item.get("action_id") == action_id]
+            revisions = {
+                item.get("action_diff", {}).get("ledger_revision")
+                for item in matching
+                if isinstance(item.get("action_diff"), dict)
+                and item.get("action_diff", {}).get("ledger_revision") is not None
+            }
+            revision = next(iter(revisions)) if len(revisions) == 1 else None
+            action_revisions.append(
+                {
+                    "action_id": action_id,
+                    "expected_present": revision is not None,
+                    "revision": revision,
+                }
+            )
+        source_paths = [
+            "actions/action-ledger.md",
+            "actions/action-ledger.state.json",
+            f"workstreams/{workstream_id}/delivery-record.md",
+            f"workstreams/{workstream_id}/delivery-record.state.json",
+            f"workstreams/{workstream_id}/action-projection.json",
+        ]
+        root_instance_id = "ri_" + hashlib.sha256(str(memory_root.resolve()).encode("utf-8")).hexdigest()
+        source_records = [
+            {
+                "root_instance_id": root_instance_id,
+                "path": path,
+                "fingerprint": sha256_file_id(memory_root / path),
+            }
+            for path in source_paths
+        ]
+        fact_generation = load_optional_json(memory_root / "state/fact-generation.json").get("generation", 1)
+        if not isinstance(fact_generation, int) or isinstance(fact_generation, bool) or fact_generation < 1:
+            fact_generation = 1
+        batch_body = {
+            "based_on_audit_id": audit_id,
+            "finding_ids": [item["finding_id"] for item in findings],
+            "command": command,
+            "read_set": {
+                "ledger_fingerprint": verdict.get("ledger_fingerprint"),
+                "ledger_revision": verdict.get("ledger_revision"),
+                "action_revisions": action_revisions,
+                "wdr_revisions": [
+                    {
+                        "workstream_id": workstream_id,
+                        "wdr_revision": row.get("wdr_revision", 1),
+                        "file_generation": row.get("file_generation", 1),
+                        "fingerprint": row.get("wdr_fingerprint"),
+                    }
+                ],
+                "source_records": source_records,
+                "fact_generation": fact_generation,
+            },
+        }
+        batch_id = content_hash(batch_body)
+        batch = {"batch_id": batch_id, **batch_body}
+        batch["batch_digest"] = content_hash(batch)
+        batches.append(batch)
+    mapped_findings = []
+    batch_by_finding = {
+        finding_id: batch["batch_id"]
+        for batch in batches
+        for finding_id in batch["finding_ids"]
+    }
+    for finding in verdict.get("findings", []):
+        action_ids = [finding["action_id"]] if finding.get("action_id") else []
+        refs = [{"entity_type": "workstream", "id": finding["workstream_id"]}]
+        refs.extend({"entity_type": "action", "id": action_id} for action_id in action_ids)
+        mapped_findings.append(
+            {
+                "finding_id": finding["finding_id"],
+                "kind": finding["kind"],
+                "severity": finding["severity"],
+                "workflow": "adp-status-sync",
+                "workstream_id": finding["workstream_id"],
+                "operation": "refresh_actions",
+                "entity_refs": refs,
+                "action_ids": action_ids,
+                "source_path": finding["source_path"],
+                "source_line": finding["source_line"],
+                "repair_batch_id": batch_by_finding.get(finding["finding_id"]),
+            }
+        )
+    return {
+        "schema_version": "2.0.0",
+        "audit_id": audit_id,
+        "drift_verdict_id": verdict["verdict_id"],
+        "findings": mapped_findings,
+        "repair_batches": batches,
+    }
+
+
 def build_audit(
     prepass: dict[str, Any],
     project_root: Path,
@@ -1426,6 +2013,7 @@ def build_audit(
     consistency = audit_consistency(prepass, freshness)
     closure = audit_closure(prepass, memory_root, as_of)
     merge_quality = audit_merge_quality(prepass)
+    action_projection = audit_action_projection_drift(memory_root, prepass)
     requested_scopes = prepass.get("scope", {}).get("workstreams_requested", []) if isinstance(prepass.get("scope"), dict) else []
     skip_wdr_registry = bool(requested_scopes) and not prepass.get("registered_workstreams") and bool(prepass.get("virtual_scopes"))
     selected_scope_ids = {
@@ -1450,9 +2038,38 @@ def build_audit(
         closure,
         merge_quality,
     )
+    if scenario == "roadmap":
+        completeness_warnings = [
+            {**finding, "severity": "warning"}
+            for finding in contract_findings["blocking_gaps"]
+            if finding.get("kind") == "completeness"
+        ]
+        contract_findings["blocking_gaps"] = [
+            finding
+            for finding in contract_findings["blocking_gaps"]
+            if finding.get("kind") != "completeness"
+        ]
+        contract_findings["warnings"].extend(completeness_warnings)
     for finding in canonicalize_vnext_findings(vnext["findings"]):
         group = "blocking_gaps" if finding["severity"] == "blocking" else "warnings"
         contract_findings[group].append(finding)
+    for drift_finding in action_projection["findings"]:
+        severity = "blocking" if drift_finding["severity"] == "blocked" else "warning"
+        group = "blocking_gaps" if severity == "blocking" else "warnings"
+        contract_findings[group].append(
+            canonical_finding(
+                {
+                    **drift_finding,
+                    "gap": drift_finding["kind"],
+                    "source": drift_finding["source_path"],
+                    "workstream": drift_finding["workstream_id"],
+                    "recommended_workflow": "adp-status-sync",
+                    "execution_disposition": "blocked" if severity == "blocking" else "degraded",
+                },
+                severity,
+                "action_projection_drift",
+            )
+        )
     for group in ["blocking_gaps", "warnings"]:
         contract_findings[group] = dedupe_canonical_findings(contract_findings[group])
     warning_findings = warning_findings_from_groups(contract_findings)
@@ -1521,6 +2138,7 @@ def build_audit(
         **contract_findings,
         "warning_findings": warning_findings,
         "merge_review_evidence": {
+            "action_field_collisions": merge_quality["action_field_collision_evidence"],
             "shared_references": merge_quality["shared_reference_evidence"],
             "readiness_gap_pairs": merge_quality["readiness_gap_evidence"],
         },
@@ -1530,7 +2148,9 @@ def build_audit(
             "consistency": consistency,
             "closure": closure,
             "merge_quality": merge_quality,
+            "action_projection": action_projection,
         },
+        "action_projection_drift": action_projection,
         "counts": {
             "sources_read": len(sources),
             "missing_sources": len(prepass.get("missing_sources", [])),
@@ -1543,10 +2163,24 @@ def build_audit(
             "prepass_gaps": len(gaps),
             "blocking_findings": blocking_count,
             "warning_findings": warning_count,
+            "action_projection_drift": len(action_projection["findings"]),
         },
         "recommended_workflows": recommended,
     }
     audit["input_audit_id"] = stable_input_audit_id(audit)
+    audit["repair_contract"] = build_repair_contract(
+        audit["input_audit_id"],
+        action_projection,
+        memory_root,
+    )
+    repair_batch_by_finding = {
+        finding_id: batch["batch_id"]
+        for batch in audit["repair_contract"]["repair_batches"]
+        for finding_id in batch["finding_ids"]
+    }
+    for group in ["blocking_gaps", "warnings"]:
+        for finding in audit[group]:
+            finding["repair_batch_id"] = repair_batch_by_finding.get(finding.get("finding_id"))
     audit["audit_content_hash"] = audit_content_hash(audit)
     return audit
 
@@ -2328,6 +2962,21 @@ def audit_closure(prepass: dict[str, Any], memory_root: Path, as_of: date) -> di
         (blocking_gaps if gap.get("blocking") else non_blocking_gaps).append(item)
 
     unconsumed = pending_status_sync_intakes(memory_root)
+    pending_intents = pending_status_intents(memory_root)
+    for intent in pending_intents:
+        blocking_gaps.append(
+            {
+                "gap": f"status intent {intent['intent_id']} is pending",
+                "action_ids": [],
+                "workstream": intent.get("workstream_id", ""),
+                "source": "state/status-intent-outbox.json",
+                "source_path": "state/status-intent-outbox.json",
+                "recommended_workflow": "adp-status-sync",
+                "category": "closure",
+                "gap_type": "pending-status-intent",
+                "execution_disposition": "blocked",
+            }
+        )
     packets = business_packets(memory_root, as_of)
     open_packets = [
         public_packet(packet)
@@ -2356,8 +3005,27 @@ def audit_closure(prepass: dict[str, Any], memory_root: Path, as_of: date) -> di
         "unclosed_meeting_items": [],
         "open_business_packets": open_packets,
         "unconsumed_intake_files": unconsumed,
+        "pending_status_intents": pending_intents,
         "escalation_candidates": escalation,
     }
+
+
+def pending_status_intents(memory_root: Path) -> list[dict[str, str]]:
+    outbox = load_optional_json(memory_root / "state/status-intent-outbox.json")
+    rows = outbox.get("intents", []) if isinstance(outbox.get("intents"), list) else []
+    pending: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("state") != "pending":
+            continue
+        intent = row.get("intent") if isinstance(row.get("intent"), dict) else {}
+        pending.append(
+            {
+                "intent_id": str(row.get("intent_id") or ""),
+                "workstream_id": str(intent.get("workstream_id") or ""),
+                "producer": str(row.get("producer") or ""),
+            }
+        )
+    return sorted(pending, key=lambda item: item["intent_id"])
 
 
 def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
@@ -2606,36 +3274,35 @@ def audit_merge_quality(prepass: dict[str, Any]) -> dict[str, list[dict[str, Any
         for action in prepass.get("ledger_actions", [])
         if str(action.get("status", "")).lower() in ACTIVE_ACTION_STATUSES
     ]
-    duplicate_candidates: list[dict[str, Any]] = []
-    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    collision_evidence: list[dict[str, Any]] = []
+    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
     for action in actions:
-        key = "|".join(
-            normalize_text_key(str(action.get(field, "")))
-            for field in ["action", "owner", "due_or_trigger"]
+        key = tuple(
+            str(action.get(field, "")).strip()
+            for field in ("action", "owner", "due_or_trigger")
         )
-        if key.strip("|"):
+        if any(key):
             grouped[key].append(action)
     for group in grouped.values():
         if len(group) < 2:
             continue
-        duplicate_candidates.append(
+        collision_evidence.append(
             {
-                "action_ids": [item.get("action_id", "") for item in group],
+                "action_ids": sorted(str(item.get("action_id", "")) for item in group),
                 "owner": group[0].get("owner", ""),
                 "due_or_trigger": group[0].get("due_or_trigger", ""),
                 "action": group[0].get("action", ""),
-                "reason": "same normalized action + owner + due/trigger appears multiple times",
-                "recommended_workflow": "adp-status-sync",
-                "category": "duplicate",
+                "evidence_type": "exact-action-field-collision",
             }
         )
 
     return {
         "blocking_gaps": blocking_gaps,
         "non_blocking_gaps": non_blocking_gaps,
-        "duplicate_candidates": duplicate_candidates,
+        "duplicate_candidates": [],
         "overlap_candidates": [],
         "conflict_candidates": [],
+        "action_field_collision_evidence": collision_evidence,
         "shared_reference_evidence": shared_references_from_workstreams(prepass.get("workstreams", [])),
         "readiness_gap_evidence": readiness_gaps_from_workstreams(prepass.get("workstreams", [])),
     }
@@ -2970,7 +3637,13 @@ def canonical_finding(item: dict[str, Any], severity: str, kind: str) -> dict[st
         sort_keys=True,
         separators=(",", ":"),
     )
-    finding_id = f"adp-{kind}-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}"
+    finding_id = str(item.get("finding_id") or f"adp-{kind}-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}")
+    action_ids = finding_action_ids(item)
+    entity_refs = [
+        {"entity_type": "workstream", "id": workstream_id}
+        for workstream_id in workstreams
+    ]
+    entity_refs.extend({"entity_type": "action", "id": action_id} for action_id in action_ids)
     finding = {
         "id": finding_id,
         "finding_id": finding_id,
@@ -2985,6 +3658,10 @@ def canonical_finding(item: dict[str, Any], severity: str, kind: str) -> dict[st
         "gap_type": str(item.get("gap_type") or ""),
         "recommended_workflow": str(item.get("recommended_workflow") or ""),
         "execution_disposition": str(item.get("execution_disposition") or "degraded"),
+        "action_id": action_ids[0] if len(action_ids) == 1 else None,
+        "action_ids": action_ids,
+        "entity_refs": entity_refs,
+        "repair_batch_id": item.get("repair_batch_id"),
     }
     if kind == "conflict":
         finding["details"] = {
@@ -2996,6 +3673,20 @@ def canonical_finding(item: dict[str, Any], severity: str, kind: str) -> dict[st
     if isinstance(item.get("source_line"), int) and item["source_line"] > 0:
         finding["source_line"] = item["source_line"]
     return finding
+
+
+def finding_action_ids(item: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    raw_ids = item.get("action_ids")
+    if isinstance(raw_ids, list):
+        values.extend(str(value).strip() for value in raw_ids if str(value).strip())
+    action_id = item.get("action_id")
+    if isinstance(action_id, str) and action_id.strip():
+        values.append(action_id.strip())
+    action_diff = item.get("action_diff")
+    if isinstance(action_diff, dict) and isinstance(action_diff.get("action_id"), str):
+        values.append(action_diff["action_id"].strip())
+    return sorted({value for value in values if value})
 
 
 def finding_identity_details(item: dict[str, Any]) -> dict[str, Any]:

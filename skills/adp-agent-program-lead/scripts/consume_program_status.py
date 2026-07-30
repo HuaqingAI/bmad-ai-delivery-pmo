@@ -115,6 +115,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--scenario is required for meeting-preparation")
     if args.intent == "panel-archive" and not args.distribution_profile:
         raise ValueError("--distribution-profile is required for panel-archive")
+    if args.intent == "panel-refresh":
+        return {
+            "ok": True,
+            "status": "complete",
+            "mode": "direct-workflow-route",
+            "intent": args.intent,
+            "project_root": str(project_root),
+            "memory_root": str(memory_root),
+            "panel_journey": {
+                "operation": "refresh",
+                "view": args.panel_view,
+                "owning_workflow": "adp-panel-refresh",
+                "status": "route-required",
+                "route": {"operation": "refresh", "view": args.panel_view},
+                "writes_performed": [],
+            },
+            "writes_performed": [],
+        }
 
     inspection = inspect_canonical(args, project_root)
     if not inspection.get("ok"):
@@ -347,10 +365,11 @@ def panel_journey(
     if args.intent not in PANEL_INTENTS:
         return None
     operation = args.intent.removeprefix("panel-")
+    owning_workflow = "adp-management-panel" if operation == "archive" else "adp-panel-refresh"
     base = {
         "operation": operation,
         "view": args.panel_view,
-        "owning_workflow": "adp-management-panel",
+        "owning_workflow": owning_workflow,
         "canonical_snapshot_id": canonical_status.get("snapshot_id"),
     }
     if operation == "refresh":
@@ -386,7 +405,7 @@ def panel_journey(
             **base,
             "status": "blocked",
             "reason": inspection["reason"],
-            "recommended_workflows": ["adp-management-panel"],
+            "recommended_workflows": ["adp-panel-refresh"],
             "writes_performed": [],
         }
     manifest = inspection["manifest"]
@@ -398,7 +417,7 @@ def panel_journey(
             "reason": "current panel snapshot does not match canonical program status",
             "panel_id": manifest.get("panel_id"),
             "panel_snapshot_id": manifest.get("program_status_snapshot_id"),
-            "recommended_workflows": ["adp-management-panel"],
+            "recommended_workflows": ["adp-panel-refresh"],
             "writes_performed": [],
         }
     explanation = view_specific_explanation(args.panel_view, model)

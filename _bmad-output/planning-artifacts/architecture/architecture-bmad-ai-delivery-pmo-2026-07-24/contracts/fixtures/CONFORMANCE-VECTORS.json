@@ -1,0 +1,1246 @@
+{
+  "suite_id": "urn:adp:panel-sync-conformance:1.0.0",
+  "suite_version": "1.0.0",
+  "release_gate": {
+    "minimum_independent_implementations": 2,
+    "required_platforms": ["native-posix", "native-windows"],
+    "design_fixture_check_status": "passed",
+    "implementation_conformance_status": "pending",
+    "required_result_fields": ["evidence_kind", "implementation_id", "implementation_version", "adapter_build_id", "platform", "host_platform", "native_durability_exercised", "evidence_classes", "registry_sha256", "suite_sha256", "schema_sha256", "protocol_sha256", "passed_vector_ids", "failed_vector_ids", "executed_at", "result_id"]
+  },
+  "substitution_tokens": {
+    "$SCHEMA_SHA256": "raw schema bundle hash from registry",
+    "$REGISTRY_SHA256": "raw registry hash under test"
+  },
+  "canonical_json_vectors": [
+    {
+      "id": "jcs-object-order",
+      "input": {"z": 1, "a": "中", "nested": {"b": true, "a": null}},
+      "expected_utf8": "{\"a\":\"中\",\"nested\":{\"a\":null,\"b\":true},\"z\":1}"
+    },
+    {
+      "id": "jcs-utf16-bmp-supplementary-order",
+      "input": {"": 2, "😀": 1},
+      "expected_utf8": "{\"😀\":1,\"\":2}"
+    },
+    {
+      "id": "jcs-escaping-and-negative-zero",
+      "input": {"escaped": "\b\t\n\f\r\"\\", "zero": -0},
+      "expected_utf8": "{\"escaped\":\"\\b\\t\\n\\f\\r\\\"\\\\\",\"zero\":0}"
+    },
+    {"id": "jcs-lone-surrogate-rejected", "input_code_units": [55296], "expected_error": "JCS_INVALID_UNICODE"},
+    {"id": "jcs-integral-float", "input": 1.0, "expected_utf8": "1"},
+    {"id": "jcs-finite-fraction", "input": 1.5, "expected_utf8": "1.5"},
+    {"id": "jcs-fixed-threshold-low", "input": 0.000001, "expected_utf8": "0.000001"},
+    {"id": "jcs-max-safe-integer", "input": 9007199254740991, "expected_utf8": "9007199254740991"},
+    {"id": "jcs-unsafe-exponent-integer-rejected", "input": 1e21, "expected_error": "JCS_NUMBER_PROFILE_INVALID"},
+    {"id": "jcs-unsafe-raw-integer-rejected", "input": 1000000000000000000000, "expected_error": "JCS_NUMBER_PROFILE_INVALID"},
+    {"id": "jcs-smallest-subnormal", "input": 5e-324, "expected_utf8": "5e-324"},
+    {"id": "jcs-rounding-boundary", "input": 333333333.33333329, "expected_utf8": "333333333.3333333"},
+    {"id": "jcs-unsafe-integer-rejected", "input": 9007199254740992, "expected_error": "JCS_NUMBER_PROFILE_INVALID"}
+  ],
+  "contract_schema_vectors": [
+    {
+      "id": "status-intent-schema-valid",
+      "schema_def": "statusMutationIntentV1",
+      "instance": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#status-mutation-intent-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "1.0.0",
+        "intent_id": "meeting-M-009-status",
+        "origin_producer": "adp-meeting-sync",
+        "workstream_id": "l1-checkout",
+        "set": {"progress": "payment validation ready", "blockers": {"mode": "remove", "values": ["sandbox access"]}},
+        "evidence": [{"source_path": "meetings/2026-07-24.md", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "observed_at": "2026-07-24T02:00:00Z"}]
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "program-action-create-schema-valid",
+      "schema_def": "actionCommandV2",
+      "instance": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#action-command-v2", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "2.0.0",
+        "command_id": "meeting-M-010-action",
+        "operation": "create",
+        "action_id": "ACT-E9275B647EA3F89E178C",
+        "create": {"owner": "FDE-C", "status": "open", "action": "Verify payment", "due_trigger": "gate-a", "closure_criteria": "Evidence linked", "routing_scope_id": "program", "affected_workstreams": ["l1-checkout", "l1-payments"]},
+        "evidence": [{"source_path": "meetings/2026-07-24.md", "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "observed_at": "2026-07-24T02:00:00Z"}]
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "blocked-producer-receipt-schema-valid",
+      "schema_def": "producerReceiptV1",
+      "instance": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#producer-receipt-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "1.0.0",
+        "receipt_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "generation_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "input_profile_id": "program-status/1.0.0",
+        "selection_policy_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "consumed_sources": [],
+        "consumed_predecessors": [],
+        "output": null,
+        "status": "blocked",
+        "error_code": "UNDECLARED_DEPENDENCY"
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "state-audit-payload-schema-valid",
+      "schema_def": "stateAuditPayloadV2",
+      "instance": {
+        "schema_version": "2.0.0",
+        "audit_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "selection_policy_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "selected_workstreams": ["l1-checkout"],
+        "audit_status": "pass",
+        "execution_disposition": "ready",
+        "source_as_of": "2026-07-24T02:00:00Z",
+        "source_inventory": [],
+        "repair": {
+          "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#audit-finding-repair-v2", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+          "schema_version": "2.0.0",
+          "audit_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "drift_verdict_id": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+          "findings": [],
+          "repair_batches": []
+        },
+        "intent_convergence": {
+          "contract": {
+            "schema_id": "urn:adp:panel-sync-contracts:2026-07-24#intent-convergence-verdict-v1",
+            "schema_sha256": "$SCHEMA_SHA256",
+            "registry_sha256": "$REGISTRY_SHA256"
+          },
+          "schema_version": "1.0.0",
+          "outbox_id": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "evaluated_through_sequence": 0,
+          "pending_intent_ids": [],
+          "failed_intent_ids": [],
+          "waived_intent_ids": [],
+          "status": "converged",
+          "verdict_id": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+        },
+        "source_preview": []
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "program-status-payload-schema-valid",
+      "schema_def": "programStatusPayloadV2",
+      "instance": {
+        "schema_version": "2.0.0",
+        "snapshot_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "source_as_of": "2026-07-24T02:00:00Z",
+        "overall_status": "on-track",
+        "summary": "Checkout validation is on track",
+        "workstream_current": [{"workstream_id": "l1-checkout", "wdr_fingerprint": "sha256:9999999999999999999999999999999999999999999999999999999999999999", "wdr_revision": 4, "file_generation": 7, "phase": "validation", "status": "on-track", "progress": "Payment validation ready", "blockers": [], "risks": [], "dependencies": ["l1-payments"], "action_ids": ["ACT-E9275B647EA3F89E178C"]}],
+        "progress": {"progress_schema_version": "3.0.0"},
+        "flow_state": {"flow_state_schema_version": "1.0.0", "baseline_id": "baseline-1", "baseline_revision": 1, "as_of": "2026-07-24T02:00:00Z", "node_states": [], "compatibility": {"strategy": "version-required", "migration_error_code": "ADP-FLOW-STATE-MIGRATION-REQUIRED"}},
+        "source_preview": []
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "roadmap-payload-schema-valid",
+      "schema_def": "roadmapPayloadV2",
+      "instance": {
+        "schema_version": "2.0.0",
+        "roadmap_id": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "source_as_of": "2026-07-24T02:00:00Z",
+        "program_status_projection_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "roadmap_state": "empty",
+        "empty_reason": "No milestone is currently scheduled",
+        "milestone_timeline": [],
+        "unscheduled_milestones": [],
+        "source_preview": []
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "meeting-pack-payload-schema-valid",
+      "schema_def": "meetingPackPayloadV2",
+      "instance": {
+        "schema_version": "2.0.0",
+        "meeting_pack_id": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "scenario": "fde-morning",
+        "source_as_of": "2026-07-24T02:00:00Z",
+        "program_status_projection_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "readiness": "ready",
+        "lifecycle": "draft",
+        "boards": [{"board_id": "readiness", "title": "Readiness", "items": []}],
+        "source_preview": []
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "program-status-empty-shape-rejected",
+      "schema_def": "programStatusPayloadV2",
+      "instance": {
+        "schema_version": "2.0.0",
+        "snapshot_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "source_as_of": "2026-07-24T02:00:00Z",
+        "overall_status": "on-track",
+        "progress": {},
+        "flow_state": {},
+        "source_preview": []
+      },
+      "expected_valid": false
+    },
+    {
+      "id": "meeting-pack-empty-boards-rejected",
+      "schema_def": "meetingPackPayloadV2",
+      "instance": {
+        "schema_version": "2.0.0",
+        "meeting_pack_id": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "scenario": "fde-morning",
+        "source_as_of": "2026-07-24T02:00:00Z",
+        "program_status_projection_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "readiness": "ready",
+        "lifecycle": "draft",
+        "boards": [],
+        "source_preview": []
+      },
+      "expected_valid": false
+    },
+    {
+      "id": "fact-generation-max-safe-schema-valid",
+      "schema_def": "factGenerationStateV1",
+      "instance": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#fact-generation-state-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "1.0.0",
+        "fact_generation": 9007199254740991,
+        "last_transaction_id": "tx-safe-max",
+        "state_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "expected_valid": true
+    },
+    {
+      "id": "fact-generation-unsafe-schema-rejected",
+      "schema_def": "factGenerationStateV1",
+      "instance": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#fact-generation-state-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "1.0.0",
+        "fact_generation": 1000000000000000000000,
+        "last_transaction_id": "tx-unsafe",
+        "state_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "expected_valid": false
+    }
+  ],
+  "wdr_vectors": [
+    {
+      "id": "create-byte-exact",
+      "template_id": "workstream-delivery-record/1.0.0",
+      "template_sha256": "sha256:ae36419be7d9d6b7239d943c459c27bbf990cb2a0ed8f1b1c6fb89277253ccf4",
+      "create_input_without_identity": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#workstream-create-input-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "1.0.0",
+        "created_at": "2026-07-24T02:20:00Z",
+        "workstream_id": "l1-checkout",
+        "name": "Checkout",
+        "fde_owner": "FDE-B",
+        "business_owner": "BO-1",
+        "phase": "architecture",
+        "status": "active",
+        "scope_summary": "Checkout delivery",
+        "artifact_rows": [{"artifact": "PRD", "path": "artifacts/prd.md", "baseline_status": "current", "notes": "approved"}],
+        "depends_on": ["l0-platform"],
+        "impacts": ["l1-payments"],
+        "l0_references": ["L0-1"]
+      },
+      "command": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#wdr-command-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "1.0.0",
+        "command_id": "create-checkout-v1",
+        "issuer": {"producer_id": "adp-workstream-register", "capability_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+        "operation": "create",
+        "workstream_id": "l1-checkout",
+        "expected_absent": true,
+        "create_input": {
+          "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#workstream-create-input-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+          "schema_version": "1.0.0",
+          "created_at": "2026-07-24T02:20:00Z",
+          "workstream_id": "l1-checkout",
+          "name": "Checkout",
+          "fde_owner": "FDE-B",
+          "business_owner": "BO-1",
+          "phase": "architecture",
+          "status": "active",
+          "scope_summary": "Checkout delivery",
+          "artifact_rows": [{"artifact": "PRD", "path": "artifacts/prd.md", "baseline_status": "current", "notes": "approved"}],
+          "depends_on": ["l0-platform"],
+          "impacts": ["l1-payments"],
+          "l0_references": ["L0-1"],
+          "input_id": "$CREATE_INPUT_ID"
+        },
+        "template_id": "workstream-delivery-record/1.0.0",
+        "template_sha256": "sha256:ae36419be7d9d6b7239d943c459c27bbf990cb2a0ed8f1b1c6fb89277253ccf4",
+        "rendered_record": "# Workstream Delivery Record\n\nCreated: 2026-07-24T02:20:00Z\n\n## Identity\n\n- Workstream ID: l1-checkout\n- Name: Checkout\n- FDE owner: FDE-B\n- Business owner: BO-1\n- Current BMM phase: architecture\n- Current ADP status: active\n\n## BMM Artifact Index\n\n| Artifact | Path / Link | Baseline Status | Notes |\n| --- | --- | --- | --- |\n| PRD | artifacts/prd.md | current | approved |\n\n## Scope\n\n- In scope: Checkout delivery\n- Out of scope: TBD\n- Key assumptions: TBD\n- Open questions: TBD\n\n## Acceptance\n\n- Acceptance criteria: TBD\n- Acceptance owner: BO-1\n- Evidence required: TBD\n- Current readiness: draft\n- Unclosed gaps: acceptance criteria and evidence expectations need confirmation\n\n## Project Status\n\n- Progress: TBD\n- Blockers: TBD\n- Risks: TBD\n- Dependencies: see cross-workstream links\n- Scope or change notes: TBD\n- Next actions: fill missing project-level state and link current BMM artifacts\n\n## Cross-Workstream Links\n\nDepends on:\n\n- l0-platform\n\nImpacts:\n\n- l1-payments\n\nL0 references:\n\n- L0-1\n\n## Decisions and Evidence\n\n- Decision links: `decisions.md`\n- Business Decision Packet links: TBD\n- Evidence links: `evidence.md`\n- Customer/business confirmations: TBD\n\n## Record Rule\n\nThis file summarizes project-level coordination state. Keep detailed requirements, architecture, stories, code, and validation content in BMM artifacts and link them above.\n",
+        "rendered_sha256": "sha256:84ab18329f36c9132bc9cb2d9f33f45d277764abecdf9225f54c4a96ef7b6876",
+        "evidence": [{"source_path": "intake/workstream-l1-checkout.json", "source_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "observed_at": "2026-07-24T02:20:00Z"}]
+      },
+      "expected_wdr_revision": 0,
+      "expected_file_generation": 1
+    },
+    {
+      "id": "collection-add-and-revision",
+      "before": "# Workstream Delivery Record\n\n## Project Status\n\n- Progress: ready\n- Blockers: access\n- Risks:\n- Dependencies:\n- Scope or change notes:\n- Next actions:\n",
+      "before_wdr_revision": 0,
+      "before_file_generation": 0,
+      "patch": {"blockers": {"mode": "add", "values": ["sandbox; approval", "access"]}},
+      "expected": "# Workstream Delivery Record\n\n## Project Status\n\n- Progress: ready\n- Blockers: access; sandbox\\; approval\n- Risks:\n- Dependencies:\n- Scope or change notes:\n- Next actions:\n",
+      "after_wdr_revision": 1,
+      "after_file_generation": 1
+    },
+    {
+      "id": "meeting-region-whole-file",
+      "before": "# Workstream Delivery Record\n\n## Project Status\n\n- Progress: ready\n- Blockers:\n- Risks:\n- Dependencies:\n- Scope or change notes:\n- Next actions:\n\n## Record Rule\n\nKeep facts linked.\n",
+      "records": [
+        {"entry_id": "M-007", "command_id": "cmd-M-007", "observed_at": "2026-07-24T03:20:00Z", "source_path": "meetings/2026-07-24-sync.md", "source_fingerprint": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "classification": "wdr_update", "summary": "owner confirmed", "owner": "FDE-B", "due_trigger": "2026-07-26", "status": "open"},
+        {"entry_id": "M-006", "command_id": "cmd-M-006", "observed_at": "2026-07-24T02:20:00Z", "source_path": "meetings/2026-07-24-sync.md", "source_fingerprint": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "classification": "wdr_update", "summary": "payment sandbox pending", "owner": "FDE-B", "due_trigger": "2026-07-25", "status": "blocked"}
+      ],
+      "expected": "# Workstream Delivery Record\n\n## Project Status\n\n- Progress: ready\n- Blockers:\n- Risks:\n- Dependencies:\n- Scope or change notes:\n- Next actions:\n\n## Meeting Sync History\n\n<!-- adp:meeting-history:v1 command_id=cmd-M-006 entry_id=M-006 observed_at=2026-07-24T02:20:00Z -->\n### Meeting Sync Update: 2026-07-24 - M-006\n\n- Source: meetings/2026-07-24-sync.md @ sha256:3333333333333333333333333333333333333333333333333333333333333333\n- Classification: wdr_update\n- Update: payment sandbox pending\n- Owner: FDE-B\n- Due / trigger: 2026-07-25\n- Status: blocked\n\n<!-- adp:meeting-history:v1 command_id=cmd-M-007 entry_id=M-007 observed_at=2026-07-24T03:20:00Z -->\n### Meeting Sync Update: 2026-07-24 - M-007\n\n- Source: meetings/2026-07-24-sync.md @ sha256:3333333333333333333333333333333333333333333333333333333333333333\n- Classification: wdr_update\n- Update: owner confirmed\n- Owner: FDE-B\n- Due / trigger: 2026-07-26\n- Status: open\n\n## Record Rule\n\nKeep facts linked.\n"
+    },
+    {
+      "id": "writer-capability-mismatch",
+      "issuer": {"producer_id": "adp-meeting-sync", "capability_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444"},
+      "host_capability_producer": "adp-status-sync",
+      "set": {"meeting_history_append": []},
+      "expected_error": "WDR_WRITER_UNAUTHORIZED"
+    },
+    {
+      "id": "legacy-section-order-and-first-status-patch",
+      "before": "# Workstream Delivery Record\n\n## Project Status\n\n- Progress: ready\n- Blockers:\n- Risks:\n- Dependencies:\n- Scope or change notes:\n- Next actions:\n\n## Cross-Workstream Links\n\nDepends on:\n\n## Decisions and Evidence\n\n- Decision links: `decisions.md`\n\n## Roadmap\n\n| Milestone ID | Status |\n| --- | --- |\n| MS-1 | in-progress |\n\n## Record Rule\n\nKeep facts linked.\n\n## Checkpoint Sync Log\n\n- validation synced\n",
+      "before_wdr_revision": 0,
+      "before_file_generation": 0,
+      "patch": {"last_status_sync": "2026-07-24T04:00:00Z"},
+      "expected": "# Workstream Delivery Record\n\n## Project Status\n\n- Progress: ready\n- Blockers:\n- Risks:\n- Dependencies:\n- Scope or change notes:\n- Next actions:\n- Last status sync: 2026-07-24T04:00:00Z\n\n## Roadmap\n\n| Milestone ID | Status |\n| --- | --- |\n| MS-1 | in-progress |\n\n## Cross-Workstream Links\n\nDepends on:\n\n## Decisions and Evidence\n\n- Decision links: `decisions.md`\n\n## Checkpoint Sync Log\n\n- validation synced\n\n## Record Rule\n\nKeep facts linked.\n",
+      "after_wdr_revision": 1,
+      "after_file_generation": 1
+    },
+    {
+      "id": "mixed-patch-command-level-revision",
+      "before_wdr_revision": 4,
+      "before_file_generation": 7,
+      "fields": ["progress", "blockers", "meeting_history_append", "owned_sections"],
+      "expected_wdr_revision": 5,
+      "expected_file_generation": 8
+    },
+    {
+      "id": "meeting-current-field-direct-rejected",
+      "issuer": {"producer_id": "adp-meeting-sync", "capability_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444"},
+      "host_capability_producer": "adp-meeting-sync",
+      "set": {"progress": "ready"},
+      "expected_error": "WDR_WRITER_UNAUTHORIZED"
+    },
+    {
+      "id": "meeting-status-intent-routed",
+      "origin_producer": "adp-meeting-sync",
+      "intent_fields": ["progress", "blockers"],
+      "command_issuer": "adp-status-sync",
+      "expected": "authorized"
+    },
+    {
+      "id": "wdr-meeting-history-identical-replay-noop",
+      "mutation": "meeting-history-identical-replay",
+      "expected": "no-op"
+    },
+    {
+      "id": "wdr-meeting-history-conflicting-replay-rejected",
+      "mutation": "meeting-history-conflicting-replay",
+      "expected_error": "WDR_MUTATION_INVALID"
+    },
+    {
+      "id": "wdr-meeting-history-duplicate-command-key-rejected",
+      "mutation": "meeting-history-duplicate-command-key",
+      "expected_error": "WDR_MUTATION_INVALID"
+    },
+    {
+      "id": "wdr-meeting-history-mixed-merge-deterministic",
+      "mutation": "meeting-history-mixed-merge",
+      "expected": "canonical-merge"
+    },
+    {
+      "id": "wdr-meeting-history-multi-entry-command-valid",
+      "mutation": "meeting-history-multi-entry-command",
+      "expected": "canonical-merge"
+    },
+    {
+      "id": "wdr-meeting-history-invalid-calendar-time-rejected",
+      "mutation": "meeting-history-invalid-calendar-time",
+      "expected_error": "WDR_MUTATION_INVALID"
+    },
+    {
+      "id": "wdr-noncanonical-literal-tbd-rejected",
+      "mutation": "noncanonical-literal-tbd",
+      "expected_error": "WDR_MUTATION_INVALID"
+    },
+    {
+      "id": "wdr-noncanonical-escape-rejected",
+      "mutation": "noncanonical-escape",
+      "expected_error": "WDR_MUTATION_INVALID"
+    },
+    {
+      "id": "wdr-next-actions-manual-first-managed-by-id",
+      "mutation": "manual-first-managed-by-id",
+      "expected": "canonical-order"
+    },
+    {"id": "wdr-roadmap-byte-exact-replace-replay", "mutation": "roadmap-replace-replay", "expected": "valid"},
+    {"id": "wdr-owned-sections-byte-exact-all", "mutation": "owned-sections-all", "expected": "valid"},
+    {"id": "wdr-owned-section-heading-injection-rejected", "mutation": "owned-section-heading-injection", "expected_error": "WDR_MUTATION_INVALID"}
+  ],
+  "legacy_adapter_vectors": [
+    {
+      "id": "meeting-existing-action-owner-status-patch",
+      "input": {"meeting": {"date": "2026-07-24", "started_at": "2026-07-24T10:00:00Z"}, "item": {"id": "M-008", "classification": "action", "action_id": "A-FLOW-1", "owner": "FDE-C", "status": "done", "text": "Verify payment"}},
+      "expected": {"operation": "patch", "action_id": "A-FLOW-1", "set": {"owner": "FDE-C", "status": "done", "action": "Verify payment"}, "observed_at": "2026-07-24T10:00:00Z"}
+    },
+    {
+      "id": "status-alias-precedence-presence",
+      "input": {"observed_at": "2026-07-24T11:00:00Z", "action": {"action_id": "A-FLOW-1", "id": "A-IGNORED-1", "due_or_trigger": "gate-a", "due": "gate-b", "owner": "FDE-C"}},
+      "expected": {"operation": "patch", "action_id": "A-FLOW-1", "set": {"due_trigger": "gate-a", "owner": "FDE-C"}},
+      "forbidden_output_fields": ["status", "action", "closure_criteria"]
+    },
+    {
+      "id": "status-missing-observed-at",
+      "input": {"action": {"action_id": "A-FLOW-1", "owner": "FDE-C"}},
+      "expected_error": "LEGACY_EVIDENCE_TIMESTAMP_REQUIRED"
+    },
+    {
+      "id": "meeting-offset-fraction-normalization",
+      "input": "2026-07-24T10:00:00.987+08:00",
+      "expected": "2026-07-24T02:00:00Z"
+    },
+    {
+      "id": "program-action-routing-scope",
+      "input": {"workstream": "program", "affected_workstreams": ["l1-checkout", "l1-payments"]},
+      "expected": {"routing_scope_id": "program", "affected_workstreams": ["l1-checkout", "l1-payments"]}
+    },
+    {
+      "id": "deterministic-action-id",
+      "identity_input": {"source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_path": "meetings/2026-07-24.md", "observed_at": "2026-07-24T02:00:00Z", "routing_scope_id": "program", "action": "Verify payment", "due_trigger": "gate-a"},
+      "expected": "ACT-E9275B647EA3F89E178C"
+    }
+  ],
+  "projection_vectors": [
+    {
+      "id": "registry-refresh-output-not-a-leaf",
+      "publication_paths": ["views/program-status.json", "views/roadmap.json", "views/flow-graph.json", "views/meeting-packs/fde-morning.json", "views/acceptance-readiness.md", "views/cutover-readiness.md", "views/management-panel/index.html", "views/management-panel/current-pointer.json"],
+      "expected_intersection": []
+    },
+    {
+      "id": "meeting-pack-object-by-key",
+      "inputs": [{"scenario": "business-biweekly", "id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, {"scenario": "fde-morning", "id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+      "expected": {"business-biweekly": {"scenario": "business-biweekly", "id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "fde-morning": {"scenario": "fde-morning", "id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+    },
+    {
+      "id": "meeting-pack-duplicate-key",
+      "inputs": [{"scenario": "fde-morning"}, {"scenario": "fde-morning"}],
+      "expected_error": "PANEL_BINDING_COLLISION"
+    },
+    {
+      "id": "complete-generation-envelope",
+      "input_without_identity": {
+        "contract": {"schema_id": "urn:adp:panel-sync-contracts:2026-07-24#generation-envelope-v1", "schema_sha256": "$SCHEMA_SHA256", "registry_sha256": "$REGISTRY_SHA256"},
+        "schema_version": "1.0.0",
+      "fact_generation": 7,
+      "selection_policy_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "physical_workstream_inventory_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "workstream_catalog_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "panel_catalog_id": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "roots": [{"root": "memory", "root_instance_id": "123e4567-e89b-42d3-a456-426614174000"}, {"root": "project", "root_instance_id": "123e4567-e89b-42d3-a456-426614174001"}],
+        "leaf_sources": [{"root": "memory", "root_instance_id": "123e4567-e89b-42d3-a456-426614174000", "path": "actions/action-ledger.md", "category": "fact", "source_kind": "action-ledger", "fingerprint": "sha256:7777777777777777777777777777777777777777777777777777777777777777", "blob_id": "sha256:7777777777777777777777777777777777777777777777777777777777777777", "affects": ["/"]}]
+      },
+      "identity_field": "generation_id",
+      "expected_schema_anchor": "generation-envelope-v1"
+    },
+    {
+      "id": "identity-array-permutation-stable",
+      "left": ["l1-payments", "l1-checkout"],
+      "right": ["l1-checkout", "l1-payments"],
+      "expected_canonical": ["l1-checkout", "l1-payments"]
+    },
+    {
+      "id": "rfc6901-root-pointer",
+      "document": {"": "empty-member", "scenario": "fde-morning"},
+      "root_pointer": "",
+      "empty_member_pointer": "/",
+      "expected_root": {"": "empty-member", "scenario": "fde-morning"},
+      "expected_empty_member": "empty-member"
+    },
+    {
+      "id": "profile-read-inventory-required-kinds",
+      "required": {
+        "state-audit": ["program-baseline", "core-memory-file", "workstream-evidence", "workstream-decision", "workstream-readiness", "effective-config"],
+        "roadmap": ["action-ledger", "baseline-history", "l0-reference"],
+        "meeting-pack": ["selected-physical-wdr", "workstream-evidence", "workstream-decision", "workstream-readiness", "daily-log", "effective-config"]
+      },
+      "panel_forbidden_live_source_kinds": ["action-ledger", "readiness-evidence", "selected-physical-wdr"]
+    },
+    {"id": "registry-dag-derived-complete", "expected": "all-profile-upstream-edges-exact"},
+    {"id": "registry-dag-change-invalidates-every-edge", "expected": "every-edge-reaches-declared-downstream"},
+    {"id": "registry-dag-leaf-change-invalidates-exact-instances", "mutation": "none", "expected": "leaf-instance-closure-exact"},
+    {"id": "registry-dag-one-meeting-instance-invalidates-panel-only", "mutation": "none", "expected": "meeting-instance-panel-only"},
+    {"id": "registry-dag-sibling-meeting-instance-remains-clean", "mutation": "none", "expected": "meeting-sibling-clean"},
+    {"id": "registry-dag-transitive-invalidation-omission-rejected", "mutation": "stop-after-direct", "expected_error": "DAG_INVALIDATION_INCOMPLETE"},
+    {"id": "dependency-enumerator-temp-tree-valid", "expected": "portable-hidden-recursive-symlink-semantics"},
+    {"id": "physical-workstream-inventory-temp-tree-valid", "mutation": "none", "expected": "complete-bidirectional-inventory"},
+    {"id": "physical-workstream-inventory-wdr-without-sidecar-rejected", "mutation": "wdr-without-sidecar", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-sidecar-without-wdr-rejected", "mutation": "sidecar-without-wdr", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-duplicate-identity-rejected", "mutation": "duplicate-physical-identity", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-empty-all-rejected", "mutation": "empty", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-invalid-wdr-rejected", "mutation": "invalid-wdr", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-invalid-sidecar-rejected", "mutation": "invalid-sidecar", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-sidecar-fake-anchor-rejected", "mutation": "sidecar-fake-anchor", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-sidecar-schema-hash-rejected", "mutation": "sidecar-schema-hash", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-sidecar-registry-hash-rejected", "mutation": "sidecar-registry-hash", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "physical-workstream-inventory-sidecar-noncanonical-rejected", "mutation": "sidecar-noncanonical", "expected_error": "PHYSICAL_WORKSTREAM_INVENTORY_INVALID"},
+    {"id": "optional-snapshot-null-enumerates-empty", "expected": "empty"},
+    {"id": "physical-leaf-metadata-conflict-rejected", "expected_error": "DEPENDENCY_IDENTITY_CONFLICT"},
+    {"id": "identity-set-fields-canonical", "mutation": "none", "expected": "all-identity-sets-canonical"},
+    {"id": "identity-set-fields-permutation-rejected", "mutation": "permute-status-fields", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "identity-set-fields-nfc-collision-rejected", "mutation": "nfc-collision", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "identity-set-fields-non-nfc-scalar-rejected", "mutation": "non-nfc-scalar", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "profile-read-set-exact-all", "mutation": "none", "expected": "all-profiles-exact"},
+    {"id": "profile-read-set-missing-rejected", "mutation": "drop-one-declared-read", "expected_error": "DECLARED_DEPENDENCY_UNCONSUMED"},
+    {"id": "profile-read-set-extra-rejected", "mutation": "add-undeclared-read", "expected_error": "UNDECLARED_DEPENDENCY"},
+    {"id": "all-ordering-rules-canonical", "mutation": "none", "expected": "all-registry-rules-accepted"},
+    {"id": "all-ordering-rules-permutation-rejected", "mutation": "reverse-each-rule", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "all-ordering-rules-duplicate-rejected", "mutation": "duplicate-each-rule-key", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "all-ordering-rules-nfc-collision-rejected", "mutation": "nfc-key-collision", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "all-ordering-rules-non-nfc-scalar-rejected", "mutation": "non-nfc-scalar-key", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "all-ordering-rules-non-nfc-composite-rejected", "mutation": "non-nfc-composite-key", "expected_error": "CANONICAL_ORDER_INVALID"},
+    {"id": "all-ordering-rules-eleven-target-numeric-valid", "mutation": "none", "expected": "integer-apply-order-0-through-10"},
+    {"id": "all-ordering-rules-null-key", "mutation": "nullable-key", "expected": "null-precedes-non-null"}
+  ],
+  "semantic_validator_vectors": [
+    {"id": "semantic-validator-dispatch-complete", "mutation": "none", "expected": "all-registered-validators-dispatched"},
+    {"id": "semantic-validator-omission-rejected", "mutation": "omit", "expected_error": "SEMANTIC_VALIDATOR_REGISTRY_INVALID"},
+    {"id": "semantic-validator-addition-rejected", "mutation": "add", "expected_error": "SEMANTIC_VALIDATOR_REGISTRY_INVALID"},
+    {"id": "semantic-validator-algorithm-change-rejected", "mutation": "algorithm", "expected_error": "SEMANTIC_VALIDATOR_REGISTRY_INVALID"},
+    {"id": "semantic-validator-scope-change-rejected", "mutation": "scope", "expected_error": "SEMANTIC_VALIDATOR_REGISTRY_INVALID"},
+    {"id": "semantic-validator-handler-omission-rejected", "mutation": "handler-omission", "expected_error": "SEMANTIC_VALIDATOR_DISPATCH_INCOMPLETE"}
+  ],
+  "runtime_vectors": [
+    {
+      "id": "bootstrap-generation-zero",
+      "fact_state_without_id": {"schema_version": "1.0.0", "fact_generation": 0, "last_transaction_id": null},
+      "panel_state_without_id": {"schema_version": "1.0.0", "panel_generation": 0, "current_pointer_id": null},
+      "expected": "schema-valid-after-contract-and-jcs-id-injection"
+    },
+    {"id": "filesystem-token-hash-id", "input": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expected": "h_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"id": "filesystem-token-command-id", "input": "legacy:A-FLOW-1", "expected": "i_baeed76538e971244ea464e808cb959219ab932a395d6a36799ad3c88c58ef8d"},
+    {"id": "runtime-projection-singleton-path", "generation_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "projection_kind": "program-status", "instance_key": null, "template": "canonical_projection_template", "expected": "views/generations/h_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/projections/i_6ba5ae31019c84da44a922a2bedef003d991f9e3f5d5469f2ecfefbed43c3e49/singleton.json"},
+    {"id": "runtime-projection-keyed-path", "generation_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "projection_kind": "meeting-pack", "instance_key": "fde-morning", "template": "canonical_projection_template", "expected": "views/generations/h_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/projections/i_d67760e067500f47b073a15230c482af7d3d5c7e190e9908f80af2d7cf414538/i_96877ec47f726c00aa65e9e827269701e0d8a6b90109e36f6e62780854e0a7d9.json"},
+    {"id": "runtime-management-panel-path", "generation_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "projection_kind": "management-panel", "instance_key": null, "template": "management_panel_template", "expected": "views/generations/h_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/management-panel/singleton.json"},
+    {"id": "runtime-invalid-generation-rejected", "generation_id": "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "projection_kind": "program-status", "instance_key": null, "template": "canonical_projection_template", "expected_error": "RUNTIME_PATH_INVALID"},
+    {"id": "runtime-non-nfc-instance-rejected", "generation_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "projection_kind": "meeting-pack", "instance_key": "é", "template": "canonical_projection_template", "expected_error": "RUNTIME_PATH_INVALID"},
+    {"id": "windows-colon-path", "input": "journals/fact/legacy:A-FLOW-1", "expected_error": "DEPENDENCY_PATH_UNSAFE"}
+  ],
+  "mutation_semantics_vectors": [
+    {"id": "action-stale-evidence-rejected", "mutation": "action-stale-evidence", "expected_error": "ACTION_MUTATION_INVALID"},
+    {"id": "action-created-after-updated-rejected", "mutation": "action-created-after-updated", "expected_error": "ACTION_MUTATION_INVALID"},
+    {"id": "action-lifecycle-chronology-inversion-rejected", "mutation": "action-lifecycle-inversion", "expected_error": "ACTION_MUTATION_INVALID"},
+    {"id": "wdr-stale-evidence-rejected", "mutation": "wdr-stale-evidence", "expected_error": "WDR_MUTATION_INVALID"},
+    {"id": "wdr-noop-counter-unchanged", "mutation": "wdr-noop-counter", "expected": "valid"},
+    {"id": "wdr-current-change-advances-both-counters", "mutation": "wdr-current-counter", "expected": "valid"},
+    {"id": "wdr-history-change-advances-file-generation-only", "mutation": "wdr-history-counter", "expected": "valid"},
+    {"id": "wdr-manual-and-managed-next-actions-preserved", "mutation": "manual-managed-next-actions", "expected": "valid"},
+    {"id": "wdr-malformed-managed-marker-rejected", "mutation": "malformed-managed-marker", "expected_error": "WDR_MUTATION_INVALID"},
+    {"id": "wdr-duplicate-managed-marker-rejected", "mutation": "duplicate-managed-marker", "expected_error": "WDR_MUTATION_INVALID"},
+    {"id": "wdr-literal-tbd-roundtrip", "mutation": "literal-tbd", "expected": "valid"},
+    {"id": "wdr-managed-summary-delimiter-unicode-encoding", "mutation": "managed-summary-encoding", "expected": "valid"}
+  ],
+  "bootstrap_migration_vectors": [
+    {"id": "bootstrap-absent-ledger-valid", "ledger_format": "absent", "action_flow_preimage": "absent", "mutation": "none", "expected": "valid"},
+    {"id": "bootstrap-legacy12-valid", "ledger_format": "legacy12", "action_flow_preimage": "absent", "mutation": "none", "expected": "valid"},
+    {"id": "bootstrap-legacy20-valid", "ledger_format": "legacy20", "action_flow_preimage": "absent", "mutation": "none", "expected": "valid"},
+    {"id": "bootstrap-brownfield-action-flow-valid", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "none", "expected": "valid"},
+    {"id": "bootstrap-legacy20-all-fields-preserved", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "preservation", "expected": "valid"},
+    {"id": "bootstrap-malformed-ledger-preimage-rejected", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "malformed-ledger", "expected_error": "BOOTSTRAP_MIGRATION_INVALID"},
+    {"id": "bootstrap-ledger-cas-mismatch-rejected", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "ledger-cas", "expected_error": "BOOTSTRAP_MIGRATION_INVALID"},
+    {"id": "bootstrap-wdr-cas-mismatch-rejected", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "wdr-cas", "expected_error": "BOOTSTRAP_MIGRATION_INVALID"},
+    {"id": "bootstrap-action-flow-shape-rejected", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "action-flow-shape", "expected_error": "BOOTSTRAP_MIGRATION_INVALID"},
+    {"id": "bootstrap-missing-created-state-rejected", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "missing-state-target", "expected_error": "BOOTSTRAP_MIGRATION_INVALID"},
+    {"id": "bootstrap-legacy-meeting-history-preserved", "mutation": "legacy-meeting-history", "expected": "valid"},
+    {"id": "bootstrap-mixed-meeting-history-rejected", "mutation": "mixed-meeting-history", "expected_error": "BOOTSTRAP_MIGRATION_INVALID"},
+    {"id": "bootstrap-crash-at-each-target-recoverable", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "crash-matrix", "expected": "valid"},
+    {"id": "bootstrap-repeat-after-commit-rejected", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "repeat-write", "expected_error": "BOOTSTRAP_MIGRATION_INVALID"},
+    {"id": "bootstrap-committed-retry-idempotent", "ledger_format": "legacy20", "action_flow_preimage": "brownfield-v1", "mutation": "idempotent-retry", "expected": "valid"}
+  ],
+  "strict_activation_vectors": [
+    {"id": "strict-open-complete-valid", "surface": "open", "mutation": "none", "expected": "valid"},
+    {"id": "strict-inspect-complete-valid", "surface": "inspect", "mutation": "none", "expected": "valid"},
+    {"id": "strict-publish-complete-valid", "surface": "publish", "mutation": "none", "expected": "valid"},
+    {"id": "strict-production-status-pending-rejected", "mutation": "pending-status", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-missing-attestation-rejected", "mutation": "missing-attestation", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-attestation-id-rejected", "mutation": "attestation-id", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-attestation-path-rejected", "mutation": "attestation-path", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-root-registry-id-rejected", "mutation": "root-registry-id", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-root-rebound-rejected", "mutation": "root-rebound", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-capability-registry-id-rejected", "mutation": "capability-registry-id", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-capability-epoch-rejected", "mutation": "capability-epoch", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-writer-subset-rejected", "mutation": "writer-subset", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-writer-build-changed-rejected", "mutation": "writer-build", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-fence-receipt-changed-rejected", "mutation": "fence-receipt", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-writer-receipt-missing-rejected", "mutation": "writer-receipt-missing", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-writer-receipt-aliased-rejected", "mutation": "writer-receipt-aliased", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-writer-receipt-stale-rejected", "mutation": "writer-receipt-stale", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-capability-missing-rejected", "mutation": "capability-missing", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-capability-revoked-rejected", "mutation": "capability-revoked", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-capability-wrong-scope-rejected", "mutation": "capability-wrong-scope", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-capability-stale-epoch-rejected", "mutation": "capability-stale-epoch", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-lineage-index-missing-rejected", "mutation": "lineage-index-missing", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-lineage-object-missing-rejected", "mutation": "lineage-object-missing", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-lineage-object-extra-rejected", "mutation": "lineage-object-extra", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-lineage-indexed-extra-rejected", "mutation": "lineage-indexed-extra", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-lineage-object-redirected-rejected", "mutation": "lineage-object-redirected", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-lineage-singleton-metadata-rejected", "mutation": "lineage-singleton-metadata", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-lineage-object-tampered-rejected", "mutation": "lineage-object-tampered", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-management-panel-bytes-tampered-rejected", "mutation": "panel-byte-tampered", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-current-pointer-bytes-tampered-rejected", "mutation": "current-pointer-raw-tampered", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-live-lineage-leaf-stale-rejected", "mutation": "lineage-leaf-stale", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-fact-generation-rejected", "mutation": "fact-generation", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-ledger-bytes-rejected", "mutation": "ledger-bytes", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-ledger-state-rejected", "mutation": "ledger-state", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-action-flow-rejected", "mutation": "action-flow", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-wdr-bytes-rejected", "mutation": "wdr-bytes", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-wdr-state-rejected", "mutation": "wdr-state", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-sidecar-rejected", "mutation": "sidecar", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-workstream-omitted-rejected", "mutation": "workstream-omitted", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-refresh-receipt-id-rejected", "mutation": "refresh-receipt-id", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-refresh-diagnostic-snapshot-not-authoritative", "mutation": "refresh-status", "expected": "valid"},
+    {"id": "strict-fact-diagnostic-snapshot-not-authoritative", "mutation": "diagnostic-fact-snapshot", "expected": "valid"},
+    {"id": "strict-ledger-diagnostic-snapshot-not-authoritative", "mutation": "diagnostic-ledger-snapshot", "expected": "valid"},
+    {"id": "strict-wdr-diagnostic-snapshot-not-authoritative", "mutation": "diagnostic-wdr-snapshot", "expected": "valid"},
+    {"id": "strict-sidecar-diagnostic-snapshot-not-authoritative", "mutation": "diagnostic-sidecar-snapshot", "expected": "valid"},
+    {"id": "strict-refresh-receipt-diagnostic-snapshot-not-authoritative", "mutation": "diagnostic-refresh-snapshot", "expected": "valid"},
+    {"id": "strict-publication-receipt-diagnostic-snapshot-not-authoritative", "mutation": "diagnostic-publication-snapshot", "expected": "valid"},
+    {"id": "strict-pointer-diagnostic-snapshot-not-authoritative", "mutation": "diagnostic-pointer-snapshot", "expected": "valid"},
+    {"id": "strict-refresh-fact-generation-rejected", "mutation": "refresh-fact-generation", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-refresh-panel-generation-rejected", "mutation": "refresh-panel-generation", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-refresh-generation-rejected", "mutation": "refresh-generation", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-publication-receipt-id-rejected", "mutation": "publication-receipt-id", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-publication-diagnostic-snapshot-not-authoritative", "mutation": "publication-generation", "expected": "valid"},
+    {"id": "strict-pointer-id-rejected", "mutation": "pointer-id", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-pointer-path-rejected", "mutation": "pointer-path", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-panel-state-rejected", "mutation": "panel-state", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-activation-mode-rejected", "mutation": "activation-mode", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-activation-epoch-rejected", "mutation": "activation-epoch", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-activation-attestation-rejected", "mutation": "activation-attestation", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-stale-attestation-rejected", "mutation": "stale-attestation", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-rollback-invalidates-old-attestation", "mutation": "rollback", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-reenable-new-epoch-valid", "mutation": "reenable", "expected": "valid"},
+    {"id": "strict-manual-status-flip-without-evidence-rejected", "mutation": "manual-flip", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-capability-lifecycle-attempt-rejected", "mutation": "capability-lifecycle-attempt", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-release-evidence-set-missing-rejected", "mutation": "release-set-missing", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-release-evidence-unindexed-receipt-rejected", "mutation": "release-unindexed-receipt", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-release-evidence-blob-missing-rejected", "mutation": "release-blob-missing", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-release-evidence-receipt-path-substitution-rejected", "mutation": "release-receipt-path-substitution", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-activation-binding-mismatch-rejected", "mutation": "activation-binding", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-activation-algorithm-mutable-binding-rejected", "mutation": "activation-algorithm", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-raw-design-registry-substitution-rejected", "mutation": "registry-raw-substitution", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-refresh-source-as-of-mismatch-rejected", "mutation": "source-as-of-refresh-mismatch", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-support-review-current-boundary-valid", "mutation": "none", "evaluation_time": "2026-08-31T23:59:59Z", "expected": "valid"},
+    {"id": "strict-support-review-expired-evidence-rejected", "mutation": "none", "evaluation_time": "2026-09-01T00:00:00Z", "expected_error": "MIGRATION_REQUIRED"},
+    {"id": "strict-trust-root-expired-evidence-rejected", "mutation": "none", "evaluation_time": "2027-01-01T00:00:00Z", "expected_error": "MIGRATION_REQUIRED"}
+  ],
+  "journal_fault_matrix": [
+    {"id": "after-prepared-directory-flush", "fault_after": "prepared-directory-flush", "marker": false, "targets": {"business": "before", "state": "before", "receipt": "before"}, "expected": "rolled-back"},
+    {"id": "after-first-business-replace", "fault_after": "business-target-0-directory-flush", "marker": false, "targets": {"business": "after", "state": "before", "receipt": "before"}, "expected": "rolled-back"},
+    {"id": "after-state-replace", "fault_after": "state-target-directory-flush", "marker": false, "targets": {"business": "after", "state": "after", "receipt": "before"}, "expected": "rolled-back"},
+    {"id": "all-after-before-marker", "fault_after": "receipt-target-directory-flush", "marker": false, "targets": {"business": "after", "state": "after", "receipt": "after"}, "expected": "rolled-forward"},
+    {"id": "after-commit-marker", "fault_after": "committed-marker-directory-flush", "marker": true, "targets": {"business": "after", "state": "after", "receipt": "after"}, "expected": "committed"},
+    {"id": "unknown-uncommitted-bytes", "fault_after": "external-write", "marker": false, "targets": {"business": "unknown", "state": "after", "receipt": "before"}, "expected_error": "CORRUPT_UNCOMMITTED_TRANSACTION"},
+    {"id": "marker-mismatch", "fault_after": "post-commit-corruption", "marker": true, "targets": {"business": "after", "state": "before", "receipt": "after"}, "expected_error": "CORRUPT_COMMITTED_TRANSACTION"},
+    {"id": "first-create-absent-target", "platform": "windows-design-model", "before_sha256": null, "primitive": "durable_create", "expected": "after"},
+    {"id": "created-target-rollback-to-absence", "marker": false, "operation": "create", "before_sha256": null, "after_state": "after", "primitive": "durable_remove_to_tombstone", "expected": "missing"},
+    {"id": "journal-image-locators-and-order", "targets": [
+      {"role": "business", "operation": "replace", "apply_order": 0, "before_image": "journals/fact/i_tx/images/0-before", "after_image": "journals/fact/i_tx/images/0-after"},
+      {"role": "fact-generation", "operation": "replace", "apply_order": 1, "before_image": "journals/fact/i_tx/images/1-before", "after_image": "journals/fact/i_tx/images/1-after"},
+      {"role": "receipt", "operation": "create", "apply_order": 2, "before_image": null, "after_image": "journals/fact/i_tx/images/2-after"}
+    ], "expected_orders": [0, 1, 2]},
+    {"id": "journal-complete-fact-valid", "transaction_kind": "fact", "mutation": "none", "expected": "valid"},
+    {"id": "journal-complete-panel-valid", "transaction_kind": "panel", "mutation": "none", "expected": "valid"},
+    {"id": "journal-panel-wrong-role-rejected", "transaction_kind": "panel", "mutation": "panel-wrong-role", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-prepared-marker-rejected", "transaction_kind": "fact", "mutation": "noncommitted-marker", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-create-image-mismatch-rejected", "transaction_kind": "fact", "mutation": "create-has-before", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-remove-image-mismatch-rejected", "transaction_kind": "fact", "mutation": "remove-has-after", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-duplicate-order-rejected", "transaction_kind": "fact", "mutation": "duplicate-order", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-gapped-order-rejected", "transaction_kind": "fact", "mutation": "gapped-order", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-duplicate-target-rejected", "transaction_kind": "fact", "mutation": "duplicate-target", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-wrong-receipt-path-rejected", "transaction_kind": "fact", "mutation": "wrong-receipt-path", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-repair-receipt-count-valid", "transaction_kind": "repair", "mutation": "none", "expected": "valid"},
+    {"id": "journal-repair-receipt-count-rejected", "transaction_kind": "repair", "mutation": "one-repair-receipt", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-locator-hash-rejected", "transaction_kind": "fact", "mutation": "locator-hash-mismatch", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-foreign-image-locator-rejected", "transaction_kind": "fact", "mutation": "foreign-image-locator", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-parent-alias-locator-rejected", "transaction_kind": "fact", "mutation": "parent-image-locator", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-marker-link-rejected", "transaction_kind": "fact", "mutation": "marker-manifest-mismatch", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-manifest-path-substitution-rejected", "transaction_kind": "fact", "mutation": "manifest-path-substitution", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-terminal-marker-path-substitution-rejected", "transaction_kind": "fact", "mutation": "terminal-marker-path-substitution", "expected_error": "JOURNAL_INVALID"},
+    {"id": "journal-recovery-path-substitution-rejected", "transaction_kind": "fact", "mutation": "recovery-path-substitution", "expected_error": "JOURNAL_INVALID"}
+  ],
+  "receipt_vectors": [
+    {"id": "receipt-not-self-referential", "receipt_fields": ["business_targets", "generation_state_target"], "journal_target_roles": ["business", "fact-generation", "receipt"], "expected_receipt_contains_own_target": false},
+    {"id": "rollback-receipt-is-journal-local", "prepared_targets": ["business", "state", "receipt"], "recovery_receipt_target": false, "expected": "original-before-images-restored"},
+    {"id": "fact-receipt-owner-only-action-delta", "initiator": {"producer_id": "adp-status-sync", "capability_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "capability_epoch": 3, "principal_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "action_delta": {"action_id": "A-FLOW-1", "operation": "patch", "before_revision": 4, "after_revision": 5, "changed_fields": ["owner"], "evidence_fingerprints": ["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]}, "expected": "attributed-presence-preserving"},
+    {"id": "fact-attribution-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-wdr-status-valid", "command_kind": "wdr-status", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-wdr-meeting-history-valid", "command_kind": "wdr-meeting-history", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-wdr-owned-section-valid", "command_kind": "wdr-owned-section", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-wdr-refresh-actions-valid", "command_kind": "wdr-refresh-actions", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-wdr-create-valid", "command_kind": "wdr-create", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-action-create-valid", "command_kind": "action-create", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-wdr-identity-status-phase-valid", "command_kind": "wdr-identity", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-risk-intent-reauthorized-valid", "command_kind": "wdr-risk-reauthorized", "mutation": "none", "expected": "valid"},
+    {"id": "fact-attribution-risk-direct-wdr-rejected", "command_kind": "wdr-risk-direct", "mutation": "none", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-wdr-denied-field-rejected", "command_kind": "wdr-status", "mutation": "denied-field", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-wdr-denied-section-rejected", "command_kind": "wdr-owned-section", "mutation": "denied-section", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {
+      "id": "capability-id-known-answer",
+      "record_without_identity": {"producer_id": "adp-status-sync", "principal_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "status": "active", "allowed_operations": ["create", "patch"], "allowed_fields": ["refresh_actions"], "allowed_sections": ["identity"]},
+      "expected_preimage": "{\"allowed_fields\":[\"refresh_actions\"],\"allowed_operations\":[\"create\",\"patch\"],\"allowed_sections\":[\"identity\"],\"principal_id\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"producer_id\":\"adp-status-sync\",\"status\":\"active\"}",
+      "expected_digest": "sha256:16ec338339ee2baab901af8cd98410e3415e3405acf344cfabb8b28dbe961819"
+    },
+    {"id": "fact-attribution-forged-producer-rejected", "mutation": "forged-producer", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-forged-capability-rejected", "mutation": "forged-capability", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-forged-principal-rejected", "mutation": "forged-principal", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-runtime-principal-mismatch-rejected", "mutation": "runtime-principal-mismatch", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-runtime-capability-bytes-tamper-rejected", "mutation": "runtime-capability-bytes-tamper", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-meeting-history-outer-command-mismatch-rejected", "command_kind": "wdr-meeting-history", "mutation": "meeting-history-outer-command-mismatch", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-command-fingerprint-rejected", "mutation": "command-fingerprint", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-wrong-target-rejected", "mutation": "wrong-target", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-generation-jump-rejected", "mutation": "generation-jump", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-revision-jump-rejected", "mutation": "revision-jump", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-unequal-record-digests-rejected", "mutation": "unequal-record-digests", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "fact-attribution-forged-record-digest-rejected", "mutation": "forged-record-digest", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-denied-operation-rejected", "mutation": "denied-operation", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-denied-field-rejected", "mutation": "denied-field", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-duplicate-producer-rejected", "mutation": "duplicate-producer", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-duplicate-capability-rejected", "mutation": "duplicate-capability", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-receipt-target-hash-rejected", "mutation": "receipt-target-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-receipt-target-path-rejected", "mutation": "receipt-target-path", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-before-state-rejected", "mutation": "before-state", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-fake-command-anchor-rejected", "mutation": "fake-command-anchor", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-command-schema-hash-rejected", "mutation": "command-schema-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-command-registry-hash-rejected", "mutation": "command-registry-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-capability-contract-anchor-rejected", "mutation": "capability-contract-anchor", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-before-state-contract-hash-rejected", "mutation": "before-state-contract-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-journal-contract-hash-rejected", "mutation": "journal-contract-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-marker-contract-hash-rejected", "mutation": "marker-contract-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-receipt-contract-hash-rejected", "mutation": "receipt-contract-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-proof-contract-hash-rejected", "mutation": "proof-contract-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-wrong-root-rejected", "mutation": "wrong-root", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-wrong-operation-rejected", "mutation": "wrong-operation", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-missing-ledger-state-rejected", "mutation": "missing-ledger-state-target", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-missing-flow-index-rejected", "mutation": "missing-flow-target", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-extra-target-rejected", "mutation": "extra-business-target", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-stale-revision-rejected", "command_kind": "wdr-status", "mutation": "stale-wdr-revision", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-stale-file-generation-rejected", "command_kind": "wdr-status", "mutation": "stale-file-generation", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-before-byte-substitution-rejected", "command_kind": "wdr-status", "mutation": "before-byte-substitution", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-after-byte-substitution-rejected", "command_kind": "wdr-status", "mutation": "after-byte-substitution", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-create-as-replace-rejected", "command_kind": "wdr-create", "mutation": "create-as-replace", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-replace-as-create-rejected", "command_kind": "wdr-status", "mutation": "replace-as-create", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-create-missing-sidecar-rejected", "command_kind": "wdr-create", "mutation": "missing-sidecar-target", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-missing-sidecar-rejected", "command_kind": "wdr-refresh-actions", "mutation": "missing-sidecar-target", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-project-status-permission-rejected", "command_kind": "wdr-refresh-actions", "mutation": "denied-section", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-next-actions-permission-rejected", "command_kind": "wdr-refresh-actions", "mutation": "denied-section-last", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-owner-rebound-rejected", "mutation": "rebound-owner", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-status-rebound-rejected", "mutation": "rebound-status", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-text-rebound-rejected", "mutation": "rebound-action", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-due-rebound-rejected", "mutation": "rebound-due", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-closure-rebound-rejected", "mutation": "rebound-closure", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-route-rebound-rejected", "mutation": "rebound-route", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-affected-rebound-rejected", "mutation": "rebound-affected", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-action-terminal-reopen-rejected", "command_kind": "action-terminal", "mutation": "reopen-terminal", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-stale-ledger-fingerprint-rejected", "command_kind": "wdr-refresh-actions", "mutation": "refresh-stale-ledger-fingerprint", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-stale-ledger-revision-rejected", "command_kind": "wdr-refresh-actions", "mutation": "refresh-stale-ledger-revision", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-missing-active-rejected", "command_kind": "wdr-refresh-actions", "mutation": "refresh-missing-active", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-extra-action-rejected", "command_kind": "wdr-refresh-actions", "mutation": "refresh-extra-action", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-refresh-read-bytes-rejected", "command_kind": "wdr-refresh-actions", "mutation": "refresh-read-bytes", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-roadmap-valid", "command_kind": "wdr-roadmap", "mutation": "none", "expected": "valid"}
+    ,{"id": "fact-attribution-wdr-roadmap-heading-injection-rejected", "command_kind": "wdr-roadmap", "mutation": "roadmap-heading-injection", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-wdr-roadmap-owned-section-substitution-rejected", "command_kind": "wdr-roadmap", "mutation": "roadmap-owned-section-substitution", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+    ,{"id": "fact-attribution-fully-rebound-forged-authority-rejected", "mutation": "fully-rebound-forged-graph", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-risk-flow-attribution-valid", "command_kind": "owned-risk-flow", "mutation": "none", "expected": "valid"},
+    {"id": "owned-decision-attribution-valid", "command_kind": "owned-decision", "mutation": "none", "expected": "valid"},
+    {"id": "owned-risk-flow-forged-producer-rejected", "command_kind": "owned-risk-flow", "mutation": "forged-producer", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-decision-wrong-target-rejected", "command_kind": "owned-decision", "mutation": "wrong-target", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-risk-flow-schema-substitution-rejected", "command_kind": "owned-risk-flow", "mutation": "command-schema-hash", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-decision-extra-target-rejected", "command_kind": "owned-decision", "mutation": "extra-business-target", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-risk-flow-stale-generation-rejected", "command_kind": "owned-risk-flow", "mutation": "before-state", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-decision-wrong-root-rejected", "command_kind": "owned-decision", "mutation": "wrong-root", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-risk-flow-denied-operation-rejected", "command_kind": "owned-risk-flow", "mutation": "denied-operation", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "owned-decision-after-byte-substitution-rejected", "command_kind": "owned-decision", "mutation": "after-byte-substitution", "expected_error": "FACT_ATTRIBUTION_INVALID"}
+  ],
+  "legacy_wdr_update_vectors": [
+    {"id": "legacy-wdr-free-text-history-only", "wdr_update": "Checkout is blocked by sandbox access", "typed_status_payload": null, "expected_history_records": 1, "expected_current_mutations": 0, "expected_gap": "LEGACY_STATUS_INTENT_REQUIRED"},
+    {"id": "legacy-wdr-additive-typed-status", "wdr_update": "Checkout is blocked by sandbox access", "typed_status_payload": {"set": {"blockers": {"mode": "add", "values": ["sandbox access"]}}}, "expected_history_records": 1, "expected_current_mutations": 1, "expected_gap": null}
+  ],
+  "meeting_plan_vectors": [
+    {"id": "meeting-plan-intent-only-carrier-valid", "mutation": "none", "expected": "valid"},
+    {"id": "meeting-plan-carrier-omitted-rejected", "mutation": "omit-carrier", "expected_error": "MEETING_PLAN_INTENT_CARRIER_INVALID"},
+    {"id": "meeting-plan-carrier-extra-intent-rejected", "mutation": "extra-intent", "expected_error": "MEETING_PLAN_INTENT_CARRIER_INVALID"},
+    {"id": "meeting-plan-carrier-duplicate-intent-rejected", "mutation": "duplicate-intent", "expected_error": "MEETING_PLAN_INTENT_CARRIER_INVALID"},
+    {"id": "meeting-plan-carrier-wrong-meeting-rejected", "mutation": "wrong-meeting", "expected_error": "MEETING_PLAN_INTENT_CARRIER_INVALID"},
+    {"id": "meeting-plan-carrier-evidence-substitution-rejected", "mutation": "evidence-substitution", "expected_error": "MEETING_PLAN_INTENT_CARRIER_INVALID"}
+  ],
+  "status_intent_vectors": [
+    {"id": "status-intent-application-valid", "mutation": "none", "expected": "valid"},
+    {"id": "status-intent-accepted-id-omission-rejected", "mutation": "omit-accepted-id", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"},
+    {"id": "status-intent-field-omission-rejected", "mutation": "omit-field", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"},
+    {"id": "status-intent-field-substitution-rejected", "mutation": "substitute-field", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"},
+    {"id": "status-intent-evidence-drop-rejected", "mutation": "drop-evidence", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"},
+    {"id": "status-intent-cross-workstream-binding-rejected", "mutation": "cross-workstream", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"},
+    {"id": "status-intent-conflict-rejected", "mutation": "conflict", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"},
+    {"id": "status-intent-command-order-rejected", "mutation": "wrong-command-order", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"},
+    {"id": "status-intent-split-same-workstream-rejected", "mutation": "split-same-workstream", "expected_error": "STATUS_INTENT_APPLICATION_INVALID"}
+  ],
+  "program_status_wdr_vectors": [
+    {"id": "program-status-current-from-wdr-valid", "mutation": "none", "expected": "valid"},
+    {"id": "program-status-stale-progress-rejected", "mutation": "stale-progress", "expected_error": "PROGRAM_STATUS_WDR_INVALID"},
+    {"id": "program-status-stale-blockers-rejected", "mutation": "stale-blockers", "expected_error": "PROGRAM_STATUS_WDR_INVALID"},
+    {"id": "program-status-stale-phase-rejected", "mutation": "stale-phase", "expected_error": "PROGRAM_STATUS_WDR_INVALID"},
+    {"id": "program-status-lineage-substitution-rejected", "mutation": "lineage", "expected_error": "PROGRAM_STATUS_WDR_INVALID"},
+    {"id": "program-status-wdr-current-change-reaches-panel", "mutation": "wdr-change-panel", "expected": "panel-output-changed"}
+  ],
+  "drift_content_vectors": [
+    {"id": "drift-content-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "drift-content-owner-false-green-rejected", "mutation": "owner", "expected_error": "DRIFT_CONTENT_INVALID"},
+    {"id": "drift-content-text-false-green-rejected", "mutation": "action", "expected_error": "DRIFT_CONTENT_INVALID"},
+    {"id": "drift-content-due-false-green-rejected", "mutation": "due", "expected_error": "DRIFT_CONTENT_INVALID"},
+    {"id": "drift-content-status-false-green-rejected", "mutation": "status", "expected_error": "DRIFT_CONTENT_INVALID"},
+    {"id": "drift-content-missing-active-false-green-rejected", "mutation": "missing-active", "expected_error": "DRIFT_CONTENT_INVALID"},
+    {"id": "drift-content-retained-terminal-false-green-rejected", "mutation": "retained-terminal", "expected_error": "DRIFT_CONTENT_INVALID"},
+    {"id": "drift-content-fingerprint-substitution-rejected", "mutation": "fingerprint", "expected_error": "DRIFT_CONTENT_INVALID"},
+    {"id": "drift-content-reported-drift-valid", "mutation": "reported-owner", "expected": "valid"},
+    {"id": "drift-wdr-only-missing-marker-action-id-valid", "mutation": "wdr-missing-marker", "expected": "valid", "expected_action_id": "A-FLOW-1", "expected_drift_kind": "missing-from-wdr"},
+    {"id": "drift-wdr-only-orphan-marker-action-id-valid", "mutation": "wdr-orphan-marker", "expected": "valid", "expected_action_id": "A-ORPHAN-1", "expected_drift_kind": "orphan-in-wdr"},
+    {"id": "drift-wdr-only-content-marker-action-id-valid", "mutation": "wdr-content-marker", "expected": "valid", "expected_action_id": "A-FLOW-1", "expected_drift_kind": "content-mismatch"},
+    {"id": "drift-empty-ledger-wdr-marker-action-id-valid", "mutation": "empty-ledger-wdr-marker", "expected": "valid", "expected_action_id": "A-ORPHAN-1", "expected_drift_kind": "orphan-in-wdr"}
+  ],
+  "finding_identity_vectors": [
+    {"id": "finding-id-ignores-source-path-and-line", "mutation": "diagnostic-locator", "expected": "stable"}
+  ],
+  "drift_vectors": [
+    {"id": "drift-selection-coverage-valid", "selected_workstreams": ["l1-checkout"], "workstreams": [{"workstream_id": "l1-checkout", "status": "in-sync"}], "overall_status": "in-sync", "expected": "valid"},
+    {"id": "drift-false-green-missing-row", "selected_workstreams": ["l1-checkout"], "workstreams": [], "overall_status": "in-sync", "expected_error": "DRIFT_COVERAGE_INVALID"},
+    {"id": "drift-sidecar-change-invalidates", "before": {"sidecar_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "after": {"sidecar_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "expected_required_projection": "action-projection-drift-verdict"}
+  ],
+  "panel_binding_vectors": [
+    {"id": "panel-binding-catalog-to-schema", "mutation": "none", "expected": "schema-valid-composed-panel"},
+    {"id": "panel-v1-lossless-compatibility", "mutation": "none", "compatibility_fixture_path": "_bmad-output/planning-artifacts/architecture/architecture-bmad-ai-delivery-pmo-2026-07-24/contracts/fixtures/PANEL-V1-COMPATIBILITY.json", "expected": "all-v1-consumer-pointers-and-current-fields-preserved"},
+    {"id": "panel-v1-history-omission-rejected", "mutation": "omit-v1-history", "expected_error": "PANEL_V1_COMPATIBILITY_INVALID"},
+    {"id": "panel-v1-board-omission-rejected", "mutation": "omit-v1-board", "expected_error": "PANEL_V1_COMPATIBILITY_INVALID"},
+    {"id": "panel-selected-drift-blocks-fresh", "mutation": "selected-drift", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-selected-missing-blocks-fresh", "mutation": "selected-missing", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-selected-malformed-blocks-fresh", "mutation": "selected-malformed", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-blocked-audit-blocks-fresh", "mutation": "blocked-audit", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-freshness-eligibility-disagreement", "mutation": "freshness-disagreement", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-selection-omission-rejected", "mutation": "selection-omitted", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-selection-policy-mismatch-rejected", "mutation": "selection-policy-mismatch", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-stale-v1-visible-model-rejected", "mutation": "stale-v1-visible", "expected_error": "PANEL_V1_COMPOSITION_INVALID"},
+    {"id": "panel-current-workstream-fields-use-v2-surface", "mutation": "current-fields-live", "expected": "v2-current-surface-valid"},
+    {"id": "panel-program-status-overlay-mismatch-rejected", "mutation": "program-status-overlay-mismatch", "expected_error": "PANEL_V1_COMPOSITION_INVALID"},
+    {"id": "panel-same-generation-upstream-mismatch-rejected", "mutation": "same-generation-upstream-mismatch", "expected_error": "PANEL_BINDING_INVALID"},
+    {"id": "panel-required-producer-omission-rejected", "mutation": "omit-state-audit-producer", "expected_error": "PROJECTION_CARDINALITY_INVALID"},
+    {"id": "panel-all-catalog-subset-rejected", "mutation": "all-catalog-subset", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-uncataloged-generation-pair-rejected", "mutation": "uncataloged-generation-pair", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-inventory-row-omitted-from-catalog-rejected", "mutation": "inventory-catalog-omission", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-extra-catalog-row-rejected", "mutation": "catalog-extra-row", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-generation-wdr-without-sidecar-rejected", "mutation": "generation-wdr-without-sidecar", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-generation-sidecar-without-wdr-rejected", "mutation": "generation-sidecar-without-wdr", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-duplicate-physical-identity-rejected", "mutation": "duplicate-physical-identity", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-empty-all-rejected", "mutation": "empty-all", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-catalog-id-mismatch-rejected", "mutation": "panel-catalog-id", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-outer-drift-invalid-rejected", "mutation": "invalid-outer:action-projection-drift-verdict", "expected_error": "PROJECTION_PAYLOAD_INVALID"},
+    {"id": "panel-outer-audit-invalid-rejected", "mutation": "invalid-outer:state-audit", "expected_error": "PROJECTION_PAYLOAD_INVALID"},
+    {"id": "panel-outer-status-invalid-rejected", "mutation": "invalid-outer:program-status", "expected_error": "PROJECTION_PAYLOAD_INVALID"},
+    {"id": "panel-outer-roadmap-invalid-rejected", "mutation": "invalid-outer:roadmap", "expected_error": "PROJECTION_PAYLOAD_INVALID"},
+    {"id": "panel-outer-flow-invalid-rejected", "mutation": "invalid-outer:flow-graph", "expected_error": "PROJECTION_PAYLOAD_INVALID"},
+    {"id": "panel-outer-meeting-invalid-rejected", "mutation": "invalid-outer:meeting-pack", "expected_error": "PROJECTION_PAYLOAD_INVALID"},
+    {"id": "panel-outer-panel-invalid-rejected", "mutation": "invalid-outer:management-panel", "expected_error": "PROJECTION_PAYLOAD_INVALID"},
+    {"id": "panel-envelope-payload-hash-rejected", "mutation": "payload-hash-mismatch", "expected_error": "PROJECTION_LINEAGE_INVALID"},
+    {"id": "panel-envelope-generation-rejected", "mutation": "generation-mismatch", "expected_error": "PROJECTION_LINEAGE_INVALID"},
+    {"id": "panel-envelope-manifest-receipt-rejected", "mutation": "manifest-receipt-mismatch", "expected_error": "PROJECTION_LINEAGE_INVALID"},
+    {"id": "panel-lineage-missing-read-rejected", "mutation": "lineage-missing-read", "expected_error": "PROJECTION_LINEAGE_INVALID"},
+    {"id": "panel-lineage-extra-read-rejected", "mutation": "lineage-extra-read", "expected_error": "PROJECTION_LINEAGE_INVALID"},
+    {"id": "panel-physical-attestation-fact-generation-rejected", "mutation": "physical-attestation-fact-generation", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-physical-attestation-root-rejected", "mutation": "physical-attestation-root", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-physical-attestation-workstreams-omitted-rejected", "mutation": "physical-attestation-workstreams-omitted", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-physical-attestation-missing-rejected", "mutation": "physical-attestation-missing", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-physical-attestation-contract-hash-rejected", "mutation": "physical-attestation-contract-hash", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-selection-policy-contract-hash-rejected", "mutation": "selection-policy-contract-hash", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-generation-contract-hash-rejected", "mutation": "generation-contract-hash", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-embedded-contract-hash-rejected", "mutation": "panel-embedded-contract-hash", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-source-as-of-mismatch-rejected", "mutation": "source-as-of-mismatch", "expected_error": "PANEL_PUBLICATION_INELIGIBLE"},
+    {"id": "panel-drift-ledger-state-missing-read-rejected", "mutation": "drift-ledger-state-missing-read", "expected_error": "PROJECTION_LINEAGE_INVALID"},
+    {"id": "panel-drift-ledger-state-extra-read-rejected", "mutation": "drift-ledger-state-extra-read", "expected_error": "PROJECTION_LINEAGE_INVALID"}
+  ],
+  "panel_v1_composition_vectors": [
+    {"id": "panel-v1-compose-base-byte-exact", "mutation": "none", "expected": "byte-exact"},
+    {"id": "panel-v1-compose-current-fields-independent", "mutation": "current-fields-live", "expected": "byte-exact"},
+    {"id": "panel-v1-compose-overlay-change-detected", "mutation": "program-status-overlay-mismatch", "expected": "model-mismatch"},
+    {"id": "panel-v1-compose-model-tamper-detected", "mutation": "stale-v1-visible", "expected": "model-mismatch"}
+  ],
+  "panel_v2_consumer_vectors": [
+    {"id": "panel-v2-consumer-base-render-valid", "mutation": "none", "expected": "valid"},
+    {"id": "panel-v2-consumer-current-fields-visible", "mutation": "current-fields-live", "expected": "visible-change"},
+    {"id": "panel-v2-consumer-legacy-model-independent", "mutation": "legacy-model-only", "expected": "current-view-unchanged"},
+    {"id": "panel-v2-consumer-missing-current-field-rejected", "mutation": "missing-current-field", "expected_error": "PANEL_V2_CONSUMER_INVALID"},
+    {"id": "panel-v2-consumer-exact-traced-read-set-valid", "mutation": "none", "expected": "valid"},
+    {"id": "panel-v2-consumer-duplicate-row-rejected", "mutation": "duplicate-row", "expected_error": "PANEL_V2_CONSUMER_INVALID"},
+    {"id": "panel-v2-consumer-non-nfc-row-rejected", "mutation": "non-nfc-row", "expected_error": "PANEL_V2_CONSUMER_INVALID"},
+    {"id": "panel-v2-consumer-normalized-collision-rejected", "mutation": "normalized-collision", "expected_error": "PANEL_V2_CONSUMER_INVALID"},
+    {"id": "panel-v2-consumer-html-metacharacters-escaped", "mutation": "html-metacharacters", "expected": "escaped"}
+  ],
+  "panel_publication_vectors": [
+    {"id": "panel-publication-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "panel-publication-omitted-projection-rejected", "mutation": "omit-projection", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"},
+    {"id": "panel-publication-wrong-role-rejected", "mutation": "wrong-role", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"},
+    {"id": "panel-publication-pointer-generation-rejected", "mutation": "pointer-generation", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"},
+    {"id": "panel-publication-state-generation-rejected", "mutation": "state-generation-jump", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"},
+    {"id": "panel-publication-selection-rejected", "mutation": "receipt-selection", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"},
+    {"id": "panel-publication-target-mismatch-rejected", "mutation": "receipt-target-mismatch", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"},
+    {"id": "panel-publication-noncommit-marker-rejected", "mutation": "noncommitted-marker", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"},
+    {"id": "panel-publication-generation-jump-rejected", "mutation": "panel-generation-jump", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-redirect-pointer-rejected", "mutation": "redirect-pointer", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-redirect-state-rejected", "mutation": "redirect-state", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-redirect-receipt-rejected", "mutation": "redirect-receipt", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-before-pointer-rejected", "mutation": "substitute-before-pointer", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-before-state-rejected", "mutation": "substitute-before-state", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-pointer-not-last-rejected", "mutation": "pointer-not-last", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-lineage-index-target-missing-rejected", "mutation": "lineage-index-target-missing", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-lineage-object-target-missing-rejected", "mutation": "lineage-object-target-missing", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-journal-adjunct-tamper-rejected", "mutation": "journal-adjunct-tamper", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-marker-adjunct-tamper-rejected", "mutation": "marker-adjunct-tamper", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-publication-receipt-adjunct-tamper-rejected", "mutation": "receipt-adjunct-tamper", "expected_error": "PANEL_PUBLICATION_GRAPH_INVALID"}
+    ,{"id": "panel-first-publication-valid", "mutation": "first-publication", "expected": "valid"}
+    ,{"id": "panel-first-publication-idempotent", "mutation": "first-publication-idempotent", "expected": "valid"}
+  ],
+  "nested_payload_vectors": [
+    {"id": "program-status-progress-v3-lossless", "projection_kind": "program-status", "payload_pointer": "/progress", "fixture_path": "skills/adp-program-status/assets/fixtures/progress-v3/golden-measurable-boundary.json", "expected": "external-schema-valid-and-byte-preserved"},
+    {"id": "program-status-flow-state-v1-compatible", "projection_kind": "program-status", "payload_pointer": "/flow_state", "instance": {"flow_state_schema_version": "1.0.0", "baseline_id": "baseline-1", "baseline_revision": 1, "as_of": "2026-07-24T02:00:00Z", "node_states": [], "compatibility": {"strategy": "version-required", "migration_error_code": "ADP-FLOW-STATE-MIGRATION-REQUIRED"}}, "expected": "external-schema-valid-and-byte-preserved"}
+  ],
+  "release_gate_vectors": [
+    {"id": "release-design-mock-authenticated-native-pair-accepted", "mutation": "none", "expected": "accepted"},
+    {"id": "release-raw-production-trust-unprovisioned-rejected", "mutation": "production-trust-unprovisioned", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-subset-rejected", "mutation": "passed-subset", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-duplicate-implementation-rejected", "mutation": "duplicate-implementation", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-duplicate-build-rejected", "mutation": "duplicate-build", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-platform-substitution-rejected", "mutation": "platform-substitution", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-evidence-class-omission-rejected", "mutation": "evidence-class-omission", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-extra-vector-rejected", "mutation": "extra-vector", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-artifact-hash-rejected", "mutation": "artifact-hash", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-result-id-rejected", "mutation": "result-id", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-unknown-signer-rejected", "mutation": "unknown-signer", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-signature-tamper-rejected", "mutation": "signature-tamper", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-log-tamper-rejected", "mutation": "log-tamper", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-replay-rejected", "mutation": "replay", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-build-mismatch-rejected", "mutation": "build-mismatch", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-runtime-3-9-rejected", "mutation": "runtime-3.9", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-runtime-node-18-rejected", "mutation": "runtime-node-18", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-runtime-node-20-rejected", "mutation": "runtime-node-20", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-runtime-node-21-rejected", "mutation": "runtime-node-21", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-runtime-node-23-rejected", "mutation": "runtime-node-23", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-runtime-node-24-accepted", "mutation": "runtime-node-24", "expected": "accepted"},
+    {"id": "release-runtime-node-25-rejected", "mutation": "runtime-node-25", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-contention-failure-rejected", "mutation": "lock-contention", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-crash-release-failure-rejected", "mutation": "lock-crash-release", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-order-failure-rejected", "mutation": "lock-order", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-timeout-failure-rejected", "mutation": "lock-timeout", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-upgrade-failure-rejected", "mutation": "lock-upgrade", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-primitive-substitution-rejected", "mutation": "lock-primitive", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-profile-substitution-rejected", "mutation": "lock-profile", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-lock-log-missing-rejected", "mutation": "lock-log-missing", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"},
+    {"id": "release-python-support-review-deadline-rejected", "mutation": "python-review-deadline", "expected_error": "CONFORMANCE_EVIDENCE_INCOMPLETE"}
+  ],
+  "repair_vectors": [
+    {
+      "id": "cross-field-action-set-valid",
+      "finding_action_ids": ["A-FLOW-1", "A-FLOW-2"],
+      "command_action_ids": ["A-FLOW-1", "A-FLOW-2"],
+      "read_set_action_ids": ["A-FLOW-1", "A-FLOW-2"],
+      "expected": "valid"
+    },
+    {
+      "id": "cross-field-action-set-mismatch",
+      "finding_action_ids": ["A-FLOW-1"],
+      "command_action_ids": ["A-FLOW-2"],
+      "read_set_action_ids": ["A-FLOW-2"],
+      "expected_error": "REPAIR_BATCH_INVALID"
+    },
+    {
+      "id": "orphan-action-expected-absent",
+      "finding_action_ids": ["A-ORPHAN-1"],
+      "command_action_ids": ["A-ORPHAN-1"],
+      "read_records": [{"action_id": "A-ORPHAN-1", "expected_present": false, "revision": null}],
+      "ledger_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "expected": "valid"
+    },
+    {
+      "id": "duplicate-action-read-record-rejected",
+      "read_records": [
+        {"action_id": "A-FLOW-1", "expected_present": true, "revision": 2},
+        {"action_id": "A-FLOW-1", "expected_present": true, "revision": 3}
+      ],
+      "expected_error": "REPAIR_BATCH_INVALID"
+    },
+    {
+      "id": "repair-sort-key-vs-group-key",
+      "findings": [
+        {"finding_id": "F-2", "workflow": "adp-status-sync", "workstream_id": "l1-checkout", "operation": "refresh_actions"},
+        {"finding_id": "F-1", "workflow": "adp-status-sync", "workstream_id": "l1-checkout", "operation": "refresh_actions"}
+      ],
+      "expected_group_count": 1,
+      "expected_finding_order": ["F-1", "F-2"]
+    },
+    {
+      "id": "nonce-reserve-consume-cas",
+      "events": ["unused", "reserved", "consumed"],
+      "replay_from": "consumed",
+      "expected_error": "REPAIR_TOKEN_REPLAY"
+    },
+    {
+      "id": "two-batches-second-fails-and-retries",
+      "ordered_batches": ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "events": [
+        {"batch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "event": "dry-run", "token": "token-a", "outcome": "applicable"},
+        {"batch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "event": "apply", "token": "token-a", "outcome": "committed", "nonce": "consumed"},
+        {"batch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "event": "dry-run", "token": "token-b1", "outcome": "applicable"},
+        {"batch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "event": "apply", "token": "token-b1", "outcome": "rolled-back", "nonce": "invalidated", "error": "SOURCE_CHANGED_DURING_REPAIR"},
+        {"batch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "event": "dry-run", "token": "token-b2", "outcome": "applicable"},
+        {"batch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "event": "apply", "token": "token-b2", "outcome": "committed", "nonce": "consumed"}
+      ],
+      "expected_committed_batches": ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "expected_reused_tokens": []
+    },
+    {"id": "repair-graph-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "repair-graph-non-first-batch-valid", "mutation": "none", "expected": "valid"},
+    {"id": "repair-graph-dry-run-blocked-valid", "mutation": "blocked", "expected": "valid"},
+    {"id": "repair-graph-reserved-invalidated-valid", "mutation": "rolled-back", "expected": "valid"},
+    {"id": "repair-graph-orphan-null-revision-valid", "mutation": "orphan-null-revision", "expected": "valid"},
+    {"id": "repair-graph-dangling-batch-rejected", "mutation": "dangling-finding-batch", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-reversed-link-rejected", "mutation": "batch-omits-finding", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-audit-mismatch-rejected", "mutation": "audit-mismatch", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-action-union-rejected", "mutation": "action-union-mismatch", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-duplicate-source-rejected", "mutation": "duplicate-source", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-duplicate-wdr-rejected", "mutation": "duplicate-wdr", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-command-wdr-revision-rejected", "mutation": "wdr-revision-mismatch", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-token-batch-rejected", "mutation": "cross-batch-token", "expected_error": "REPAIR_TOKEN_INVALID"},
+    {"id": "repair-graph-token-binding-rejected", "mutation": "binding-digest-mismatch", "expected_error": "REPAIR_TOKEN_INVALID"},
+    {"id": "repair-graph-recomputed-substitution-rejected", "mutation": "recomputed-substitution", "expected_error": "REPAIR_TOKEN_INVALID"},
+    {"id": "repair-graph-overlong-expiry-rejected", "mutation": "overlong-expiry", "expected_error": "REPAIR_TOKEN_INVALID"},
+    {"id": "repair-graph-expired-apply-rejected", "mutation": "expired-apply", "expected_error": "REPAIR_TOKEN_INVALID"},
+    {"id": "repair-graph-invalid-nonce-transition-rejected", "mutation": "invalid-nonce-transition", "expected_error": "REPAIR_TOKEN_INVALID"},
+    {"id": "repair-graph-journal-nonce-mismatch-rejected", "mutation": "journal-nonce-mismatch", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-journal-fact-receipt-mismatch-rejected", "mutation": "journal-fact-receipt-mismatch", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-repair-receipt-mismatch-rejected", "mutation": "repair-receipt-mismatch", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-noncommitted-marker-rejected", "mutation": "noncommitted-marker", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-null-batch-retains-action-ids-valid", "mutation": "none", "expected": "valid"},
+    {"id": "repair-graph-committed-non-nfc-scope-rejected", "mutation": "scope-non-nfc", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-blocked-non-nfc-scope-rejected", "mutation": "scope-non-nfc", "fixture_outcome": "blocked", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-rolled-back-non-nfc-scope-rejected", "mutation": "scope-non-nfc", "fixture_outcome": "rolled-back", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-normalized-scope-collision-rejected", "mutation": "scope-nfc-collision", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-finding-action-ref-missing-rejected", "mutation": "finding-action-ref-missing", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-finding-action-ref-extra-rejected", "mutation": "finding-action-ref-extra", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-finding-action-ref-duplicate-rejected", "mutation": "finding-action-ref-duplicate", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-audit-contract-hash-rejected", "mutation": "audit-contract-hash", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-fact-receipt-contract-hash-rejected", "mutation": "fact-receipt-contract-hash", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-split-group-rejected", "mutation": "split-group", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-overlapping-batches-rejected", "mutation": "overlapping-batches", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-orphan-batch-rejected", "mutation": "orphan-batch", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-group-mismatch-rejected", "mutation": "group-mismatch", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-blocked-finding-without-batch-rejected", "mutation": "blocked-without-batch", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-nonce-path-substitution-rejected", "mutation": "nonce-path-substitution", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-absent-claim-present-ledger-row-rejected", "mutation": "absent-claim-present-row", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-present-claim-wrong-revision-rejected", "mutation": "wrong-ledger-revision", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-invented-drift-action-rejected", "mutation": "invented-drift-action", "expected_error": "REPAIR_BATCH_INVALID"},
+    {"id": "repair-graph-attempt-transaction-identity-rejected", "mutation": "attempt-transaction-id", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-business-marker-binding-rejected", "mutation": "business-marker-binding", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {"id": "repair-graph-recovery-binding-rejected", "mutation": "recovery-binding", "fixture_outcome": "rolled-back", "expected_error": "REPAIR_TRANSACTION_INVALID"},
+    {
+      "id": "repair-two-batches-cas-partial-retry",
+      "execution": "complete-wire-graphs-with-restart",
+      "expected": "valid"
+    }
+  ],
+  "refresh_vectors": [
+    {
+      "id": "producer-blocked-has-no-output",
+      "status": "blocked",
+      "output": null,
+      "error_code": "UNDECLARED_DEPENDENCY",
+      "expected": "valid"
+    },
+    {
+      "id": "dirty-run-retry-cursor",
+      "status": "dirty",
+      "nodes": [
+        {"instance_key": "state-audit", "disposition": "produced", "output": "present"},
+        {"instance_key": "program-status", "disposition": "blocked", "output": null}
+      ],
+      "retry_from_instance_key": "program-status",
+      "expected": "valid"
+    },
+    {
+      "id": "live-inspect-source-change",
+      "mutation": "source-drift",
+      "expected_outcome": "stale",
+      "expected_error": "SOURCE_DRIFT"
+    },
+    {"id": "live-inspect-restart-fresh", "mutation": "none", "expected_outcome": "fresh", "expected_error": null},
+    {"id": "live-inspect-normal-mutation-refresh-n-plus-one-fresh", "mutation": "stale-activation-snapshot", "expected_outcome": "fresh", "expected_error": null},
+    {"id": "live-inspect-fact-generation-drift", "mutation": "fact-generation-drift", "expected_outcome": "stale", "expected_error": "SOURCE_DRIFT"},
+    {"id": "live-inspect-lock-unavailable", "mutation": "lock-unavailable", "expected_outcome": "unverifiable", "expected_error": "FACT_READ_LOCK_UNAVAILABLE"},
+    {"id": "live-inspect-source-unreadable", "mutation": "source-unreadable", "expected_outcome": "unverifiable", "expected_error": "SOURCE_UNREADABLE"},
+    {"id": "live-inspect-lineage-index-missing", "mutation": "lineage-index-missing", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-lineage-object-missing", "mutation": "lineage-object-missing", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-panel-bytes-tampered", "mutation": "panel-byte-tampered", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-pointer-bytes-tampered", "mutation": "pointer-byte-tampered", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-extra-leaf-stale", "mutation": "extra-leaf", "expected_outcome": "stale", "expected_error": "SOURCE_DRIFT"},
+    {"id": "live-inspect-missing-leaf-stale", "mutation": "missing-leaf", "expected_outcome": "stale", "expected_error": "SOURCE_DRIFT"},
+    {"id": "live-inspect-pending-registry-migration-required", "mutation": "pending-registry", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-activation-rollback-migration-required", "mutation": "activation-rollback", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-activation-epoch-migration-required", "mutation": "activation-epoch", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-capability-epoch-migration-required", "mutation": "capability-epoch", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-attestation-replacement-migration-required", "mutation": "attestation-replacement", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-writer-build-change-migration-required", "mutation": "writer-build-change", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-design-only-evidence-migration-required", "mutation": "design-only-evidence", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-trusted-clock-unavailable", "mutation": "none", "clock_available": false, "expected_outcome": "unverifiable", "expected_error": "TRUSTED_CLOCK_UNAVAILABLE"},
+    {"id": "live-inspect-root-registry-substitution", "mutation": "root-registry-substitution", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-ledger-substitution", "mutation": "ledger-substitution", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-wdr-substitution", "mutation": "wdr-substitution", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-sidecar-substitution", "mutation": "sidecar-substitution", "expected_outcome": "migration-required", "expected_error": "STRICT_ACTIVATION_REQUIRED"},
+    {"id": "live-inspect-refresh-receipt-substitution", "mutation": "refresh-receipt-substitution", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-publication-receipt-substitution", "mutation": "publication-receipt-substitution", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-read-set-extra-writer", "mutation": "read-set-extra-writer", "expected_error": "LIVE_INSPECT_INVALID"},
+    {"id": "live-inspect-read-set-omission-rejected", "mutation": "omit-one", "expected_error": "LIVE_INSPECT_INVALID"},
+    {"id": "live-inspect-read-set-duplicate-rejected", "mutation": "duplicate", "expected_error": "LIVE_INSPECT_INVALID"},
+    {"id": "live-inspect-read-set-wrong-root-rejected", "mutation": "wrong-root", "expected_error": "LIVE_INSPECT_INVALID"},
+    {"id": "live-inspect-read-set-alias-rejected", "mutation": "alias", "expected_error": "LIVE_INSPECT_INVALID"},
+    {"id": "live-inspect-read-set-unconsumed-rejected", "mutation": "unconsumed", "expected_error": "LIVE_INSPECT_INVALID"},
+    {"id": "live-inspect-lineage-root-instance-substitution", "mutation": "lineage-root-instance-substitution", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-lineage-cardinality-substitution", "mutation": "lineage-cardinality-substitution", "expected_outcome": "migration-required", "expected_error": "PUBLISHED_LINEAGE_INVALID"},
+    {"id": "live-inspect-only-refresh-status-write", "mutation": "extra-write", "expected_error": "LIVE_INSPECT_INVALID"}
+  ],
+  "release_transition_vectors": [
+    {"id": "release-transition-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "release-transition-before-generation-cas-rejected", "mutation": "before-generation", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-before-set-cas-rejected", "mutation": "before-set", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-after-set-binding-rejected", "mutation": "after-set", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-journal-binding-rejected", "mutation": "journal-id", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-target-path-rejected", "mutation": "target-path", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-trusted-clock-unavailable", "mutation": "clock-unavailable", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-support-review-expired", "mutation": "none", "evaluation_time": "2026-09-01T00:00:00Z", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-root-expired", "mutation": "none", "evaluation_time": "2027-01-01T00:00:00Z", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-transition-recovery-uncommitted", "mutation": "recovery-uncommitted", "crash_after": 2, "expected": "valid"},
+    {"id": "release-transition-recovery-committed", "mutation": "recovery-committed", "crash_after": 2, "expected": "valid"},
+    {"id": "release-transition-recovery-all-boundaries-uncommitted", "mutation": "recovery-all-uncommitted", "expected": "valid"},
+    {"id": "release-transition-recovery-all-boundaries-committed", "mutation": "recovery-all-committed", "expected": "valid"},
+    {"id": "release-history-receipt-byte-tamper-rejected", "mutation": "history-receipt-tamper", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-history-blob-byte-tamper-rejected", "mutation": "history-blob-tamper", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-history-journal-byte-tamper-rejected", "mutation": "history-journal-tamper", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-history-marker-byte-tamper-rejected", "mutation": "history-marker-tamper", "expected_error": "RELEASE_TRANSITION_INVALID"},
+    {"id": "release-history-nonmonotonic-acceptance-rejected", "mutation": "history-chronology", "expected_error": "RELEASE_TRANSITION_INVALID"}
+  ],
+  "activation_transition_vectors": [
+    {"id": "activation-transition-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "activation-transition-order-rejected", "mutation": "operation-order", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-stale-activation-cas-rejected", "mutation": "activation-cas", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-stale-capability-cas-rejected", "mutation": "capability-cas", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-authority-rejected", "mutation": "authority", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-approval-order-rejected", "mutation": "approval-order", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-journal-target-rejected", "mutation": "target-path", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-refresh-binding-rejected", "mutation": "refresh-binding", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-attestation-binding-rejected", "mutation": "attestation-binding", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-attestation-preimage-cas-rejected", "mutation": "attestation-preimage-cas", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-predecessor-rebind-rejected", "mutation": "predecessor-rebind", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-disconnected-chain-rejected", "mutation": "disconnected-chain", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-forged-lifecycle-receipt-rejected", "mutation": "forged-lifecycle-receipt", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-broken-lifecycle-prefix-rejected", "mutation": "broken-lifecycle-prefix", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-first-lifecycle-replace-rejected", "mutation": "first-lifecycle-replace", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-uncommitted-receipt-index-rejected", "mutation": "uncommitted-lifecycle-receipt", "expected_error": "ACTIVATION_TRANSITION_INVALID"},
+    {"id": "activation-transition-recovery-uncommitted", "mutation": "recovery-uncommitted", "step": 4, "crash_after": 1, "expected": "valid"},
+    {"id": "activation-transition-recovery-committed", "mutation": "recovery-committed", "step": 4, "crash_after": 1, "expected": "valid"},
+    {"id": "activation-transition-recovery-all-boundaries-uncommitted", "mutation": "recovery-all-uncommitted", "expected": "valid"},
+    {"id": "activation-transition-recovery-all-boundaries-committed", "mutation": "recovery-all-committed", "expected": "valid"}
+  ],
+  "source_time_vectors": [
+    {"id": "source-time-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "source-time-panel-mismatch-rejected", "mutation": "panel", "expected_error": "SOURCE_AS_OF_MISMATCH"},
+    {"id": "source-time-audit-mismatch-rejected", "mutation": "audit", "expected_error": "SOURCE_AS_OF_MISMATCH"},
+    {"id": "source-time-status-mismatch-rejected", "mutation": "status", "expected_error": "SOURCE_AS_OF_MISMATCH"},
+    {"id": "source-time-roadmap-mismatch-rejected", "mutation": "roadmap", "expected_error": "SOURCE_AS_OF_MISMATCH"},
+    {"id": "source-time-meeting-mismatch-rejected", "mutation": "meeting", "expected_error": "SOURCE_AS_OF_MISMATCH"},
+    {"id": "source-time-flow-state-mismatch-rejected", "mutation": "flow-state", "expected_error": "SOURCE_AS_OF_MISMATCH"},
+    {"id": "source-time-flow-scope-mismatch-rejected", "mutation": "flow-scope", "expected_error": "SOURCE_AS_OF_MISMATCH"},
+    {"id": "source-time-refresh-receipt-mismatch-rejected", "mutation": "refresh", "expected_error": "SOURCE_AS_OF_MISMATCH"}
+  ],
+  "snapshot_authority_vectors": [
+    {"id": "snapshot-authority-complete-valid", "mutation": "none", "expected": "valid"},
+    {"id": "snapshot-authority-future-source-time-rejected", "mutation": "future-source-time", "expected_error": "SNAPSHOT_TIME_INVALID"},
+    {"id": "snapshot-authority-older-than-maximum-fact-rejected", "mutation": "older-than-maximum-fact", "expected_error": "SNAPSHOT_TIME_INVALID"},
+    {"id": "snapshot-authority-request-after-lock-rejected", "mutation": "request-after-lock", "expected_error": "SNAPSHOT_TIME_INVALID"},
+    {"id": "snapshot-authority-request-binding-substitution-rejected", "mutation": "request-binding", "expected_error": "SNAPSHOT_TIME_INVALID"},
+    {"id": "snapshot-authority-policy-lock-id-substitution-rejected", "mutation": "policy-lock-id", "expected_error": "SNAPSHOT_TIME_INVALID"},
+    {"id": "snapshot-authority-policy-snapshot-id-substitution-rejected", "mutation": "policy-snapshot-id", "expected_error": "SNAPSHOT_TIME_INVALID"},
+    {"id": "snapshot-authority-refresh-snapshot-id-substitution-rejected", "mutation": "refresh-snapshot-id", "expected_error": "SNAPSHOT_TIME_INVALID"},
+    {"id": "snapshot-authority-registry-binding-omission-rejected", "mutation": "registry-binding-omission", "expected_error": "SNAPSHOT_TIME_INVALID"}
+  ],
+  "fact_replay_vectors": [
+    {"id": "fact-replay-same-fingerprint-noop", "mutation": "none", "expected_outcome": "noop"},
+    {"id": "fact-replay-command-fingerprint-conflict", "mutation": "fingerprint-conflict", "expected_outcome": "conflict"},
+    {"id": "fact-replay-new-command", "mutation": "new-command", "expected_outcome": "new"},
+    {"id": "fact-replay-missing-receipt-rejected", "mutation": "missing-receipt", "expected_outcome": "invalid"},
+    {"id": "fact-replay-tampered-receipt-rejected", "mutation": "tampered-receipt", "expected_outcome": "invalid"},
+    {"id": "fact-replay-wrong-receipt-path-rejected", "mutation": "wrong-receipt-path", "expected_outcome": "invalid"},
+    {"id": "fact-replay-wrong-receipt-hash-rejected", "mutation": "wrong-receipt-hash", "expected_outcome": "invalid"},
+    {"id": "fact-replay-sequence-gap-rejected", "mutation": "sequence-gap", "expected_outcome": "invalid"},
+    {"id": "fact-replay-duplicate-command-id-rejected", "mutation": "duplicate-command-id", "expected_outcome": "invalid"}
+  ],
+  "intent_outbox_vectors": [
+    {"id": "intent-outbox-meeting-fact-atomic-valid", "scenario": "meeting", "mutation": "none", "expected": "valid"},
+    {"id": "intent-outbox-checkpoint-fact-atomic-valid", "scenario": "checkpoint", "mutation": "none", "expected": "valid"},
+    {"id": "intent-outbox-checkpoint-status-intents-capability-required", "scenario": "checkpoint", "mutation": "denied-status-intents-capability", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "intent-outbox-risk-fact-atomic-valid", "scenario": "risk", "mutation": "none", "expected": "valid"},
+    {"id": "intent-outbox-risk-status-intents-capability-required", "scenario": "risk", "mutation": "denied-status-intents-capability", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "intent-outbox-risk-decision-fact-atomic-valid", "scenario": "risk-decision", "mutation": "none", "expected": "valid"},
+    {"id": "intent-outbox-risk-decision-missing-intent-rejected", "scenario": "risk-decision", "mutation": "missing-command-intent", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-status-sync-consume-atomic-valid", "scenario": "status-consume", "mutation": "none", "expected": "valid"},
+    {"id": "intent-outbox-status-sync-consumed-intent-ids-capability-required", "scenario": "status-consume", "mutation": "denied-consumed-intent-ids-capability", "expected_error": "FACT_ATTRIBUTION_INVALID"},
+    {"id": "intent-outbox-exact-producer-intent-digest-rejected", "scenario": "meeting", "mutation": "intent-digest-substitution", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-missing-producer-intent-rejected", "scenario": "meeting", "mutation": "missing-command-intent", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-aggregate-omitted-intent-rejected", "scenario": "status-consume", "mutation": "omitted-consumed-intent", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-aggregate-extra-intent-rejected", "scenario": "status-consume", "mutation": "extra-consumed-intent", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-aggregate-terminal-intent-rejected", "scenario": "status-consume", "mutation": "terminal-consumed-intent", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-aggregate-cross-workstream-rejected", "scenario": "status-consume", "mutation": "cross-workstream-consumed-intent", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-extra-same-workstream-pending-rejected", "scenario": "status-consume", "mutation": "extra-same-workstream-pending", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-required-target-missing-rejected", "scenario": "meeting", "mutation": "missing-target", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-emitted-status-substitution-rejected", "scenario": "meeting", "mutation": "emitted-status", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-outbox-consumed-receipt-substitution-rejected", "scenario": "status-consume", "mutation": "consumed-receipt", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-convergence-pending-recomputed-valid", "scenario": "pending", "mutation": "none", "expected": "valid"},
+    {"id": "intent-convergence-unsupported-failed-state-rejected", "scenario": "failed", "mutation": "none", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-convergence-invented-pending-id-rejected", "scenario": "pending", "mutation": "invented-id", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-convergence-omitted-pending-id-rejected", "scenario": "pending", "mutation": "omitted-id", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "intent-convergence-consumed-receipt-missing-rejected", "scenario": "consumed", "mutation": "missing-consumed-receipt", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "panel-eligibility-pending-intent-blocks-fresh", "scenario": "eligibility-pending", "mutation": "none", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "panel-eligibility-failed-intent-blocks-fresh", "scenario": "eligibility-failed", "mutation": "none", "expected_error": "INTENT_OUTBOX_INVALID"},
+    {"id": "panel-ineligible-pending-intent-consistent", "scenario": "eligibility-pending", "mutation": "mark-ineligible", "expected": "valid"}
+  ],
+  "publication_recovery_vectors": [
+    {"id": "first-publication-crash-before-lineage-index-rolls-back", "cut": "before-lineage-index", "committed": false, "expected": "valid"},
+    {"id": "first-publication-crash-before-pointer-rolls-back", "cut": "before-pointer", "committed": false, "expected": "valid"},
+    {"id": "first-publication-committed-all-targets-rolls-forward", "cut": "all-targets", "committed": true, "expected": "valid"}
+  ],
+  "publication_replay_vectors": [
+    {"id": "first-publication-idempotent-replay-direct", "mutation": "idempotent", "expected": "valid"},
+    {"id": "first-publication-fresh-process-replay-direct", "mutation": "fresh-process", "expected": "valid"}
+  ],
+  "platform_vectors": [
+    {"id": "posix-symlink", "platform": "posix-design-model", "object_type": "symlink", "expected_error": "DEPENDENCY_PATH_UNSAFE"},
+    {"id": "windows-reparse", "platform": "windows-design-model", "object_type": "reparse-point", "expected_error": "DEPENDENCY_PATH_UNSAFE"},
+    {"id": "durability-capability-missing", "platform": "any", "capability": false, "operation": "apply", "expected_error": "DURABILITY_UNAVAILABLE"}
+  ]
+}

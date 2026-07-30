@@ -48,7 +48,7 @@ RECORD = """# Workstream Delivery Record
 - Risks: Acceptance date may slip
 - Dependencies: l2-payments
 - Scope or change notes: TBD
-- Next actions: ACT-20260710-001 confirm callback owner
+- Next actions: [action_id:ACT-20260710-001] FDE-A: Confirm callback owner (due: 2026-07-12)
 - Last status sync: 2026-07-09
 
 ## Cross-Workstream Links
@@ -169,7 +169,8 @@ class RenderRoadmapTests(unittest.TestCase):
         )
         (memory_root / "workstreams" / "l1-checkout" / "delivery-record.md").write_text(RECORD, encoding="utf-8")
         self.write_program_status(memory_root, baseline, "2026-07-10")
-        (memory_root / "actions" / "action-ledger.md").write_text(
+        ledger_path = memory_root / "actions" / "action-ledger.md"
+        ledger_path.write_text(
             "\n".join(
                 [
                     "# Action Ledger",
@@ -178,6 +179,65 @@ class RenderRoadmapTests(unittest.TestCase):
                     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
                     "| ACT-20260710-001 | open | FDE-A | l1-checkout | l1-checkout | Confirm callback owner | meetings/2026-07-10.md#A1 | Meeting follow-up | 2026-07-12 | Owner confirmed | 2026-07-10 | adp-status-sync |",
                 ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        ledger_fingerprint = "sha256:" + hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+        (memory_root / "actions" / "action-ledger.state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0.0",
+                    "ledger_revision": 1,
+                    "ledger_fingerprint": ledger_fingerprint,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        record_path = memory_root / "workstreams" / "l1-checkout" / "delivery-record.md"
+        record_fingerprint = "sha256:" + hashlib.sha256(record_path.read_bytes()).hexdigest()
+        (record_path.parent / "delivery-record.state.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0.0",
+                    "wdr_revision": 1,
+                    "file_generation": 1,
+                    "wdr_fingerprint": record_fingerprint,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (record_path.parent / "action-projection.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0.0",
+                    "workstream_id": "l1-checkout",
+                    "ledger_fingerprint": ledger_fingerprint,
+                    "ledger_revision": 1,
+                    "wdr_revision": 1,
+                    "file_generation": 1,
+                    "actions": [
+                        {
+                            "action_id": "ACT-20260710-001",
+                            "owner": "FDE-A",
+                            "action": "Confirm callback owner",
+                            "due_trigger": "2026-07-12",
+                            "status": "open",
+                            "action_revision": 1,
+                            "routing_scope_id": "l1-checkout",
+                            "affected_workstreams": ["l1-checkout"],
+                            "rendered_summary": (
+                                "[action_id:ACT-20260710-001] FDE-A: "
+                                "Confirm callback owner (due: 2026-07-12)"
+                            ),
+                        }
+                    ],
+                },
+                indent=2,
             )
             + "\n",
             encoding="utf-8",

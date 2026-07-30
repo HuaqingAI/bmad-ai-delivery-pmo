@@ -262,11 +262,25 @@ class ConsumeProgramStatusTests(unittest.TestCase):
             result = json.loads(completed.stdout)
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["panel_journey"]["owning_workflow"], "adp-management-panel")
+            self.assertEqual(result["panel_journey"]["owning_workflow"], "adp-panel-refresh")
             self.assertEqual(result["panel_journey"]["operation"], "refresh")
             self.assertEqual(result["panel_journey"]["status"], "route-required")
-            self.assertEqual(result["panel_journey"]["explanation"]["overall_status"], "off-plan")
+            self.assertEqual(result["mode"], "direct-workflow-route")
+            self.assertNotIn("canonical_status", result)
             self.assertEqual(cursor.read_bytes(), before)
+            self.assertEqual(result["writes_performed"], [])
+
+    def test_panel_refresh_does_not_require_canonical_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            (project_root / "_bmad-output/adp/memory").mkdir(parents=True)
+
+            completed = self.run_script(project_root, "--intent", "panel-refresh")
+            result = json.loads(completed.stdout)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["panel_journey"]["owning_workflow"], "adp-panel-refresh")
+            self.assertEqual(result["panel_journey"]["status"], "route-required")
             self.assertEqual(result["writes_performed"], [])
 
     def test_panel_open_reads_manifest_and_explains_requested_meeting_view(self) -> None:
@@ -287,6 +301,7 @@ class ConsumeProgramStatusTests(unittest.TestCase):
 
             journey = result["panel_journey"]
             self.assertEqual(journey["operation"], "open")
+            self.assertEqual(journey["owning_workflow"], "adp-panel-refresh")
             self.assertEqual(journey["panel_id"], panel["panel_id"])
             self.assertNotIn(":", Path(panel["immutable_bundle"]).name)
             self.assertEqual(journey["open_hash"], "#v=1&view=fde-morning&mode=quantitative-progress")
@@ -334,6 +349,7 @@ class ConsumeProgramStatusTests(unittest.TestCase):
             )
             journey = json.loads(completed.stdout)["panel_journey"]
             self.assertEqual(journey["operation"], "archive")
+            self.assertEqual(journey["owning_workflow"], "adp-management-panel")
             self.assertEqual(journey["distribution_profile"], "shareable-summary")
             self.assertEqual(journey["official_association"]["status"], "pending-successful-meeting-sync")
             self.assertEqual(journey["official_association"]["owning_workflow"], "adp-meeting-sync")

@@ -6,7 +6,8 @@
 
 [workflow]
 
-# --- Universal defaults. Merge: scalars override, arrays append. ---
+# --- Merge: last scalar wins; tables deep-merge; table-array entries replace or
+# append by code/id; other arrays append. Apply base, team, then personal. ---
 activation_steps_prepend = []
 activation_steps_append = []
 persistent_facts = ["file:{project-root}/**/project-context.md"]
