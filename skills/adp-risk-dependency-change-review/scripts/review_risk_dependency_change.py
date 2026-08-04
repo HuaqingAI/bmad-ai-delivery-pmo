@@ -92,6 +92,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workstream", action="append", default=[], help="Workstream id to include. Repeatable.")
     parser.add_argument("--dry-run", action="store_true", help="Report findings without writing derived files.")
     parser.add_argument("--packet-title", default="", help="Business Decision Packet title.")
+    parser.add_argument(
+        "--update-packet",
+        help="Existing Business Decision Packet to update in place; relative paths resolve from the ADP memory root.",
+    )
     parser.add_argument("--packet-background", default="", help="Business Decision Packet background.")
     parser.add_argument("--packet-question", default="", help="Unresolved business question.")
     parser.add_argument("--packet-option", action="append", default=[], help="Decision option. Repeatable.")
@@ -1193,11 +1197,48 @@ def render_dependency_map(entries: list[dict[str, str]], generated_at: str, mess
     return "\n".join(rows) + "\n"
 
 
-def render_packet(args: argparse.Namespace, generated_at: str, message) -> str:
-    title = args.packet_title or args.packet_question or message("risk.business_decision")
-    options = args.packet_option or ["TBD"]
-    impacts = args.packet_impact or ["TBD"]
-    workstreams = args.packet_workstream or ["TBD"]
+def packet_section(lines: list[str], config_module: Any, key: str) -> list[str]:
+    for locale in ("en", "zh"):
+        values = section(lines, config_module.message(key, locale))
+        if values:
+            return values
+    return []
+
+
+def existing_packet_values(path: Path, config_module: Any) -> dict[str, Any]:
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+
+    def scalar(key: str) -> str:
+        return "\n".join(line.strip() for line in packet_section(lines, config_module, key) if line.strip()).strip()
+
+    def items(key: str) -> list[str]:
+        return [clean_bullet(line) for line in packet_section(lines, config_module, key) if line.strip().startswith(("- ", "* "))]
+
+    title = next((line[2:].strip() for line in lines if line.startswith("# ")), "")
+    return {
+        "title": title,
+        "background": scalar("risk.background"),
+        "question": scalar("risk.decision_needed"),
+        "options": items("risk.options"),
+        "impacts": items("risk.impacts"),
+        "recommendation": scalar("risk.recommendation"),
+        "deadline": scalar("risk.deadline_trigger"),
+        "workstreams": items("risk.affected_workstreams"),
+        "owner": scalar("risk.requested_owner"),
+    }
+
+
+def render_packet(
+    args: argparse.Namespace,
+    generated_at: str,
+    message,
+    existing: dict[str, Any] | None = None,
+) -> str:
+    previous = existing or {}
+    title = args.packet_title or previous.get("title") or args.packet_question or message("risk.business_decision")
+    options = args.packet_option or previous.get("options") or ["TBD"]
+    impacts = args.packet_impact or previous.get("impacts") or ["TBD"]
+    workstreams = args.packet_workstream or previous.get("workstreams") or ["TBD"]
     return "\n".join(
         [
             f"# {title}",
@@ -1206,11 +1247,11 @@ def render_packet(args: argparse.Namespace, generated_at: str, message) -> str:
             "",
             f"## {message('risk.background')}",
             "",
-            args.packet_background or "TBD",
+            args.packet_background or previous.get("background") or "TBD",
             "",
             f"## {message('risk.decision_needed')}",
             "",
-            args.packet_question or "TBD",
+            args.packet_question or previous.get("question") or "TBD",
             "",
             f"## {message('risk.options')}",
             "",
@@ -1222,11 +1263,11 @@ def render_packet(args: argparse.Namespace, generated_at: str, message) -> str:
             "",
             f"## {message('risk.recommendation')}",
             "",
-            args.packet_recommendation or "TBD",
+            args.packet_recommendation or previous.get("recommendation") or "TBD",
             "",
             f"## {message('risk.deadline_trigger')}",
             "",
-            args.packet_deadline or "TBD",
+            args.packet_deadline or previous.get("deadline") or "TBD",
             "",
             f"## {message('risk.affected_workstreams')}",
             "",
@@ -1234,7 +1275,7 @@ def render_packet(args: argparse.Namespace, generated_at: str, message) -> str:
             "",
             f"## {message('risk.requested_owner')}",
             "",
-            args.packet_owner or "TBD",
+            args.packet_owner or previous.get("owner") or "TBD",
             "",
             f"## {message('risk.closure_rule')}",
             "",
@@ -1265,6 +1306,21 @@ def unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"could not find available filename for {path}")
+
+
+def existing_packet_path(memory_root: Path, raw_path: str) -> Path:
+    packet_root = (memory_root / "decisions" / "business-decision-packets").resolve()
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = memory_root / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(packet_root)
+    except ValueError as exc:
+        raise ValueError("--update-packet must stay inside decisions/business-decision-packets") from exc
+    if resolved.suffix.lower() != ".md" or not resolved.is_file():
+        raise ValueError(f"--update-packet must identify an existing Markdown packet: {resolved}")
+    return resolved
 
 
 def main() -> int:
@@ -1302,6 +1358,7 @@ def main() -> int:
                 args.packet_deadline,
                 args.packet_owner,
                 args.packet_workstream,
+                args.update_packet,
             ]
         )
         if incompatible:
@@ -1339,12 +1396,24 @@ def main() -> int:
     write_text(risk_flow_path, json.dumps(risk_flow_contract(risks), ensure_ascii=False, indent=2, sort_keys=True) + "\n", args.dry_run)
 
     packet_path = None
-    if args.packet_title or args.packet_question:
+    packet_operation = None
+    if args.update_packet:
+        try:
+            packet = existing_packet_path(memory_root, args.update_packet)
+            previous_packet = existing_packet_values(packet, config_module)
+        except (OSError, ValueError) as exc:
+            emit({"ok": False, "error": str(exc)}, args.output)
+            return 2
+        write_text(packet, render_packet(args, generated_at, message, previous_packet), args.dry_run)
+        packet_path = str(packet)
+        packet_operation = "updated"
+    elif args.packet_title or args.packet_question:
         title = args.packet_title or args.packet_question
         packet_name = f"{generated_at[:10]}-{slugify(title)}.md"
         packet = unique_path(memory_root / "decisions" / "business-decision-packets" / packet_name)
         write_text(packet, render_packet(args, generated_at, message), args.dry_run)
         packet_path = str(packet)
+        packet_operation = "created"
 
     result = {
         "ok": True,
@@ -1358,6 +1427,7 @@ def main() -> int:
         "risk_flow_path": str(risk_flow_path),
         "baseline_revision": current_revision,
         "business_decision_packet_path": packet_path,
+        "business_decision_packet_operation": packet_operation,
         "counts": {
             "risk_entries": len(risks),
             "dependency_entries": len(dependencies),

@@ -363,6 +363,66 @@ class ReviewRiskDependencyChangeTests(unittest.TestCase):
             self.assertTrue(Path(first["business_decision_packet_path"]).exists())
             self.assertTrue(Path(second["business_decision_packet_path"]).exists())
 
+    def test_updates_existing_packet_without_creating_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            created = run_script(
+                project,
+                "--packet-title",
+                "Refund Scope Approval",
+                "--packet-question",
+                "Should refunds be included in alpha scope?",
+                "--packet-option",
+                "Include refunds now",
+                "--packet-recommendation",
+                "Defer refunds",
+                "--packet-owner",
+                "Business lead",
+            )
+            packet = Path(created["business_decision_packet_path"])
+            relative_packet = packet.resolve().relative_to(memory.resolve())
+
+            updated = run_script(
+                project,
+                "--update-packet",
+                str(relative_packet),
+                "--packet-deadline",
+                "Before the 2026-08-15 business review",
+                "--packet-owner",
+                "Portfolio lead",
+            )
+
+            self.assertEqual(Path(updated["business_decision_packet_path"]), packet)
+            self.assertEqual(updated["business_decision_packet_operation"], "updated")
+            self.assertEqual(len(list(packet.parent.glob("*.md"))), 1)
+            text = packet.read_text(encoding="utf-8")
+            self.assertIn("Should refunds be included in alpha scope?", text)
+            self.assertIn("Include refunds now", text)
+            self.assertIn("Defer refunds", text)
+            self.assertIn("Before the 2026-08-15 business review", text)
+            self.assertIn("Portfolio lead", text)
+            self.assertNotIn("Business lead", text)
+
+    def test_update_packet_rejects_missing_or_outside_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            memory = make_memory(project)
+            make_workstream(memory, "alpha")
+            outside = project / "outside.md"
+            outside.write_text("# Outside\n", encoding="utf-8")
+
+            outside_result = run_script_failure(project, "--update-packet", str(outside))
+            missing_result = run_script_failure(
+                project,
+                "--update-packet",
+                "decisions/business-decision-packets/missing.md",
+            )
+
+            self.assertIn("must stay inside", outside_result["error"])
+            self.assertIn("existing Markdown packet", missing_result["error"])
+
     def test_empty_memory_reports_gap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

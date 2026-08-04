@@ -312,6 +312,130 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 1)
             self.assertIn("action projection drift", planned["blocked_reasons"][0])
 
+    def test_repaired_facts_make_prior_drift_audit_stale(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = self.scaffold(root)
+            ledger = memory / "actions/action-ledger.md"
+            workstream = memory / "workstreams/l1-checkout"
+            ledger.parent.mkdir(parents=True)
+            workstream.mkdir(parents=True)
+            ledger.write_text("# Action ledger\n", encoding="utf-8")
+            wdr = workstream / "delivery-record.md"
+            wdr_state = workstream / "delivery-record.state.json"
+            sidecar = workstream / "action-projection.json"
+            wdr.write_text("# Delivery record\n", encoding="utf-8")
+            wdr_state.write_text("{}\n", encoding="utf-8")
+            sidecar.write_text("{}\n", encoding="utf-8")
+            audit_path = memory / "audits/2026-07-30/input-audit.json"
+            audit_path.parent.mkdir(parents=True)
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "audit_type": "input",
+                        "scenario": "global",
+                        "counts": {"action_projection_drift": 1},
+                        "action_projection_drift": {
+                            "ledger_fingerprint": module.file_fingerprint(ledger),
+                            "rows": [
+                                {
+                                    "workstream_id": "l1-checkout",
+                                    "wdr_fingerprint": module.file_fingerprint(wdr),
+                                    "wdr_state_fingerprint": module.file_fingerprint(wdr_state),
+                                    "sidecar_fingerprint": module.file_fingerprint(sidecar),
+                                }
+                            ],
+                        },
+                        "repair_contract": {
+                            "findings": [
+                                {
+                                    "kind": "action-projection-drift",
+                                    "action_ids": ["ACT-001"],
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            current = module.detect(root.resolve(), memory.resolve(), fixture=True)
+            self.assertFalse(current["drift_audit_stale"])
+            self.assertEqual(current["drift_count"], 1)
+
+            ledger.write_text("# Repaired action ledger\n", encoding="utf-8")
+            repaired = module.detect(root.resolve(), memory.resolve(), fixture=True)
+
+            self.assertTrue(repaired["drift_audit_stale"])
+            self.assertEqual(repaired["drift_count"], 0)
+            self.assertEqual(repaired["drift_action_ids"], [])
+            self.assertEqual(repaired["repair_batches"], [])
+            self.assertEqual(repaired["blocked_reasons"], [])
+
+    def test_fact_repair_supersedes_source_stale_dirty_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = self.scaffold(root)
+            first = self.plan(root)
+            first_path = Path(first["plan_path"])
+            dirty = json.loads(first_path.read_text(encoding="utf-8"))
+            dirty["status"] = "dirty"
+            dirty["retry_from_instance_key"] = "management-panel"
+            dirty["nodes"][0].update({"status": "blocked", "error": "stale fact input"})
+            first_path.write_text(json.dumps(dirty), encoding="utf-8")
+            status_path = memory / "state/panel-refresh-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status.update(
+                {
+                    "current_run_id": first["refresh_id"],
+                    "current_status": "dirty",
+                    "retry_from_instance_key": "stale-retry-node",
+                }
+            )
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            workspace_marker = (
+                memory.parent
+                / ".adp-panel-refresh-staging"
+                / first["refresh_id"]
+                / "failed-node.txt"
+            )
+            workspace_marker.parent.mkdir(parents=True)
+            workspace_marker.write_text("preserve evidence\n", encoding="utf-8")
+
+            repaired_fact = memory / "actions/action-ledger.md"
+            repaired_fact.parent.mkdir(parents=True)
+            repaired_fact.write_text("# Repaired facts\n", encoding="utf-8")
+            replacement = self.plan(root)
+
+            self.assertNotEqual(replacement["refresh_id"], first["refresh_id"])
+            self.assertEqual(replacement["superseded_refresh_id"], first["refresh_id"])
+            self.assertEqual(replacement["superseded_plan_path"], str(first_path.resolve()))
+            superseded = json.loads(first_path.read_text(encoding="utf-8"))
+            self.assertEqual(superseded["status"], "superseded")
+            self.assertIsNone(superseded["retry_from_instance_key"])
+            self.assertEqual(
+                superseded["superseded_by_refresh_id"], replacement["refresh_id"]
+            )
+            self.assertEqual(superseded["nodes"][0]["error"], "stale fact input")
+            self.assertTrue(workspace_marker.is_file())
+            current_status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(current_status["current_run_id"], replacement["refresh_id"])
+            self.assertEqual(
+                current_status["retry_from_instance_key"],
+                replacement["retry_from_instance_key"],
+            )
+
+            completed, rejected = self.run_cli(
+                "apply", str(root), "--plan", str(first_path), check=False
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(rejected["error_code"], "REFRESH_PLAN_SUPERSEDED")
+
+            _, detected = self.run_cli("detect", str(root), "--fixture")
+            self.assertEqual(detected["resume_refresh_id"], replacement["refresh_id"])
+            self.assertEqual(detected["resume_status"], "planned")
+
     def test_source_change_during_refresh_blocks_publication(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -807,6 +931,41 @@ class PanelRefreshTests(unittest.TestCase):
             with self.assertRaises(module.RefreshError) as raised:
                 module.workspace_for(memory, "refresh-" + "a" * 24)
             self.assertEqual(raised.exception.code, "REFRESH_STAGING_INVALID")
+
+    def test_staging_ignores_runtime_locks_and_initial_audit_is_global(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            fact = memory / "actions/action-ledger.md"
+            action_lock = memory / "actions/ledger-write.LOCK"
+            fact_lock = memory / "state/fact-write.lock"
+            refresh_lock = memory / "state/panel-refresh.lock"
+            fact.parent.mkdir(parents=True)
+            fact_lock.parent.mkdir(parents=True)
+            fact.write_text("# Facts\n", encoding="utf-8")
+            for lock_path in (action_lock, fact_lock, refresh_lock):
+                lock_path.write_text("locked\n", encoding="utf-8")
+            refresh_id = "refresh-" + "a" * 24
+            plan = {
+                "refresh_id": refresh_id,
+                "plan_id": "sha256:" + "b" * 64,
+                "source_as_of": "2026-07-30",
+            }
+            workspace = module.workspace_for(memory, refresh_id)
+
+            staged = module.prepare_staging(memory, workspace, plan)
+
+            self.assertTrue((staged / "actions/action-ledger.md").is_file())
+            self.assertFalse((staged / "actions/ledger-write.LOCK").exists())
+            self.assertFalse((staged / "state/fact-write.lock").exists())
+            self.assertFalse((staged / "state/panel-refresh.lock").exists())
+            self.assertNotIn("actions/ledger-write.LOCK", module.source_inventory(memory))
+            args = module.parse_args(["plan", str(root)])
+            command = module.node_command(
+                "state-audit", args, plan, root, staged, workspace, {}
+            )
+            self.assertEqual(command[command.index("--scenario") + 1], "global")
 
     def test_reuse_plan_becomes_terminal_and_recomputes_status_identity(self) -> None:
         module = load_module()

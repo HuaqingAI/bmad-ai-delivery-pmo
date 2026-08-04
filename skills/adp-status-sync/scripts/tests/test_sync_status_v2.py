@@ -373,6 +373,49 @@ class StatusSyncV2Tests(unittest.TestCase):
                 self.assertEqual(contract["registry_sha256"], registry_hash)
                 self.assertNotEqual(contract["schema_sha256"], "sha256:" + "0" * 64)
 
+    def test_staging_copy_ignores_runtime_lock_files(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = root / "memory"
+            staged = root / "staged"
+            (memory / "state").mkdir(parents=True)
+            (memory / "state/fact-write.lock").write_bytes(b"locked")
+            (memory / "state/panel-refresh.lock").write_bytes(b"locked")
+            (memory / "state/fact-generation.json").write_text("{}\n", encoding="utf-8")
+
+            module.copy_memory_tree(memory, staged)
+
+            self.assertTrue((staged / "state/fact-generation.json").is_file())
+            self.assertFalse((staged / "state/fact-write.lock").exists())
+            self.assertFalse((staged / "state/panel-refresh.lock").exists())
+
+    def test_missing_projection_sidecar_bootstraps_on_regular_status_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            self.create_action(root, "l1-checkout", "ACT-BOOTSTRAP-001")
+            sidecar = root / MEMORY_REL / "workstreams/l1-checkout/action-projection.json"
+            sidecar.unlink()
+            updates = self.write_updates(
+                root,
+                "progress-update.json",
+                [{"id": "l1-checkout", "progress": "Bootstrap validation is complete"}],
+            )
+
+            _, result = self.run_cli("update", str(root), "--updates-file", str(updates))
+
+            self.assertTrue(sidecar.is_file())
+            self.assertEqual(
+                Path(result["updates"][0]["action_projection"]).resolve(),
+                sidecar.resolve(),
+            )
+            projection = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["action_id"] for item in projection["actions"]],
+                ["ACT-BOOTSTRAP-001"],
+            )
+
     def test_replay_rejects_ledger_bytes_not_bound_by_current_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

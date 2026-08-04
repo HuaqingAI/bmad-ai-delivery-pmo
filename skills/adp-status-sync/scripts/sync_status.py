@@ -2628,6 +2628,14 @@ def validate_update_targets(memory_root: Path, updates: list[StatusUpdate]) -> N
         raise ValueError(f"delivery-record.md not found for workstream {update.workstream_id}")
 
 
+def ignore_runtime_lock_files(_directory: str, names: list[str]) -> set[str]:
+    return {name for name in names if name.lower().endswith(".lock")}
+
+
+def copy_memory_tree(memory_root: Path, staged_root: Path) -> None:
+    shutil.copytree(memory_root, staged_root, ignore=ignore_runtime_lock_files)
+
+
 def changed_staged_files(memory_root: Path, staged_root: Path) -> list[Path]:
     changed: list[Path] = []
     for staged_path in sorted(path for path in staged_root.rglob("*") if path.is_file()):
@@ -3194,7 +3202,7 @@ def run_update(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix=".status-sync-", dir=memory_root.parent) as temp_dir:
         staged_root = Path(temp_dir) / "memory"
         if memory_root.is_dir():
-            shutil.copytree(memory_root, staged_root)
+            copy_memory_tree(memory_root, staged_root)
         else:
             staged_root.mkdir(parents=True)
         timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -3244,7 +3252,10 @@ def run_update(args: argparse.Namespace) -> int:
         results = [apply_update(staged_root, update, ledger_rows, baseline_context, False) for update in updates]
         if ledger_state:
             for result, update in zip(results, updates, strict=True):
-                if not update.refresh_actions or update.workstream_id in {"program", "project", "adp-program"}:
+                record_path = staged_root / "workstreams" / update.workstream_id / "delivery-record.md"
+                sidecar_path = record_path.with_name(ACTION_PROJECTION_REL)
+                needs_sidecar_bootstrap = record_path.is_file() and not sidecar_path.is_file()
+                if not record_path.is_file() or (not update.refresh_actions and not needs_sidecar_bootstrap):
                     continue
                 sidecar_path = write_action_projection_sidecar(
                     staged_root,
@@ -3748,7 +3759,7 @@ def apply_repair_snapshot(
 ) -> tuple[list[str], dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix=".status-repair-", dir=memory_root.parent) as temp_dir:
         staged_root = Path(temp_dir) / "memory"
-        shutil.copytree(memory_root, staged_root)
+        copy_memory_tree(memory_root, staged_root)
         workstream_id = snapshot["workstream_id"]
         record_path = staged_root / "workstreams" / workstream_id / "delivery-record.md"
         original = record_path.read_text(encoding="utf-8")

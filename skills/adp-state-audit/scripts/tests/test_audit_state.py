@@ -269,6 +269,7 @@ class AdpStateAuditTests(unittest.TestCase):
         memory_root: Path,
         milestones: list[dict] | None = None,
         *,
+        gates: list[dict] | None = None,
         configure_language: bool = True,
     ) -> Path:
         if configure_language:
@@ -294,7 +295,7 @@ class AdpStateAuditTests(unittest.TestCase):
                 },
             },
             "default_tolerance_days": 0,
-            "gates": [],
+            "gates": gates or [],
             "milestones": milestones or [],
             "critical_path": [item["id"] for item in (milestones or []) if item.get("critical_path")],
             "weighting": {"enabled": False, "completion_measure": None, "source": None},
@@ -338,6 +339,24 @@ class AdpStateAuditTests(unittest.TestCase):
             "source": {
                 "type": "approved-plan",
                 "reference": f"project-charter.md#{milestone_id.lower()}",
+                "confirmed_by": "PMO",
+            },
+            "dependencies": [],
+            "critical_path": False,
+            "baseline_revision": 1,
+        }
+
+    @staticmethod
+    def gate(gate_id: str, planned_date: str) -> dict:
+        return {
+            "id": gate_id,
+            "name": gate_id.replace("-", " ").title(),
+            "planned_date": planned_date,
+            "owner": "Program owner",
+            "confirmation_status": "approved",
+            "source": {
+                "type": "approved-plan",
+                "reference": f"project-charter.md#{gate_id.lower()}",
                 "confirmed_by": "PMO",
             },
             "dependencies": [],
@@ -546,6 +565,80 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertEqual(result["execution_disposition"], "blocked")
             self.assertFalse(audit["safe_to_generate"])
             self.assertIn("actual.unmapped", {item.get("code") for item in audit["blocking_gaps"]})
+
+    def test_gate_actual_uses_combined_baseline_plan_item_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(
+                project_root,
+                memory_root,
+                gates=[self.gate("GATE-CUTOVER", "2026-07-01")],
+            )
+            record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+            record.parent.mkdir(parents=True)
+            record.write_text(
+                "# WDR\n\n## Identity\n\n- Workstream ID: l1-checkout\n\n## Roadmap\n\n"
+                "| Milestone ID | Type | Status | Actual | Source | Baseline Revision |\n"
+                "| --- | --- | --- | --- | --- | --- |\n"
+                "| GATE-CUTOVER | cutover-gate | done | 2026-07-01 | evidence.md#gate | 1 |\n",
+                encoding="utf-8",
+            )
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--memory-root",
+                    str(memory_root),
+                    "--prepass-json",
+                    str(prepass),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+            codes = {item.get("code") for item in [*audit["blocking_gaps"], *audit["warnings"]]}
+
+            self.assertNotIn("actual.unmapped", codes)
+            self.assertNotIn("actual.workstream_mismatch", codes)
+
+    def test_placeholder_roadmap_rows_do_not_enter_plan_item_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            self.write_valid_baseline(project_root, memory_root)
+            placeholder = (
+                "# WDR\n\n## Identity\n\n- Workstream ID: {workstream_id}\n\n## Roadmap\n\n"
+                "| Milestone ID | Type | Status | Forecast | Actual | Source |\n"
+                "| --- | --- | --- | --- | --- | --- |\n"
+                "| TBD | checkpoint | planned | TBD | TBD | TBD |\n"
+            )
+            for workstream_id in ("l1-checkout", "l2-payments"):
+                record = memory_root / "workstreams" / workstream_id / "delivery-record.md"
+                record.parent.mkdir(parents=True)
+                record.write_text(placeholder.format(workstream_id=workstream_id), encoding="utf-8")
+            prepass = self.write_minimal_prepass(project_root, memory_root)
+
+            result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--memory-root",
+                    str(memory_root),
+                    "--prepass-json",
+                    str(prepass),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+
+            self.assertNotIn(
+                "actual.duplicate_mapping",
+                {item.get("code") for item in [*audit["blocking_gaps"], *audit["warnings"]]},
+            )
 
     def test_mapped_actual_satisfies_due_milestone_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

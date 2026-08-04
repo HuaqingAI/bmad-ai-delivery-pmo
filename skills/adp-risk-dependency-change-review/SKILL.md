@@ -51,6 +51,7 @@ Add optional flags only when the user gives the facts:
 - `--memory-root <path>` when ADP memory is not at the default path.
 - `--dry-run` to preview without writing derived views or packets.
 - `--packet-title "<title>"` and `--packet-question "<question>"` when an issue requires business clarification or decision.
+- `--update-packet <path>` to update one existing packet in place; relative paths resolve from the ADP memory root and omitted packet fields are preserved.
 - `--packet-background`, `--packet-option`, `--packet-impact`, `--packet-recommendation`, `--packet-deadline`, `--packet-owner`, and `--packet-workstream` to fill a Business Decision Packet from reliable facts.
 
 If the script cannot run, manually review the same sources and update only derived artifacts under `views/` and `decisions/business-decision-packets/`. Do not directly rewrite a Workstream Delivery Record from this workflow unless the user explicitly asks for a specific edit.
@@ -75,7 +76,7 @@ In legacy Cross-Workstream Links, treat only ID-shaped entries as `depends on` o
 
 ## Business Decision Packets
 
-Create a packet when the next move requires business or project-lead judgment rather than FDE execution. The packet must include background, the unresolved question, options, impacts, recommendation, deadline or trigger, affected workstreams, and requested decision owner.
+Create a packet when the next move requires business or project-lead judgment rather than FDE execution. Update the existing packet with `--update-packet` when the same decision receives new facts; do not create a second packet for the same decision. The packet must include background, the unresolved question, options, impacts, recommendation, deadline or trigger, affected workstreams, and requested decision owner.
 
 Use packets for business confirmation, risk acceptance, scope change, dependency tradeoffs, cutover/go-no-go concerns, and unresolved L0 constraint questions. Do not create packets for ordinary FDE implementation tasks; those belong in WDR next actions or FDE action lists.
 

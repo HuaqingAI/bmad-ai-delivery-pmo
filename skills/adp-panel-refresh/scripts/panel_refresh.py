@@ -149,6 +149,14 @@ def file_fingerprint(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def optional_file_fingerprint(path: Path) -> str | None:
+    return file_fingerprint(path) if path.is_file() else None
+
+
+def ignore_runtime_lock_files(_directory: str, names: list[str]) -> set[str]:
+    return {name for name in names if name.lower().endswith(".lock")}
+
+
 def resolve_external_path(project_root: Path, value: str) -> Path:
     path = Path(value).expanduser()
     return (path if path.is_absolute() else project_root / path).resolve()
@@ -199,7 +207,9 @@ def source_inventory(memory_root: Path) -> dict[str, str]:
         if not path.is_file() or path.is_symlink():
             continue
         relative = path.relative_to(memory_root).as_posix()
-        if any(part.startswith(".") for part in Path(relative).parts):
+        if path.name.lower().endswith(".lock") or any(
+            part.startswith(".") for part in Path(relative).parts
+        ):
             continue
         if relative == "state/status-intent-outbox.json" or any(
             relative == prefix or relative.startswith(prefix)
@@ -620,6 +630,41 @@ def audit_drift_details(audit: dict[str, Any]) -> tuple[int, list[str], list[dic
     return drift_count, action_ids, sorted(repair_batches, key=lambda row: str(row["repair_batch_id"]))
 
 
+def drift_audit_matches_live(memory_root: Path, audit: dict[str, Any]) -> bool:
+    verdict = audit.get("action_projection_drift")
+    if not isinstance(verdict, dict):
+        # Older audit fixtures did not persist the read-set fingerprints.
+        return True
+    if verdict.get("ledger_fingerprint") != optional_file_fingerprint(
+        memory_root / "actions/action-ledger.md"
+    ):
+        return False
+    rows = verdict.get("rows")
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("workstream_id"), str):
+            return False
+        workstreams_root = (memory_root / "workstreams").resolve(strict=False)
+        workstream_root = (workstreams_root / row["workstream_id"]).resolve(strict=False)
+        try:
+            workstream_root.relative_to(workstreams_root)
+        except ValueError:
+            return False
+        observed = {
+            "wdr_fingerprint": optional_file_fingerprint(workstream_root / "delivery-record.md"),
+            "wdr_state_fingerprint": optional_file_fingerprint(
+                workstream_root / "delivery-record.state.json"
+            ),
+            "sidecar_fingerprint": optional_file_fingerprint(
+                workstream_root / "action-projection.json"
+            ),
+        }
+        if any(row.get(key) != fingerprint for key, fingerprint in observed.items()):
+            return False
+    return True
+
+
 def detect(
     project_root: Path,
     memory_root: Path,
@@ -638,7 +683,11 @@ def detect(
     pending = pending_intent_ids(memory_root)
     audit_path = latest_audit_path(memory_root)
     audit = load_optional_json(audit_path) if audit_path else {}
-    drift_count, drift_action_ids, repair_batches = audit_drift_details(audit)
+    drift_audit_stale = bool(audit_path and not drift_audit_matches_live(memory_root, audit))
+    if drift_audit_stale:
+        drift_count, drift_action_ids, repair_batches = 0, [], []
+    else:
+        drift_count, drift_action_ids, repair_batches = audit_drift_details(audit)
     policy_path = current_policy_path(memory_root, selection_policy, project_root)
     policy_id = content_id(load_json(policy_path)) if policy_path and policy_path.is_file() else None
     prior_policy_id = previous.get("selection_policy_id")
@@ -665,11 +714,58 @@ def detect(
         "drift_action_ids": drift_action_ids,
         "repair_batches": repair_batches,
         "drift_audit_path": str(audit_path) if audit_path else None,
+        "drift_audit_stale": drift_audit_stale,
         "invalidated_nodes": nodes,
         "recommended_mode": "blocked" if blocked_reasons else ("full" if changed else ("panel-only" if policy_changed else "reuse")),
         "blocked_reasons": blocked_reasons,
         "recommended_workflows": ["adp-status-sync"] if blocked_reasons else [],
         **resume,
+    }
+
+
+def supersede_stale_dirty_plan(
+    detection: dict[str, Any],
+    plan: dict[str, Any],
+    plan_path: Path,
+) -> dict[str, str]:
+    raw_path = detection.get("resume_plan_path")
+    if (
+        detection.get("resume_status") != "dirty"
+        or detection.get("blocked_reasons")
+        or not isinstance(raw_path, str)
+    ):
+        return {}
+    previous_path = Path(raw_path).resolve()
+    try:
+        previous_path.relative_to(plan_path.parent.resolve())
+    except ValueError as exc:
+        raise RefreshError(
+            "REFRESH_PLAN_INVALID", "dirty refresh plan is outside the durable runs directory"
+        ) from exc
+    previous = load_optional_json(previous_path)
+    if (
+        previous.get("status") != "dirty"
+        or previous.get("refresh_id") == plan.get("refresh_id")
+        or previous.get("source_fingerprints") == detection.get("source_fingerprints")
+    ):
+        return {}
+    previous.update(
+        {
+            "status": "superseded",
+            "retry_from_instance_key": None,
+            "superseded_at": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "superseded_by_refresh_id": plan["refresh_id"],
+            "superseded_by_plan_id": plan["plan_id"],
+            "superseded_by_plan_path": str(plan_path),
+            "supersede_reason": "fact sources changed after the dirty refresh plan",
+        }
+    )
+    atomic_json(previous_path, previous)
+    return {
+        "superseded_refresh_id": str(previous.get("refresh_id") or previous_path.stem),
+        "superseded_plan_path": str(previous_path),
     }
 
 
@@ -750,6 +846,7 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
             "plan_id": plan_id,
         }
         atomic_json(path, plan)
+    superseded = supersede_stale_dirty_plan(detection, plan, path)
     status = load_optional_json(memory_root / STATUS_REL)
     status.update(
         {
@@ -759,12 +856,21 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
             "pending_invalidations": plan["nodes"],
             "selection_policy": selection_policy,
             "selection_policy_id": selection_policy_id,
+            "retry_from_instance_key": plan["retry_from_instance_key"],
             "metrics": status.get("metrics", default_metrics()),
         }
     )
+    if superseded:
+        status["last_superseded_run_id"] = superseded["superseded_refresh_id"]
     status["state_id"] = content_id({key: value for key, value in status.items() if key != "state_id"})
     atomic_json(memory_root / STATUS_REL, status)
-    return {**plan, "ok": not blocked, "operation": "plan", "plan_path": str(path)}
+    return {
+        **plan,
+        **superseded,
+        "ok": not blocked,
+        "operation": "plan",
+        "plan_path": str(path),
+    }
 
 
 def default_metrics() -> dict[str, int]:
@@ -859,7 +965,7 @@ def prepare_staging(memory_root: Path, workspace: Path, plan: dict[str, Any]) ->
             raise RefreshError("REFRESH_STAGING_CONFLICT", f"staging belongs to another plan: {workspace}")
         return staged
     workspace.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(memory_root, staged)
+    shutil.copytree(memory_root, staged, ignore=ignore_runtime_lock_files)
     metadata.write_text(plan["plan_id"] + "\n", encoding="utf-8", newline="\n")
     return staged
 
@@ -933,7 +1039,7 @@ def node_command(
             str(SCRIPT_PATHS[node]),
             *common_root,
             "--scenario",
-            "management-panel",
+            "global",
             "--as-of",
             plan["source_as_of"],
             "--output-dir",
@@ -1416,6 +1522,11 @@ def validate_plan_freshness(memory_root: Path, plan: dict[str, Any], plan_path: 
 def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path) -> dict[str, Any]:
     plan, plan_path = load_or_create_plan(args, project_root, memory_root)
     validate_plan_freshness(memory_root, plan, plan_path)
+    if plan.get("status") == "superseded":
+        raise RefreshError(
+            "REFRESH_PLAN_SUPERSEDED",
+            "refresh plan was replaced after its fact sources changed; apply its replacement plan",
+        )
     if plan.get("blocked_reasons"):
         raise RefreshError("REFRESH_PLAN_BLOCKED", "; ".join(plan["blocked_reasons"]))
     if plan.get("status") == "awaiting-policy":
@@ -1779,7 +1890,10 @@ def latest_audit_path(memory_root: Path) -> Path | None:
         payload = load_optional_json(path)
         if (
             payload.get("audit_type") == "panel-input"
-            or (payload.get("audit_type") == "input" and payload.get("scenario") == "management-panel")
+            or (
+                payload.get("audit_type") == "input"
+                and payload.get("scenario") in {"global", "management-panel"}
+            )
         ):
             return path
     return None

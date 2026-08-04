@@ -2401,6 +2401,12 @@ def audit_plan_actual_mapping(
         if isinstance(item, dict) and str(item.get("id", "")).strip()
         and (selected_scope_ids is None or str(item.get("workstream_id")) in selected_scope_ids)
     }
+    gates = {
+        str(item.get("id")): item
+        for item in baseline.get("gates", [])
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    plan_items = {**gates, **milestones}
     baseline_revision = baseline.get("revision")
     mapped_rows: dict[str, list[dict[str, str]]] = defaultdict(list)
     virtual_scope_ids = {
@@ -2422,7 +2428,7 @@ def audit_plan_actual_mapping(
             forecast = row_value(row, "forecast", "forecast date")
             actual = row_value(row, "actual", "actual date", "completed")
             has_actual_state = is_meaningful(forecast) or is_meaningful(actual) or status in {"at-risk", "done", "blocked"}
-            if not milestone_id and has_actual_state:
+            if not is_meaningful(milestone_id) and has_actual_state:
                 findings.append(
                     vnext_finding(
                         "actual.unmapped",
@@ -2435,12 +2441,9 @@ def audit_plan_actual_mapping(
                     )
                 )
                 continue
-            if not milestone_id:
+            if not is_meaningful(milestone_id):
                 continue
-            row["__source"] = rel
-            row["__workstream"] = workstream_id
-            mapped_rows[milestone_id].append(row)
-            baseline_item = milestones.get(milestone_id)
+            baseline_item = plan_items.get(milestone_id)
             if baseline_item is None and has_actual_state:
                 findings.append(
                     vnext_finding(
@@ -2455,8 +2458,11 @@ def audit_plan_actual_mapping(
                 )
                 continue
             if baseline_item is not None:
-                expected_workstream = normalize_workstream_id(str(baseline_item.get("workstream_id", "")))
-                if expected_workstream != workstream_id:
+                row["__source"] = rel
+                row["__workstream"] = workstream_id
+                mapped_rows[milestone_id].append(row)
+                expected_workstream = baseline_item_workstream(baseline_item)
+                if expected_workstream and expected_workstream != workstream_id:
                     findings.append(
                         vnext_finding(
                             "actual.workstream_mismatch",
@@ -2538,6 +2544,16 @@ def audit_plan_actual_mapping(
                 )
             )
     return findings, fingerprints
+
+
+def baseline_item_workstream(item: dict[str, Any]) -> str:
+    workstream_id = normalize_workstream_id(str(item.get("workstream_id", "")))
+    if workstream_id:
+        return workstream_id
+    lane = item.get("lane") if isinstance(item.get("lane"), dict) else {}
+    if lane.get("lane_type") == "workstream":
+        return normalize_workstream_id(str(lane.get("lane_id", "")))
+    return ""
 
 
 def roadmap_rows(path: Path) -> list[dict[str, str]]:

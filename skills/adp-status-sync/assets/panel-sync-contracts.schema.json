@@ -2300,7 +2300,7 @@
         "generation_id": {"$ref": "#/$defs/sha256"},
         "expected_fact_generation": {"$ref": "#/$defs/revision"},
         "expected_panel_generation": {"$ref": "#/$defs/revision"},
-        "status": {"enum": ["planned", "refreshing", "dirty", "published", "blocked"]},
+        "status": {"enum": ["planned", "refreshing", "dirty", "superseded", "published", "blocked"]},
         "nodes": {"type": "array", "items": {"$ref": "#/$defs/refreshNodeStateV1"}},
         "retry_from_instance_key": {"oneOf": [{"$ref": "#/$defs/canonicalSingleLine"}, {"type": "null"}]},
         "source_as_of": {"$ref": "#/$defs/utcTimestamp"},
