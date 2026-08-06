@@ -2457,7 +2457,20 @@ def audit_plan_actual_mapping(
     records = sorted((memory_root / "workstreams").glob("*/delivery-record.md")) if scan_wdrs else []
     for record in records:
         workstream_id = normalize_workstream_id(record.parent.name)
-        if workstream_id in virtual_normalized:
+        alias_sidecar = record.parent / "workstream-alias.json"
+        retired_alias = False
+        if alias_sidecar.is_file():
+            try:
+                alias_payload = load_json(alias_sidecar)
+                retired_alias = bool(
+                    isinstance(alias_payload, dict)
+                    and alias_payload.get("status") == "retired-alias"
+                    and alias_payload.get("alias_workstream_id") == record.parent.name
+                    and isinstance(alias_payload.get("canonical_workstream_id"), str)
+                )
+            except (OSError, json.JSONDecodeError):
+                retired_alias = False
+        if workstream_id in virtual_normalized or retired_alias:
             continue
         rel = rel_to_memory(memory_root, record)
         fingerprints[rel] = file_sha256(record)

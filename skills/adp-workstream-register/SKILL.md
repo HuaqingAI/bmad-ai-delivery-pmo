@@ -75,6 +75,17 @@ If the script cannot run, create `delivery-record.md`, `evidence.md`, `decisions
 
 `Depends on` and `Impacts` are ID-only lists. Normalize valid IDs to lowercase; reject `TBD`, empty values, and explanatory text rather than writing them. Put descriptive dependency or impact facts in Project Status or the patch plan, not in these lists; an empty list has no placeholder bullet.
 
+
+## Alias and Retirement
+
+Never delete a duplicate workstream directory or copy facts between two WDRs without lineage. For an empty or fully non-conflicting duplicate, use:
+
+```bash
+uv run "{skill-root}/scripts/manage_workstream_alias.py" "{project-root}" --canonical <canonical-id> --alias <retired-id> --memory-root <memory-root> --principal <operator-id> --dry-run
+```
+
+Review identity, action and exact cross-reference conflicts. Only a conflict-free dry-run issues a 15-minute token; apply with the same arguments and `--token <token>`. The transaction preserves the alias directory, writes `workstream-alias.json`, updates exact WDR references, the alias registry and affected sidecars, and records a durable retirement receipt. Retired aliases are excluded from the physical WDR registry and state audit.
+
 ## Normalize Existing Lines
 
 When the user brings an existing workstream, do not rewrite BMM artifacts or overwrite the WDR. Index supplied paths and project-level facts into a patch plan the user can apply after review, and mark missing owners, scope boundaries, acceptance criteria, dependencies, evidence, or confirmations as gaps.

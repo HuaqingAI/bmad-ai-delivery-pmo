@@ -2636,6 +2636,17 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertEqual(list(project_root.rglob(".memlog.md")), [])
 
 
+    def test_retired_workstream_alias_is_not_a_registered_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); memory=self.scaffold(root)
+            alias=memory/"workstreams/l13-iam"; alias.mkdir(parents=True)
+            (alias/"delivery-record.md").write_text("# Empty alias\n\n## Identity\n\n- Workstream ID: l13-iam\n",encoding="utf-8")
+            (alias/"workstream-alias.json").write_text(json.dumps({"status":"retired-alias","alias_workstream_id":"l13-iam","canonical_workstream_id":"l1-checkout"}),encoding="utf-8")
+            result=json.loads(self.run_script(root,"--as-of","2026-07-10").stdout)
+            audit=json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertNotIn("l13-iam",audit.get("registered_workstreams",[]))
+            self.assertNotIn("workstreams/l13-iam/delivery-record.md",json.dumps(audit))
+
     def test_reconciliation_receipt_consumes_exact_intake_without_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             memory_root = Path(temp_dir) / "_bmad-output/adp/memory"

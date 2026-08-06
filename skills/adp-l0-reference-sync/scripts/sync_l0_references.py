@@ -659,14 +659,14 @@ def constraints_for_scan(plan: dict[str, Any]) -> list[dict[str, str]]:
     return [constraint for constraint in constraints if constraint["name"] != "TBD"]
 
 
-def scan_workstream_gaps(memory_root: Path, plan: dict[str, Any], selected_ids: list[str]) -> list[dict[str, str]]:
+def scan_workstream_gaps(memory_root: Path, plan: dict[str, Any], selected_ids: list[str]) -> list[dict[str, Any]]:
     workstreams_root = memory_root / "workstreams"
     if not workstreams_root.exists():
         return []
 
     selected = {normalize_id(item) for item in selected_ids}
     constraints = constraints_for_scan(plan)
-    gaps: list[dict[str, str]] = []
+    gaps: list[dict[str, Any]] = []
 
     for record in sorted(workstreams_root.glob("*/delivery-record.md")):
         workstream_id = record.parent.name
@@ -684,6 +684,12 @@ def scan_workstream_gaps(memory_root: Path, plan: dict[str, Any], selected_ids: 
                     "kind": "l0-reference",
                     "constraint": "L0 references",
                     "suggestion": "Replace TBD L0 references with applicable contracts, gates, NFRs, or evidence rules.",
+                    "repair_plan": {
+                        "operation": "repair-wdr-l0-reference",
+                        "workstream_id": workstream_id,
+                        "references": [],
+                        "review_required": True,
+                    },
                 }
             )
         for constraint in constraints:
@@ -698,6 +704,12 @@ def scan_workstream_gaps(memory_root: Path, plan: dict[str, Any], selected_ids: 
                         "kind": constraint["kind"],
                         "constraint": name,
                         "suggestion": f"Add or confirm L0 {constraint['kind']} reference: {name}.",
+                        "repair_plan": {
+                            "operation": "repair-wdr-l0-reference",
+                            "workstream_id": workstream_id,
+                            "references": [name],
+                            "review_required": False,
+                        },
                     }
                 )
     return gaps

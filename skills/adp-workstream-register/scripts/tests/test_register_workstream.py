@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "register_workstream.py"
+ALIAS_SCRIPT = Path(__file__).resolve().parents[1] / "manage_workstream_alias.py"
+SCOPE_SCRIPT = SCRIPT.parents[2] / "adp-plan-baseline/scripts/scope_contract.py"
 
 
 class RegisterWorkstreamTests(unittest.TestCase):
@@ -211,6 +213,25 @@ class RegisterWorkstreamTests(unittest.TestCase):
             self.assertEqual(record.read_text(encoding="utf-8"), canonical_before)
             self.assertIn("## Identity", canonical_before)
 
+
+    def test_retires_empty_duplicate_as_alias_without_deleting_directory(self) -> None:
+        import importlib.util
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir); self.seed_memory(root)
+            self.run_script(root, "--id", "l13-workforce-identity-access", "--name", "IAM full", "--owner", "FDE-A", "--scope", "Full IAM scope")
+            self.run_script(root, "--id", "l13-iam", "--name", "IAM shell", "--owner", "TBD")
+            command=[sys.executable,str(ALIAS_SCRIPT),str(root),"--canonical","l13-workforce-identity-access","--alias","l13-iam"]
+            preview=json.loads(subprocess.run([*command,"--dry-run"],check=True,capture_output=True,text=True).stdout)
+            self.assertTrue(preview["can_apply"])
+            applied=json.loads(subprocess.run([*command,"--token",preview["token"]],check=True,capture_output=True,text=True).stdout)
+            memory=root/"_bmad-output/adp/memory"
+            self.assertTrue((memory/"workstreams/l13-iam/delivery-record.md").is_file())
+            self.assertTrue((memory/"workstreams/l13-iam/workstream-alias.json").is_file())
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            spec=importlib.util.spec_from_file_location("scope_alias_test",SCOPE_SCRIPT); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            ids=[x["scope_id"] for x in module.discover_wdr_registry(memory)]
+            self.assertIn("l13-workforce-identity-access",ids)
+            self.assertNotIn("l13-iam",ids)
 
 if __name__ == "__main__":
     unittest.main()

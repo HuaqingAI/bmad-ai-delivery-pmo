@@ -223,6 +223,7 @@ class ActionUpdate:
     closure_criteria: str | None = "TBD"
     closure_criteria_verifiable: bool | None = None
     owning_workflow: str | None = "adp-status-sync"
+    intake_source: str | None = None
     created_at: str | None = None
     started_at: str | None = None
     done_at: str | None = None
@@ -1041,6 +1042,7 @@ def actions_from_mapping(
                     raw_action.get("closure_criteria_verifiable"),
                     "action closure_criteria_verifiable",
                 ),
+                intake_source=str(item.get("source") or default_source),
                 owning_workflow=(
                     clean_optional(raw_action.get("owning_workflow"))
                     if operation == "patch"
@@ -3591,7 +3593,7 @@ def recover_status_transactions(memory_root: Path) -> list[str]:
         return recovered
     supported = {
         "status-mutation", "repair-business", "repair-attempt",
-        "intake-reconciliation", "wdr-field-repair",
+        "intake-reconciliation", "wdr-field-repair", "workstream-alias-retirement", "l0-reference-repair",
     }
     for manifest_path in sorted(root.glob("*/manifest.json")):
         manifest = load_json_object(manifest_path)
@@ -4018,7 +4020,46 @@ def action_source_lineage(action: ActionUpdate, row: dict[str, str]) -> dict[str
     }
 
 
+def action_daily_log_lineage(memory_root: Path, action: ActionUpdate) -> dict[str, Any] | None:
+    if not action.action_id or not action.status:
+        return None
+    expected_sources = {
+        normalize_text_key(value)
+        for value in (action.source, action.intake_source)
+        if value and not is_missing_action_value(str(value))
+    }
+    heading = re.compile(r"^##\s+(\S+)\s+Status sync - (.+?)\s*$")
+    matches: list[dict[str, Any]] = []
+    for path in sorted((memory_root / "daily").glob("*.md")):
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        for index, line in enumerate(lines):
+            match = heading.match(line)
+            if not match:
+                continue
+            end = next((i for i in range(index + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+            block_lines = lines[index + 1:end]
+            source_line = next((item for item in block_lines if item.startswith("- Source:")), "")
+            source = source_line.partition(":")[2].strip()
+            action_pattern = re.compile(rf"^\s+-\s+{re.escape(action.status)}:\s+{re.escape(action.action_id)}\s*$", re.I)
+            if not any(action_pattern.match(item) for item in block_lines):
+                continue
+            if expected_sources and normalize_text_key(source) not in expected_sources:
+                continue
+            matches.append({
+                "type": "ordered-daily-log-action-lineage",
+                "action_id": action.action_id,
+                "status": action.status,
+                "source": source,
+                "observed_at": normalize_required_timestamp(match.group(1), "daily action timestamp"),
+                "paths": [path.relative_to(memory_root).as_posix()],
+                "fingerprint": sha256_bytes(path.read_bytes()),
+                "sequence": index,
+            })
+    return matches[-1] if matches else None
+
+
 def reconcile_action_command(
+    memory_root: Path,
     action: ActionUpdate,
     rows: list[dict[str, str]],
     applied_commands: dict[str, dict[str, Any]],
@@ -4059,7 +4100,7 @@ def reconcile_action_command(
         matched = next((row for row in rows if row.get("Action ID") == action.action_id), None)
         result["match_method"] = "stable-action-id"
         if matched is not None:
-            source_lineage = action_source_lineage(action, matched)
+            source_lineage = action_source_lineage(action, matched) or action_daily_log_lineage(memory_root, action)
     else:
         composite = action_composite_key_from_update(action)
         if composite is None:
@@ -4104,7 +4145,7 @@ def reconcile_action_command(
         requested = normalized_reconciliation_value(field_name, requested_action_value(action, field_name))
         current = normalized_reconciliation_value(field_name, matched.get(ACTION_RECONCILIATION_ROW_FIELDS[field_name], ""))
         if requested != current:
-            if field_name == "source" and source_lineage is not None:
+            if field_name in {"source", "owning_workflow"} and source_lineage is not None:
                 continue
             discrepancies.append({"field": field_name, "requested": requested, "current": current})
     current_revision = action_revision(matched)
@@ -4353,6 +4394,21 @@ def status_superseded_lineage(
         for newer in current_events
         if is_later(old, newer)
     ]
+    if not pairs and field_name == "change_notes" and old_events:
+        requested_parts = [part.strip() for part in str(requested_value or "").split(";") if part.strip()]
+        current_parts = [part.strip() for part in str(current_value or "").split(";") if part.strip()]
+        suffix = current_parts[len(requested_parts):] if current_parts[:len(requested_parts)] == requested_parts else []
+        metadata = re.compile(r"^(?:audit|checkpoint|risk|severity|likelihood|status|metadata|source|gate)\s*[:=]", re.I)
+        if suffix and all(metadata.match(part) for part in suffix):
+            old = old_events[-1]
+            later = [event for event in events if event.get("type") == "daily-log-status-lineage" and is_later(old, event)]
+            later_parts = [part.strip() for event in later for part in str(event.get("value") or "").split(";") if part.strip()]
+            cursor = 0
+            for part in later_parts:
+                if cursor < len(suffix) and part == suffix[cursor]:
+                    cursor += 1
+            if cursor == len(suffix):
+                return [old, *later]
     if not pairs:
         return None
     old, newer = sorted(pairs, key=lambda pair: (pair[0]["observed_at"], pair[1]["observed_at"]))[-1]
@@ -4640,7 +4696,7 @@ def reconciliation_snapshot(
     ordinal = 0
     for action in action_updates:
         ordinal += 1
-        command_results.append(reconcile_action_command(action, rows, applied_commands, ordinal))
+        command_results.append(reconcile_action_command(memory_root, action, rows, applied_commands, ordinal))
     for update in updates:
         virtual_scope = scope_contract_module().is_virtual_cli_scope_id(update.workstream_id)
         virtual_wdr_command = bool(

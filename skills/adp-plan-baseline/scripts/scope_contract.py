@@ -15,6 +15,7 @@ ACTION_ROUTING_IDS = frozenset({"program", "project", "adp-program"})
 STABLE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 WDR_ID_PATTERN = re.compile(r"^-\s*Workstream ID:\s*(\S.*?)\s*$", re.MULTILINE)
+WORKSTREAM_ALIAS_SIDECAR = "workstream-alias.json"
 
 
 def normalize_cli_scope_id(raw: Any) -> str:
@@ -59,6 +60,23 @@ def load_canonical_baseline(path: Path) -> dict[str, Any]:
     return value
 
 
+def retired_alias_sidecar(workstream_root: Path) -> dict[str, Any] | None:
+    path = workstream_root / WORKSTREAM_ALIAS_SIDECAR
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "retired-alias":
+        return None
+    alias_id = payload.get("alias_workstream_id")
+    canonical_id = payload.get("canonical_workstream_id")
+    if alias_id != workstream_root.name or not isinstance(canonical_id, str) or not STABLE_ID.fullmatch(canonical_id):
+        return None
+    return payload
+
+
 def discover_wdr_registry(
     memory_root: Path,
     *,
@@ -76,7 +94,7 @@ def discover_wdr_registry(
     if not include_physical:
         return entries
     for record in sorted((memory_root / "workstreams").glob("*/delivery-record.md")):
-        if record.parent.name == RESERVED_VIRTUAL_SCOPE_ID:
+        if record.parent.name == RESERVED_VIRTUAL_SCOPE_ID or retired_alias_sidecar(record.parent):
             continue
         try:
             match = WDR_ID_PATTERN.search(record.read_text(encoding="utf-8-sig"))

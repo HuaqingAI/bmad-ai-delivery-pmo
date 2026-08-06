@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "sync_l0_references.py"
+REPAIR_SCRIPT = Path(__file__).resolve().parents[1] / "repair_wdr_l0_reference.py"
+STATUS_SCRIPT = SCRIPT.parents[2] / "adp-status-sync/scripts/sync_status.py"
 
 
 class SyncL0ReferencesTests(unittest.TestCase):
@@ -184,6 +186,50 @@ class SyncL0ReferencesTests(unittest.TestCase):
             self.assertIn("# Extracted Contract Inventory", english_text)
             self.assertIn("Checkout API", english_text)
 
+
+    def test_repairs_existing_wdr_l0_references_with_token_and_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); memory=root/"_bmad-output/adp/memory"; record=memory/"workstreams/l8b/delivery-record.md"; record.parent.mkdir(parents=True)
+            record.write_text("""# WDR
+
+## Identity
+
+- Workstream ID: l8b
+- Current BMM phase: PRD
+- Current ADP status: draft
+
+## Project Status
+
+- Progress: TBD
+- Blockers: TBD
+- Risks: TBD
+- Dependencies: see cross-workstream links
+- Scope or change notes: TBD
+- Next actions: fill missing state
+
+## Cross-Workstream Links
+
+Depends on:
+
+Impacts:
+
+L0 references:
+
+- TBD
+
+## Record Rule
+
+Keep details.
+""",encoding="utf-8")
+            update=root/"seed-action.json"; update.write_text(json.dumps({"updates":[{"id":"l8b","refresh_actions":True,"actions":[{"operation":"create","command_id":"CMD-L0","action_id":"ACT-L0","owner":"FDE-A","action":"Seed lineage","source":"meeting#1","due":"Friday","closure_criteria":"Done","evidence":[{"source":"meeting#1"}]}]}]}),encoding="utf-8")
+            subprocess.run([sys.executable,str(STATUS_SCRIPT),"update",str(root),"--updates-file",str(update)],check=True,capture_output=True,text=True)
+            command=[sys.executable,str(REPAIR_SCRIPT),str(root),"--id","l8b","--l0-reference","GATE-IAM-01"]
+            preview=json.loads(subprocess.run([*command,"--dry-run"],check=True,capture_output=True,text=True).stdout)
+            applied=json.loads(subprocess.run([*command,"--token",preview["token"]],check=True,capture_output=True,text=True).stdout)
+            text=record.read_text(encoding="utf-8")
+            self.assertIn("- GATE-IAM-01",text); self.assertNotIn("- TBD",text.split("L0 references:",1)[1].split("##",1)[0])
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            projection=json.loads(record.with_name("action-projection.json").read_text(encoding="utf-8")); state=json.loads(record.with_name("delivery-record.state.json").read_text(encoding="utf-8")); self.assertEqual(projection["wdr_revision"],state["wdr_revision"])
 
 if __name__ == "__main__":
     unittest.main()

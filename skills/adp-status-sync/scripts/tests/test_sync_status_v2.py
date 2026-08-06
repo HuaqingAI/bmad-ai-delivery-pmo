@@ -1312,6 +1312,31 @@ class StatusSyncV2Tests(unittest.TestCase):
             self.assertEqual(command["satisfied_by"], "superseded-lineage")
             self.assertEqual(command["lineage_evidence"][0]["type"], "action-source-provenance")
 
+    def test_change_notes_superseded_lineage_accepts_only_ordered_structured_metadata_append(self) -> None:
+        module=load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); record=self.create_record(root,"l1-checkout")
+            old=self.write_updates(root,"old-note.json",[{"id":"l1-checkout","change_notes":["Finance channel blocked"]}]); self.run_cli("update",str(root),"--updates-file",str(old))
+            meta=self.write_updates(root,"meta-note.json",[{"id":"l1-checkout","change_notes":["risk: high","checkpoint: reviewed"]}]); self.run_cli("update",str(root),"--updates-file",str(meta))
+            before=record.read_bytes(); text=record.read_text(encoding="utf-8").replace("- Scope or change notes: risk: high; checkpoint: reviewed","- Scope or change notes: Finance channel blocked; risk: high; checkpoint: reviewed"); record.write_text(text,encoding="utf-8"); module.update_wdr_state(record,before,record.read_bytes())
+            historical=self.write_updates(root,"historical-note.json",[{"id":"l1-checkout","change_notes":["Finance channel blocked"]}])
+            _,result=self.run_cli("reconcile-intake",str(root),"--updates-file",str(historical),"--dry-run")
+            self.assertTrue(result["all_satisfied"]); self.assertEqual(result["command_results"][0]["satisfied_by"],"superseded-lineage")
+
+    def test_stable_action_id_uses_exact_ordered_daily_log_source_and_status(self) -> None:
+        module=load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); self.create_record(root,"l3-payment")
+            self.create_action(root,"l3-payment","ACT-LEGACY-1")
+            self.patch_action(root,"l3-payment","ACT-LEGACY-1","CMD-BLOCK-1",1,{"status":"blocked"})
+            # Add an exact durable daily-log command source/status observation.
+            daily=root/MEMORY_REL/"daily/2026-07-16.md"; daily.parent.mkdir(parents=True,exist_ok=True); daily.write_text("# Daily Log - 2026-07-16\n\n## 2026-07-16T10:00:00Z Status sync - l3-payment\n\n- Source: owner update 2026-07-16 following prior finance meeting\n- Changed fields: no reliable field change\n- Actions:\n  - blocked: ACT-LEGACY-1\n",encoding="utf-8")
+            ledger=root/MEMORY_REL/module.ACTION_LEDGER_REL; rows=module.parse_action_ledger(ledger); row=next(x for x in rows if x["Action ID"]=="ACT-LEGACY-1"); row["Source"]="sha256:"+"a"*64; row["Owning Workflow"]="migration-normalizer"; module.write_action_ledger(ledger,rows,False)
+            state_path=root/MEMORY_REL/module.ACTION_LEDGER_STATE_REL; previous=json.loads(state_path.read_text(encoding="utf-8")); module.write_action_ledger_state(root/MEMORY_REL,ledger,rows,[])
+            historical=self.write_updates(root,"legacy-block.json",[{"id":"l3-payment","source":"owner update 2026-07-16 following prior finance meeting","actions":[{"action_id":"ACT-LEGACY-1","status":"blocked","source":"owner update 2026-07-16 following prior finance meeting","owning_workflow":"legacy-owner-sync"}]}])
+            _,result=self.run_cli("reconcile-intake",str(root),"--updates-file",str(historical),"--dry-run")
+            command=result["command_results"][0]; self.assertTrue(result["all_satisfied"]); self.assertEqual(command["satisfied_by"],"superseded-lineage"); self.assertEqual(command["lineage_evidence"][0]["type"],"ordered-daily-log-action-lineage")
+
     def test_repair_wdr_field_requires_review_only_for_conflicting_values(self) -> None:
         module = load_module()
         for conflict in (False, True):

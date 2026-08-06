@@ -70,6 +70,17 @@ Use the script's JSON output to report:
 
 Do not rewrite workstream records automatically unless the user asks. Provide concrete WDR update suggestions the FDE can confirm.
 
+
+## Repair an Existing WDR Reference
+
+Gap scan results include a directly consumable `repair_plan`. After reviewing the exact references, dry-run:
+
+```bash
+uv run "{skill-root}/scripts/repair_wdr_l0_reference.py" "{project-root}" --id <workstream-id> --l0-reference <reference> --memory-root <memory-root> --principal <operator-id> --dry-run
+```
+
+Apply with the unchanged arguments and returned token. The repair changes only the `Cross-Workstream Links / L0 references` list and atomically updates WDR state, action projection, token state, and a durable receipt. It removes placeholder `TBD` only when real references are supplied.
+
 ## Output Contract
 
 After sync, report:
