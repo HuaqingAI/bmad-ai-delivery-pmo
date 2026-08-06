@@ -1329,6 +1329,83 @@ class AdpStateAuditTests(unittest.TestCase):
                 VALIDATE_INPUT_AUDIT_INTEGRITY(duplicated),
             )
 
+    def test_chinese_business_packets_use_canonical_aliases_and_leave_only_real_owner_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            self.write_valid_baseline(project_root, memory_root)
+            config = project_root / "_bmad" / "adp" / "config.yaml"
+            config.write_text(
+                "communication_language: Chinese\ndocument_output_language: Chinese\n",
+                encoding="utf-8",
+            )
+            packet_root = memory_root / "decisions" / "business-decision-packets"
+            for path in packet_root.glob("*.md"):
+                path.unlink()
+            for index in range(1, 24):
+                owner = "TBD" if index == 23 else f"业务负责人-{index}"
+                if index % 2:
+                    authority_fields = [
+                        "状态: open",
+                        "",
+                        "## 到期日 / 触发条件",
+                        "",
+                        "2026-08-20",
+                        "",
+                        "## 请求决策人",
+                        "",
+                        owner,
+                        "",
+                        "## 受影响工作线",
+                        "",
+                        "- l1-checkout",
+                    ]
+                else:
+                    authority_fields = [
+                        "状态：open",
+                        "到期日 / 触发条件：2026-08-20",
+                        f"确认负责人：{owner}",
+                        "受影响工作线：l1-checkout",
+                    ]
+                packet = [
+                    f"# 业务决策包 {index}",
+                    "",
+                    *authority_fields,
+                    "",
+                    "## 背景",
+                    "",
+                    "迁移项目需要业务确认。",
+                    "",
+                    "## 待决策事项",
+                    "",
+                    "是否按计划执行？",
+                    "",
+                    "## 选项",
+                    "",
+                    "- 按计划执行",
+                    "- 延期",
+                    "",
+                    "## 建议",
+                    "",
+                    "按计划执行。",
+                    "",
+                ]
+                name = "2026-08-06-seo-content.md" if index == 23 else f"2026-08-06-packet-{index:02d}.md"
+                (packet_root / name).write_text("\n".join(packet), encoding="utf-8")
+
+            completed = self.run_script(project_root, "--as-of", "2026-08-06")
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+            packet_gaps = [
+                item
+                for item in audit["findings"]["completeness"]["blocking_gaps"]
+                if "decisions/business-decision-packets/" in str(item.get("source", ""))
+            ]
+
+            self.assertEqual(len(packet_gaps), 1, packet_gaps)
+            self.assertTrue(packet_gaps[0]["source"].endswith("2026-08-06-seo-content.md"))
+            self.assertEqual(packet_gaps[0]["gap"], "business decision packet owner is missing or TBD")
+
     def test_terminal_business_decision_statuses_are_closed(self) -> None:
         terminal_statuses = ["accepted", "closed", "done", "cancelled", "rejected", "superseded"]
         for status in terminal_statuses:

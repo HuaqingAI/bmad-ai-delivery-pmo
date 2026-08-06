@@ -1,6 +1,6 @@
 # Batch Status Updates
 
-Load this reference for multiple workstreams, workflow-produced structured actions, updates-file execution, durable receipts, or historical receipt migration. Use `{communication_language}` for user-facing review; keep JSON field names and canonical statuses unchanged.
+Load this reference for multiple workstreams, workflow-produced structured actions, updates-file execution, durable receipts, authority-state bootstrap, or historical receipt migration. Use `{communication_language}` for user-facing review; keep JSON field names and canonical statuses unchanged.
 
 ## Runtime Context
 
@@ -85,6 +85,22 @@ uv run "{skill-root}/scripts/sync_status.py" update "{project-root}" --updates-f
 ```
 
 The writer preflights the full batch and publishes WDR, daily log, action ledger, action-flow view, and receipt changes atomically. Successful non-dry-run execution writes a versioned receipt under `receipts/status-sync/`, bound to the exact resolved input path and SHA-256 of its raw bytes; surface `receipt_path`. Dry-run returns only a non-durable preview receipt and never proves application.
+
+## Legacy Authority-State Migration
+
+When an older project has a stale or missing `actions/action-ledger.state.json`, `delivery-record.state.json`, or `action-projection.json`, do not bypass the authority checks or hand-author sidecars. Preview one fact-bound migration:
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" migrate-authority-state "{project-root}" --memory-root "{memory-root}" --dry-run
+```
+
+Review `differences`, which records each old sidecar fingerprint, validation issue, mismatched canonical field, and desired fingerprint. The preview binds the raw ledger, every WDR, and all existing authority sidecars and returns a 15-minute single-use token. Apply only against unchanged bytes:
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" migrate-authority-state "{project-root}" --memory-root "{memory-root}" --token <single-use-token>
+```
+
+Apply atomically rebuilds the ledger state, every WDR state, and every WDR action projection from the current ledger/WDR facts; stale sidecar content is reported but never trusted as authority. The durable receipt under `receipts/authority-state-migration/` retains the original source fingerprints and output bindings. An unchanged repeat returns `already-migrated` and reuses that receipt. After migration, run a new input audit before using any repair batch.
 
 ## Historical Receipt Migration
 

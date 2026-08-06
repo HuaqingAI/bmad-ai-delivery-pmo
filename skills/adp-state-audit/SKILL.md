@@ -30,6 +30,7 @@ If the script or ADP prepass cannot run, or returns `blocked`/`error`, stop with
 Use `{project-root}/_bmad-output/adp/memory` as the default ADP memory root unless the user passes `--memory-root`. If the memory root is missing, tell the user to run `adp-project-kickoff`; do not create project state from this workflow.
 
 Facts come from Workstream Delivery Records, `actions/action-ledger.md`, decisions, business decision packets, daily logs, meeting archives, L0 summaries, and the prepass JSON. The audit also compares the 21-column ledger and ledger state against every selected WDR, WDR state, and `action-projection.json`. Derived views under `views/` are never promoted to source of truth. A stale derived view creates a refresh recommendation, while typed action-projection drift and pending status intents block panel publication.
+Business Decision Packet completeness uses canonical field identities with English and Chinese aliases selected from `document_output_language`; fields may be inline or `##` sections. Localized display headings are compatibility aliases, not new JSON keys or inferred semantics.
 
 ## Input Audit
 

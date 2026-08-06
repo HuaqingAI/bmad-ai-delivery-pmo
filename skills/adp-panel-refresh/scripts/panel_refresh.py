@@ -153,8 +153,12 @@ def optional_file_fingerprint(path: Path) -> str | None:
     return file_fingerprint(path) if path.is_file() else None
 
 
+def is_runtime_lock_path(path: Path) -> bool:
+    return path.name.lower().endswith(".lock")
+
+
 def ignore_runtime_lock_files(_directory: str, names: list[str]) -> set[str]:
-    return {name for name in names if name.lower().endswith(".lock")}
+    return {name for name in names if is_runtime_lock_path(Path(name))}
 
 
 def resolve_external_path(project_root: Path, value: str) -> Path:
@@ -207,7 +211,7 @@ def source_inventory(memory_root: Path) -> dict[str, str]:
         if not path.is_file() or path.is_symlink():
             continue
         relative = path.relative_to(memory_root).as_posix()
-        if path.name.lower().endswith(".lock") or any(
+        if is_runtime_lock_path(path) or any(
             part.startswith(".") for part in Path(relative).parts
         ):
             continue
@@ -1149,8 +1153,11 @@ def execute_node(
 def relative_file_map(root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if is_runtime_lock_path(relative):
+            continue
         if path.is_file() and not path.is_symlink():
-            result[path.relative_to(root).as_posix()] = file_fingerprint(path)
+            result[relative.as_posix()] = file_fingerprint(path)
     return result
 
 
@@ -1884,19 +1891,62 @@ def _inspect_refresh_unlocked(args: argparse.Namespace, project_root: Path, memo
     return result
 
 
+def audit_live_binding_rank(memory_root: Path, audit: dict[str, Any]) -> int:
+    return int(
+        isinstance(audit.get("action_projection_drift"), dict)
+        and drift_audit_matches_live(memory_root, audit)
+    )
+
+
+def audit_generated_timestamp(path: Path, audit: dict[str, Any]) -> float:
+    generated_at = audit.get("generated_at")
+    if isinstance(generated_at, str):
+        try:
+            parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return float("-inf")
+
+
 def latest_audit_path(memory_root: Path) -> Path | None:
-    candidates = sorted((memory_root / "audits").rglob("*.json")) if (memory_root / "audits").is_dir() else []
-    for path in reversed(candidates):
+    audits_root = memory_root / "audits"
+    if not audits_root.is_dir():
+        return None
+    candidates: list[tuple[tuple[int, float, str], Path]] = []
+    for path in audits_root.rglob("*.json"):
         payload = load_optional_json(path)
-        if (
+        if not (
             payload.get("audit_type") == "panel-input"
             or (
                 payload.get("audit_type") == "input"
                 and payload.get("scenario") in {"global", "management-panel"}
             )
         ):
-            return path
-    return None
+            continue
+        stable_audit_id = str(
+            payload.get("input_audit_id")
+            or payload.get("panel_input_audit_id")
+            or payload.get("audit_id")
+            or ""
+        )
+        candidates.append(
+            (
+                (
+                    audit_live_binding_rank(memory_root, payload),
+                    audit_generated_timestamp(path, payload),
+                    stable_audit_id,
+                ),
+                path,
+            )
+        )
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:

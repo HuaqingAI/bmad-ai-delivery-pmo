@@ -29,7 +29,53 @@ def module_content_id_without_receipt(payload: dict) -> str:
     return module.content_id(body)
 
 
+@contextmanager
+def windows_exclusive_file(path: Path):
+    import ctypes
+    from ctypes import wintypes
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(
+        str(path),
+        0x80000000 | 0x40000000,
+        0,
+        None,
+        4,
+        0x80,
+        None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        close_handle(handle)
+
+
 class PanelRefreshTests(unittest.TestCase):
+    def symlink_or_skip(self, link: Path, target: Path, *, target_is_directory: bool = True) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+        except OSError as exc:
+            if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows user lacks symbolic-link creation privilege")
+            raise
+
     def scaffold(self, root: Path) -> Path:
         memory = root / MEMORY_REL
         memory.mkdir(parents=True)
@@ -311,6 +357,70 @@ class PanelRefreshTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 1)
             self.assertIn("action projection drift", planned["blocked_reasons"][0])
+
+    def test_detect_prefers_latest_live_bound_root_audit_over_older_subdirectory_audit(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            old_path = memory / "audits/management-panel/panel-input-audit-old.json"
+            new_path = memory / "audits/2026-08-06-global-input-audit-new.json"
+            old_path.parent.mkdir(parents=True)
+            old_path.write_text(
+                json.dumps(
+                    {
+                        "audit_type": "input",
+                        "scenario": "management-panel",
+                        "generated_at": "2026-08-05T23:59:00+08:00",
+                        "input_audit_id": "input-audit-old",
+                        "counts": {"action_projection_drift": 0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            new_path.write_text(
+                json.dumps(
+                    {
+                        "audit_type": "input",
+                        "scenario": "global",
+                        "generated_at": "2026-08-06T09:30:00+08:00",
+                        "input_audit_id": "input-audit-new",
+                        "counts": {"action_projection_drift": 260},
+                        "action_projection_drift": {
+                            "ledger_fingerprint": None,
+                            "rows": [],
+                        },
+                        "repair_contract": {
+                            "findings": [
+                                {
+                                    "kind": "action-projection-drift",
+                                    "action_ids": ["ACT-260"],
+                                    "repair_batch_id": "batch-260",
+                                }
+                            ],
+                            "repair_batches": [
+                                {
+                                    "batch_id": "batch-260",
+                                    "command": {
+                                        "workflow": "adp-status-sync",
+                                        "workstream_id": "l1-checkout",
+                                        "action_ids": ["ACT-260"],
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            detected = module.detect(root, memory, fixture=True)
+
+            self.assertEqual(detected["drift_audit_path"], str(new_path))
+            self.assertFalse(detected["drift_audit_stale"])
+            self.assertEqual(detected["drift_count"], 260)
+            self.assertIn("action projection drift", detected["blocked_reasons"][0])
+            self.assertEqual(detected["repair_batches"][0]["repair_batch_id"], "batch-260")
 
     def test_repaired_facts_make_prior_drift_audit_stale(self) -> None:
         module = load_module()
@@ -902,7 +1012,7 @@ class PanelRefreshTests(unittest.TestCase):
             outside = root / "outside"
             memory.mkdir()
             outside.mkdir()
-            (memory / "escape-link").symlink_to(outside, target_is_directory=True)
+            self.symlink_or_skip(memory / "escape-link", outside)
             for raw_path in (
                 str((outside / "absolute.json").resolve()),
                 "../outside/parent.json",
@@ -927,7 +1037,7 @@ class PanelRefreshTests(unittest.TestCase):
             staging = root / ".adp-panel-refresh-staging"
             outside = root / "outside"
             outside.mkdir()
-            staging.symlink_to(outside, target_is_directory=True)
+            self.symlink_or_skip(staging, outside)
             with self.assertRaises(module.RefreshError) as raised:
                 module.workspace_for(memory, "refresh-" + "a" * 24)
             self.assertEqual(raised.exception.code, "REFRESH_STAGING_INVALID")
@@ -966,6 +1076,20 @@ class PanelRefreshTests(unittest.TestCase):
                 "state-audit", args, plan, root, staged, workspace, {}
             )
             self.assertEqual(command[command.index("--scenario") + 1], "global")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows exclusive-handle regression")
+    def test_fixture_apply_ignores_exclusively_held_runtime_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            plan = self.plan(root)
+            runtime_lock = memory / "actions/ledger-write.lock"
+
+            with windows_exclusive_file(runtime_lock):
+                applied = self.apply_ready_fixture(root, plan)
+
+            self.assertEqual(applied["status"], "published")
+            self.assertTrue((memory / "views/management-panel/index.html").is_file())
 
     def test_reuse_plan_becomes_terminal_and_recomputes_status_identity(self) -> None:
         module = load_module()

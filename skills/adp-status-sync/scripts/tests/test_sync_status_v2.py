@@ -59,6 +59,14 @@ Keep details in BMM artifacts.
 
 
 class StatusSyncV2Tests(unittest.TestCase):
+    def symlink_or_skip(self, link: Path, target: Path, *, target_is_directory: bool = True) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+        except OSError as exc:
+            if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows user lacks symbolic-link creation privilege")
+            raise
+
     def run_cli(self, *args: str, check: bool = True) -> tuple[subprocess.CompletedProcess[str], dict]:
         completed = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
@@ -713,6 +721,182 @@ class StatusSyncV2Tests(unittest.TestCase):
             check=check,
         )
 
+    def authority_migration_dry_run(self, root: Path) -> dict:
+        completed, payload = self.run_cli(
+            "migrate-authority-state",
+            str(root),
+            "--dry-run",
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, payload)
+        return payload
+
+    def authority_migration_apply(
+        self,
+        root: Path,
+        token: str,
+        *,
+        fail_after_stage: bool = False,
+        check: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], dict]:
+        args = ["migrate-authority-state", str(root), "--token", token]
+        if fail_after_stage:
+            args.append("--fail-after-stage")
+        return self.run_cli(*args, check=check)
+
+    def test_authority_state_migration_bootstraps_legacy_project_and_is_idempotent(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = root / MEMORY_REL
+            record = self.create_record(root, "l1-checkout")
+            self.create_action(root, "l1-checkout", "ACT-MIGRATE-001")
+            ledger = memory / "actions/action-ledger.md"
+            ledger.write_bytes(ledger.read_bytes() + b"\n")
+            record.with_name("delivery-record.state.json").unlink()
+            projection = record.with_name("action-projection.json")
+            projection.write_text('{"stale": true}\n', encoding="utf-8")
+            intake = self.write_updates(
+                root,
+                "legacy-follow-up.json",
+                [{"id": "l1-checkout", "progress": "Migration verification"}],
+            )
+
+            failed_update, failed_payload = self.run_cli(
+                "update",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--dry-run",
+                check=False,
+            )
+            self.assertEqual(failed_update.returncode, 2)
+            self.assertEqual(failed_payload["error_code"], "ACTION_LEDGER_STATE_MISMATCH")
+            with self.assertRaises(module.StatusSyncContractError) as missing_state:
+                module.repair_live_snapshot(
+                    memory,
+                    {"command": {"workstream_id": "l1-checkout"}, "read_set": {}},
+                )
+            self.assertEqual(missing_state.exception.error_code, "REPAIR_READ_SET_STALE")
+
+            preview = self.authority_migration_dry_run(root)
+
+            self.assertEqual(preview["status"], "ready-to-apply")
+            self.assertTrue(preview["token"].startswith("authority_"))
+            by_path = {item["path"]: item for item in preview["authority_artifacts"]}
+            self.assertEqual(by_path["actions/action-ledger.state.json"]["status"], "stale")
+            self.assertEqual(
+                by_path["workstreams/l1-checkout/delivery-record.state.json"]["status"],
+                "missing",
+            )
+            self.assertEqual(
+                by_path["workstreams/l1-checkout/action-projection.json"]["status"],
+                "stale",
+            )
+            original_bindings = dict(preview["source_fingerprints"])
+
+            completed, applied = self.authority_migration_apply(root, preview["token"], check=False)
+
+            self.assertEqual(completed.returncode, 0, applied)
+            self.assertEqual(applied["status"], "committed")
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            self.assertEqual(applied["receipt"]["source_fingerprints"], original_bindings)
+            ledger_state = json.loads((memory / "actions/action-ledger.state.json").read_text(encoding="utf-8"))
+            module.validate_action_ledger_state(ledger, ledger_state)
+            wdr_state = json.loads(record.with_name("delivery-record.state.json").read_text(encoding="utf-8"))
+            self.assertEqual(module.validate_wdr_state(record, wdr_state), [])
+            projection_payload = json.loads(projection.read_text(encoding="utf-8"))
+            self.assertEqual(projection_payload["ledger_fingerprint"], file_id(ledger))
+            self.assertEqual(projection_payload["wdr_revision"], wdr_state["wdr_revision"])
+            reused_token_completed, reused_token = self.authority_migration_apply(
+                root,
+                preview["token"],
+                check=False,
+            )
+            self.assertEqual(reused_token_completed.returncode, 2)
+            self.assertEqual(reused_token["error_code"], "AUTHORITY_MIGRATION_TOKEN_USED")
+
+            update_completed, update_payload = self.run_cli(
+                "update",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--dry-run",
+                check=False,
+            )
+            self.assertEqual(update_completed.returncode, 0, update_payload)
+
+            second = self.authority_migration_dry_run(root)
+
+            self.assertEqual(second["status"], "already-migrated")
+            self.assertTrue(second["reused"])
+            self.assertIsNone(second["token"])
+            self.assertEqual(second["planned_changed_paths"], [])
+            self.assertEqual(second["receipt_path"], applied["receipt_path"])
+
+            self.remove_managed_projection(root, "l1-checkout", "ACT-MIGRATE-001")
+            audit, batches = self.write_audit(
+                root,
+                [("l1-checkout", "ACT-MIGRATE-001")],
+                "post-authority-migration",
+            )
+            repair_preview = self.repair_dry_run(
+                root,
+                audit,
+                batches["l1-checkout"]["batch_id"],
+            )
+            self.assertEqual(repair_preview["outcome"], "applicable")
+
+    def test_authority_state_migration_token_binds_original_file_fingerprints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = root / MEMORY_REL
+            record = self.create_record(root, "l1-checkout")
+            (memory / "actions").mkdir(parents=True)
+            module = load_module()
+            (memory / "actions/action-ledger.md").write_text(module.default_action_ledger(), encoding="utf-8")
+            preview = self.authority_migration_dry_run(root)
+            record.write_bytes(record.read_bytes() + b"\n")
+
+            completed, payload = self.authority_migration_apply(
+                root,
+                preview["token"],
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(payload["error_code"], "AUTHORITY_MIGRATION_READ_SET_STALE")
+            self.assertFalse(record.with_name("delivery-record.state.json").exists())
+            receipt_root = memory / module.AUTHORITY_MIGRATION_RECEIPT_REL
+            self.assertFalse(receipt_root.exists())
+
+    def test_authority_state_migration_staging_failure_publishes_nothing(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = root / MEMORY_REL
+            record = self.create_record(root, "l1-checkout")
+            (memory / "actions").mkdir(parents=True)
+            ledger = memory / "actions/action-ledger.md"
+            ledger.write_text(module.default_action_ledger(), encoding="utf-8")
+            stale_state = memory / "actions/action-ledger.state.json"
+            stale_state.write_text('{"stale": true}\n', encoding="utf-8")
+            before = stale_state.read_bytes()
+            preview = self.authority_migration_dry_run(root)
+
+            completed, payload = self.authority_migration_apply(
+                root,
+                preview["token"],
+                fail_after_stage=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(payload["error_code"], "AUTHORITY_MIGRATION_INJECTED_FAILURE")
+            self.assertEqual(stale_state.read_bytes(), before)
+            self.assertFalse(record.with_name("delivery-record.state.json").exists())
+            self.assertFalse((memory / module.AUTHORITY_MIGRATION_RECEIPT_REL).exists())
+
     def test_repair_batches_preserve_commits_invalidate_failure_and_retry_from_fresh_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -796,8 +980,8 @@ class StatusSyncV2Tests(unittest.TestCase):
             second = memory / "actions/action-ledger.md"
             first.parent.mkdir(parents=True)
             second.parent.mkdir(parents=True)
-            first.write_text("before-first\n", encoding="utf-8")
-            second.write_text("before-second\n", encoding="utf-8")
+            first.write_bytes(b"before-first\n")
+            second.write_bytes(b"before-second\n")
             transaction_id = "status-mutation-crash"
             journal = memory / module.TRANSACTION_REL / transaction_id
             for target in (first, second):
@@ -815,7 +999,7 @@ class StatusSyncV2Tests(unittest.TestCase):
                     "after_sha256": module.sha256_bytes(b"after-second\n"),
                 },
             ]
-            first.write_text("after-first\n", encoding="utf-8")
+            first.write_bytes(b"after-first\n")
             module.write_json_atomic(
                 journal / "manifest.json",
                 {
@@ -844,8 +1028,8 @@ class StatusSyncV2Tests(unittest.TestCase):
             receipt = memory / "receipts/status-sync/ssr-crash.json"
             record.parent.mkdir(parents=True)
             receipt.parent.mkdir(parents=True)
-            record.write_text("before\n", encoding="utf-8")
-            receipt.write_text('{"status":"applied"}\n', encoding="utf-8")
+            record.write_bytes(b"before\n")
+            receipt.write_bytes(b'{"status":"applied"}\n')
 
             transaction_id = "status-receipt-crash"
             journal = memory / module.TRANSACTION_REL / transaction_id
@@ -889,7 +1073,7 @@ class StatusSyncV2Tests(unittest.TestCase):
             outside = root / "outside"
             memory.mkdir()
             outside.mkdir()
-            (memory / "escape-link").symlink_to(outside, target_is_directory=True)
+            self.symlink_or_skip(memory / "escape-link", outside)
             for raw_path in (
                 str((outside / "absolute.txt").resolve()),
                 "../outside/parent.txt",

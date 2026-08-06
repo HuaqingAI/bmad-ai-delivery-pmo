@@ -67,6 +67,8 @@ REPAIR_TOKEN_REL = Path("state") / "repair-tokens"
 REPAIR_RECEIPT_REL = Path("receipts") / "repair"
 REPAIR_ATTEMPT_LEDGER_REL = Path("state") / "repair-attempt-ledger.json"
 REPAIR_RECEIPT_INDEX_REL = Path("state") / "repair-receipt-index.json"
+AUTHORITY_MIGRATION_TOKEN_REL = Path("state") / "authority-migration-tokens"
+AUTHORITY_MIGRATION_RECEIPT_REL = Path("receipts") / "authority-state-migration"
 TRANSACTION_REL = Path("state") / "transactions"
 FACT_LOCK_REL = Path("state") / "fact-write.lock"
 WINDOWS_LOCK_RETRY_SECONDS = 0.05
@@ -347,6 +349,31 @@ def parse_args() -> argparse.Namespace:
     repair.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     repair.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
     repair.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+
+    authority_migration = subparsers.add_parser(
+        "migrate-authority-state",
+        help="Bootstrap ledger/WDR authority sidecars from current legacy project facts.",
+    )
+    authority_migration.add_argument("project_root", help="Project root containing ADP memory.")
+    authority_migration.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect differences and issue a single-use apply token without changing authority artifacts.",
+    )
+    authority_migration.add_argument("--token", help="Single-use token returned by a successful dry-run.")
+    authority_migration.add_argument(
+        "--principal",
+        default="adp-status-sync",
+        help="Stable operator or automation principal bound to the migration token.",
+    )
+    authority_migration.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    authority_migration.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    authority_migration.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
+    authority_migration.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
 
     migrate = subparsers.add_parser(
         "migrate-receipt",
@@ -1745,16 +1772,12 @@ def action_projection_record(row: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def write_action_projection_sidecar(
-    memory_root: Path,
+def build_action_projection_payload(
     workstream_id: str,
     rows: list[dict[str, str]],
     ledger_state: dict[str, Any],
-) -> Path:
-    record_path = memory_root / "workstreams" / workstream_id / "delivery-record.md"
-    state = load_json_object(wdr_state_path(record_path))
-    if not state:
-        state = update_wdr_state(record_path, record_path.read_bytes(), record_path.read_bytes())
+    wdr_state: dict[str, Any],
+) -> dict[str, Any]:
     records = [
         action_projection_record(row)
         for row in rows
@@ -1764,21 +1787,624 @@ def write_action_projection_sidecar(
             or workstream_id in parse_workstream_cell(row.get("Affected Workstreams", ""))
         )
     ]
-    payload = {
+    return {
         "contract": contract_ref("urn:adp:panel-sync-contracts:2026-07-24#wdr-action-projection-v1"),
         "schema_version": "1.0.0",
         "workstream_id": workstream_id,
         "ledger_fingerprint": ledger_state["ledger_fingerprint"],
         "ledger_revision": ledger_state["ledger_revision"],
-        "wdr_revision": state["wdr_revision"],
-        "file_generation": state["file_generation"],
+        "wdr_revision": wdr_state["wdr_revision"],
+        "file_generation": wdr_state["file_generation"],
         "renderer_id": "urn:adp:wdr-action-renderer:1.0.0",
         "renderer_sha256": "sha256:" + hashlib.sha256(b"adp-wdr-action-renderer:1.0.0").hexdigest(),
         "actions": sorted(records, key=lambda item: item["action_id"]),
     }
+
+
+def write_action_projection_sidecar(
+    memory_root: Path,
+    workstream_id: str,
+    rows: list[dict[str, str]],
+    ledger_state: dict[str, Any],
+    *,
+    wdr_state: dict[str, Any] | None = None,
+) -> Path:
+    record_path = memory_root / "workstreams" / workstream_id / "delivery-record.md"
+    state = wdr_state or load_json_object(wdr_state_path(record_path))
+    if not state:
+        state = update_wdr_state(record_path, record_path.read_bytes(), record_path.read_bytes())
+    payload = build_action_projection_payload(workstream_id, rows, ledger_state, state)
     path = record_path.with_name(ACTION_PROJECTION_REL)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     return path
+
+
+def pretty_json_bytes(payload: dict[str, Any]) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def optional_sha256_file(path: Path) -> str | None:
+    return sha256_bytes(path.read_bytes()) if path.is_file() else None
+
+
+def load_authority_json(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    if not path.is_file():
+        return None, ["missing"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, [f"malformed JSON: {exc}"]
+    if not isinstance(payload, dict):
+        return None, ["JSON root is not an object"]
+    return payload, []
+
+
+def validate_wdr_state(record_path: Path, state: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    claimed_state_id = state.get("state_id")
+    body = dict(state)
+    body.pop("state_id", None)
+    if claimed_state_id != content_id(body):
+        errors.append("state identity is invalid")
+    expected_path = f"workstreams/{record_path.parent.name}/delivery-record.md"
+    if state.get("schema_version") != "1.0.0":
+        errors.append("schema_version is not 1.0.0")
+    if state.get("workstream_id") != record_path.parent.name:
+        errors.append("workstream identity does not match the WDR path")
+    if state.get("wdr_path") != expected_path:
+        errors.append("wdr_path does not match the WDR path")
+    if state.get("wdr_fingerprint") != sha256_bytes(record_path.read_bytes()):
+        errors.append("WDR fingerprint does not match delivery-record.md")
+    for field_name in ("wdr_revision", "file_generation"):
+        value = state.get(field_name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            errors.append(f"{field_name} must be a positive integer")
+    return errors
+
+
+def bootstrap_wdr_state(record_path: Path) -> dict[str, Any]:
+    state = {
+        "schema_version": "1.0.0",
+        "workstream_id": record_path.parent.name,
+        "wdr_path": f"workstreams/{record_path.parent.name}/delivery-record.md",
+        "wdr_fingerprint": sha256_bytes(record_path.read_bytes()),
+        "wdr_revision": 1,
+        "file_generation": 1,
+    }
+    state["state_id"] = content_id(state)
+    return state
+
+
+def authority_artifact_report(
+    relative: Path,
+    kind: str,
+    existing_path: Path,
+    existing_payload: dict[str, Any] | None,
+    desired_payload: dict[str, Any],
+    issues: list[str],
+) -> dict[str, Any]:
+    desired_bytes = pretty_json_bytes(desired_payload)
+    existing_bytes = existing_path.read_bytes() if existing_path.is_file() else None
+    mismatched_fields = sorted(
+        key
+        for key in set(existing_payload or {}) | set(desired_payload)
+        if (existing_payload or {}).get(key) != desired_payload.get(key)
+    )
+    if issues:
+        status = "missing" if issues == ["missing"] else "stale"
+    elif mismatched_fields:
+        status = "stale"
+    elif existing_bytes != desired_bytes:
+        status = "format-drift"
+    else:
+        status = "current"
+    report = {
+        "path": relative.as_posix(),
+        "kind": kind,
+        "status": status,
+        "changed": existing_bytes != desired_bytes,
+        "existing_fingerprint": sha256_bytes(existing_bytes) if existing_bytes is not None else None,
+        "desired_fingerprint": sha256_bytes(desired_bytes),
+        "issues": issues,
+        "mismatched_fields": mismatched_fields,
+    }
+    if kind == "action-ledger-state" and existing_payload is not None and issues:
+        report["discarded_applied_command_count"] = len(
+            [item for item in existing_payload.get("applied_commands", []) if isinstance(item, dict)]
+        )
+    return report
+
+
+def authority_migration_snapshot(memory_root: Path) -> dict[str, Any]:
+    ledger_path = memory_root / ACTION_LEDGER_REL
+    if not ledger_path.is_file():
+        raise StatusSyncContractError(
+            "AUTHORITY_MIGRATION_SOURCE_MISSING",
+            f"authority migration requires the current action ledger: {ledger_path}",
+        )
+    rows = parse_action_ledger(ledger_path)
+    ledger_state_path = memory_root / ACTION_LEDGER_STATE_REL
+    existing_ledger_state, ledger_issues = load_authority_json(ledger_state_path)
+    if existing_ledger_state is not None:
+        if not existing_ledger_state:
+            ledger_issues.append("state object is empty")
+        else:
+            try:
+                validate_action_ledger_state(ledger_path, existing_ledger_state)
+            except StatusSyncContractError as exc:
+                ledger_issues.append(str(exc))
+    desired_ledger_state = (
+        existing_ledger_state
+        if existing_ledger_state is not None and not ledger_issues
+        else build_action_ledger_state(ledger_path, rows, {}, [])
+    )
+
+    desired_outputs: dict[str, dict[str, Any]] = {
+        ACTION_LEDGER_STATE_REL.as_posix(): desired_ledger_state,
+    }
+    source_fingerprints: dict[str, str | None] = {
+        ACTION_LEDGER_REL.as_posix(): optional_sha256_file(ledger_path),
+        ACTION_LEDGER_STATE_REL.as_posix(): optional_sha256_file(ledger_state_path),
+    }
+    authority_sources: dict[str, str] = {
+        ACTION_LEDGER_REL.as_posix(): sha256_bytes(ledger_path.read_bytes()),
+    }
+    artifacts = [
+        authority_artifact_report(
+            ACTION_LEDGER_STATE_REL,
+            "action-ledger-state",
+            ledger_state_path,
+            existing_ledger_state,
+            desired_ledger_state,
+            ledger_issues,
+        )
+    ]
+    workstream_ids: list[str] = []
+    workstreams_root = memory_root / "workstreams"
+    for record_path in sorted(workstreams_root.glob("*/delivery-record.md")) if workstreams_root.is_dir() else []:
+        if record_path.is_symlink() or record_path.parent.is_symlink():
+            raise StatusSyncContractError(
+                "AUTHORITY_MIGRATION_SOURCE_INVALID",
+                f"authority migration refuses symlinked WDR sources: {record_path}",
+            )
+        try:
+            record_path.resolve().relative_to(memory_root.resolve())
+        except ValueError as exc:
+            raise StatusSyncContractError(
+                "AUTHORITY_MIGRATION_SOURCE_INVALID",
+                f"authority migration WDR escapes the memory root: {record_path}",
+            ) from exc
+        workstream_id = record_path.parent.name
+        workstream_ids.append(workstream_id)
+        record_relative = record_path.relative_to(memory_root)
+        state_path = wdr_state_path(record_path)
+        state_relative = state_path.relative_to(memory_root)
+        projection_path = record_path.with_name(ACTION_PROJECTION_REL)
+        projection_relative = projection_path.relative_to(memory_root)
+        authority_sources[record_relative.as_posix()] = sha256_bytes(record_path.read_bytes())
+        source_fingerprints[record_relative.as_posix()] = authority_sources[record_relative.as_posix()]
+        source_fingerprints[state_relative.as_posix()] = optional_sha256_file(state_path)
+        source_fingerprints[projection_relative.as_posix()] = optional_sha256_file(projection_path)
+
+        existing_wdr_state, wdr_issues = load_authority_json(state_path)
+        if existing_wdr_state is not None:
+            wdr_issues.extend(validate_wdr_state(record_path, existing_wdr_state))
+        desired_wdr_state = (
+            existing_wdr_state
+            if existing_wdr_state is not None and not wdr_issues
+            else bootstrap_wdr_state(record_path)
+        )
+        desired_outputs[state_relative.as_posix()] = desired_wdr_state
+        artifacts.append(
+            authority_artifact_report(
+                state_relative,
+                "delivery-record-state",
+                state_path,
+                existing_wdr_state,
+                desired_wdr_state,
+                wdr_issues,
+            )
+        )
+
+        existing_projection, projection_issues = load_authority_json(projection_path)
+        desired_projection = build_action_projection_payload(
+            workstream_id,
+            rows,
+            desired_ledger_state,
+            desired_wdr_state,
+        )
+        desired_outputs[projection_relative.as_posix()] = desired_projection
+        artifacts.append(
+            authority_artifact_report(
+                projection_relative,
+                "action-projection",
+                projection_path,
+                existing_projection,
+                desired_projection,
+                projection_issues,
+            )
+        )
+
+    root_instance_id = "ri_" + hashlib.sha256(str(memory_root.resolve()).encode("utf-8")).hexdigest()
+    desired_fingerprints = {
+        path: sha256_bytes(pretty_json_bytes(payload))
+        for path, payload in sorted(desired_outputs.items())
+    }
+    authority_fact_id = content_id(
+        {
+            "root_instance_id": root_instance_id,
+            "authority_sources": authority_sources,
+        }
+    )
+    migration_id = content_id(
+        {
+            "root_instance_id": root_instance_id,
+            "source_fingerprints": source_fingerprints,
+            "desired_fingerprints": desired_fingerprints,
+        }
+    )
+    return {
+        "root_instance_id": root_instance_id,
+        "authority_fact_id": authority_fact_id,
+        "migration_id": migration_id,
+        "workstream_ids": workstream_ids,
+        "authority_sources": authority_sources,
+        "source_fingerprints": source_fingerprints,
+        "desired_outputs": desired_outputs,
+        "desired_fingerprints": desired_fingerprints,
+        "artifacts": artifacts,
+        "changed_paths": sorted(item["path"] for item in artifacts if item["changed"]),
+        "differences": [item for item in artifacts if item["status"] != "current"],
+    }
+
+
+def authority_migration_binding(snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    return {
+        "root_instance_id": snapshot["root_instance_id"],
+        "authority_fact_id": snapshot["authority_fact_id"],
+        "migration_id": snapshot["migration_id"],
+        "principal": principal,
+        "source_fingerprints": snapshot["source_fingerprints"],
+        "desired_fingerprints": snapshot["desired_fingerprints"],
+    }
+
+
+def authority_migration_token_path(memory_root: Path, token: str) -> Path:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return memory_root / AUTHORITY_MIGRATION_TOKEN_REL / f"{digest}.json"
+
+
+def issue_authority_migration_token(
+    memory_root: Path,
+    principal: str,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    issued = datetime.now(timezone.utc)
+    token = f"authority_{secrets.token_urlsafe(32)}"
+    binding = authority_migration_binding(snapshot, principal)
+    state = {
+        "schema_version": "1.0.0",
+        "token_hash": sha256_bytes(token.encode("utf-8")),
+        "principal": principal,
+        "authority_fact_id": snapshot["authority_fact_id"],
+        "migration_id": snapshot["migration_id"],
+        "binding": binding,
+        "binding_digest": content_id(binding),
+        "status": "unused",
+        "issued_at": issued.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "expires_at": (issued + timedelta(minutes=15)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "previous_state_id": None,
+    }
+    state["state_id"] = content_id(state)
+    write_json_atomic(authority_migration_token_path(memory_root, token), state)
+    return {"token": token, "token_state": state}
+
+
+def authority_migration_receipt_path(memory_root: Path, migration_id: str) -> Path:
+    return memory_root / AUTHORITY_MIGRATION_RECEIPT_REL / f"{migration_id.removeprefix('sha256:')}.json"
+
+
+def authority_receipt_is_valid(receipt: dict[str, Any]) -> bool:
+    claimed = receipt.get("receipt_id")
+    body = dict(receipt)
+    body.pop("receipt_id", None)
+    return claimed == content_id(body)
+
+
+def current_authority_migration_receipt(
+    memory_root: Path,
+    snapshot: dict[str, Any],
+) -> tuple[Path, dict[str, Any]] | None:
+    root = memory_root / AUTHORITY_MIGRATION_RECEIPT_REL
+    if not root.is_dir():
+        return None
+    matches: list[tuple[str, Path, dict[str, Any]]] = []
+    for path in root.glob("*.json"):
+        receipt = load_json_object(path)
+        if (
+            not receipt
+            or not authority_receipt_is_valid(receipt)
+            or receipt.get("outcome") != "committed"
+            or receipt.get("authority_fact_id") != snapshot["authority_fact_id"]
+            or receipt.get("output_fingerprints") != snapshot["desired_fingerprints"]
+        ):
+            continue
+        if any(
+            optional_sha256_file(memory_root / relative) != fingerprint
+            for relative, fingerprint in snapshot["desired_fingerprints"].items()
+        ):
+            continue
+        matches.append((str(receipt.get("recorded_at") or ""), path, receipt))
+    if not matches:
+        return None
+    _, path, receipt = max(matches, key=lambda item: item[0])
+    return path, receipt
+
+
+def authority_migration_receipt(
+    snapshot: dict[str, Any],
+    principal: str,
+    transaction_id: str,
+) -> dict[str, Any]:
+    body = {
+        "schema_version": "1.0.0",
+        "migration_id": snapshot["migration_id"],
+        "authority_fact_id": snapshot["authority_fact_id"],
+        "root_instance_id": snapshot["root_instance_id"],
+        "principal": principal,
+        "outcome": "committed",
+        "source_fingerprints": snapshot["source_fingerprints"],
+        "authority_sources": snapshot["authority_sources"],
+        "output_fingerprints": snapshot["desired_fingerprints"],
+        "changed_paths": snapshot["changed_paths"],
+        "differences": snapshot["differences"],
+        "business_transaction_id": transaction_id,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    return {"receipt_id": content_id(body), **body}
+
+
+def apply_authority_migration_snapshot(
+    memory_root: Path,
+    snapshot: dict[str, Any],
+    principal: str,
+    transaction_id: str,
+    fail_after_stage: bool,
+) -> tuple[list[str], dict[str, Any], Path, dict[str, Any]]:
+    with tempfile.TemporaryDirectory(prefix=".authority-migration-", dir=memory_root.parent) as temp_dir:
+        staged_root = Path(temp_dir) / "memory"
+        copy_memory_tree(memory_root, staged_root)
+        for relative, payload in snapshot["desired_outputs"].items():
+            write_json_atomic(staged_root / relative, payload)
+        receipt = authority_migration_receipt(snapshot, principal, transaction_id)
+        receipt_path = authority_migration_receipt_path(staged_root, snapshot["migration_id"])
+        write_json_atomic(receipt_path, receipt)
+        changed = changed_staged_files(memory_root, staged_root)
+        receipt_relative = receipt_path.relative_to(staged_root)
+        allowed = {Path(path) for path in snapshot["desired_outputs"]} | {receipt_relative}
+        unexpected = [path.as_posix() for path in changed if path not in allowed]
+        if unexpected:
+            raise StatusSyncContractError(
+                "AUTHORITY_MIGRATION_TARGET_INVALID",
+                "authority migration staged unexpected targets: " + ", ".join(unexpected),
+            )
+        if fail_after_stage:
+            raise StatusSyncContractError(
+                "AUTHORITY_MIGRATION_INJECTED_FAILURE",
+                "injected failure after authority migration staging",
+            )
+        publication = publish_staged_files(
+            memory_root,
+            staged_root,
+            changed,
+            transaction_kind="authority-state-migration",
+            transaction_id=transaction_id,
+        )
+        return [path.as_posix() for path in changed], publication, memory_root / receipt_relative, receipt
+
+
+def authority_migration_result(
+    project_root: Path,
+    memory_root: Path,
+    snapshot: dict[str, Any],
+    *,
+    status: str,
+    dry_run: bool,
+    token: str | None = None,
+    receipt_path: Path | None = None,
+    receipt: dict[str, Any] | None = None,
+    publication: dict[str, Any] | None = None,
+    changed_paths: list[str] | None = None,
+    reused: bool = False,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "mode": "migrate-authority-state",
+        "status": status,
+        "dry_run": dry_run,
+        "reused": reused,
+        "project_root": str(project_root),
+        "memory_root": str(memory_root),
+        "root_instance_id": snapshot["root_instance_id"],
+        "authority_fact_id": snapshot["authority_fact_id"],
+        "migration_id": receipt.get("migration_id") if receipt else snapshot["migration_id"],
+        "current_snapshot_id": snapshot["migration_id"],
+        "workstream_ids": snapshot["workstream_ids"],
+        "source_fingerprints": snapshot["source_fingerprints"],
+        "output_fingerprints": snapshot["desired_fingerprints"],
+        "authority_artifacts": snapshot["artifacts"],
+        "differences": snapshot["differences"],
+        "planned_changed_paths": snapshot["changed_paths"],
+        "changed_paths": changed_paths or [],
+        "token": token,
+        "receipt_path": str(receipt_path) if receipt_path else None,
+        "receipt": receipt,
+        "business_transaction": publication,
+    }
+
+
+def run_authority_migration(args: argparse.Namespace) -> int:
+    project_root = require_project_root(args.project_root)
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    principal = " ".join(str(args.principal or "").split())
+    if not principal:
+        raise StatusSyncContractError("AUTHORITY_MIGRATION_PRINCIPAL_INVALID", "principal must not be empty")
+    if args.dry_run:
+        if args.token:
+            raise StatusSyncContractError(
+                "AUTHORITY_MIGRATION_TOKEN_INVALID",
+                "--token is not accepted with --dry-run",
+            )
+        snapshot = authority_migration_snapshot(memory_root)
+        existing = current_authority_migration_receipt(memory_root, snapshot)
+        if not snapshot["changed_paths"] and existing:
+            receipt_path, receipt = existing
+            emit(
+                authority_migration_result(
+                    project_root,
+                    memory_root,
+                    snapshot,
+                    status="already-migrated",
+                    dry_run=True,
+                    receipt_path=receipt_path,
+                    receipt=receipt,
+                    reused=True,
+                ),
+                args.output,
+            )
+            return 0
+        issued = issue_authority_migration_token(memory_root, principal, snapshot)
+        emit(
+            authority_migration_result(
+                project_root,
+                memory_root,
+                snapshot,
+                status="ready-to-apply",
+                dry_run=True,
+                token=issued["token"],
+            ),
+            args.output,
+        )
+        return 0
+
+    if not args.token:
+        raise StatusSyncContractError(
+            "AUTHORITY_MIGRATION_TOKEN_REQUIRED",
+            "authority migration apply requires --token from a successful dry-run",
+        )
+    token_path = authority_migration_token_path(memory_root, args.token)
+    token_state = load_existing_json_object(
+        token_path,
+        "AUTHORITY_MIGRATION_TOKEN_INVALID",
+        "authority migration token",
+    )
+    if not token_state:
+        raise StatusSyncContractError("AUTHORITY_MIGRATION_TOKEN_INVALID", "authority migration token is unknown")
+    claimed_state_id = token_state.get("state_id")
+    state_body = dict(token_state)
+    state_body.pop("state_id", None)
+    if claimed_state_id != content_id(state_body) or token_state.get("token_hash") != sha256_bytes(args.token.encode("utf-8")):
+        raise StatusSyncContractError("AUTHORITY_MIGRATION_TOKEN_INVALID", "authority migration token identity is invalid")
+    if token_state.get("principal") != principal:
+        raise StatusSyncContractError("AUTHORITY_MIGRATION_TOKEN_INVALID", "authority migration token belongs to another principal")
+    if token_state.get("status") == "consumed":
+        raise StatusSyncContractError("AUTHORITY_MIGRATION_TOKEN_USED", "authority migration token was already consumed")
+    if token_state.get("status") == "reserved":
+        transaction_id = str(token_state.get("business_transaction_id") or "")
+        manifest = load_json_object(memory_root / TRANSACTION_REL / transaction_id / "manifest.json")
+        receipt_path = Path(str(token_state.get("receipt_path") or ""))
+        if manifest.get("status") == "committed" and transaction_targets_match(memory_root, manifest, "after") and receipt_path.is_file():
+            snapshot = authority_migration_snapshot(memory_root)
+            receipt = load_json_object(receipt_path)
+            update_token_state(token_path, token_state, "consumed")
+            emit(
+                authority_migration_result(
+                    project_root,
+                    memory_root,
+                    snapshot,
+                    status="committed",
+                    dry_run=False,
+                    receipt_path=receipt_path,
+                    receipt=receipt,
+                    publication=manifest,
+                    changed_paths=[str(item.get("path")) for item in manifest.get("targets", [])],
+                    reused=True,
+                ),
+                args.output,
+            )
+            return 0
+        update_token_state(
+            token_path,
+            token_state,
+            "invalidated",
+            terminal_error_code="AUTHORITY_MIGRATION_INTERRUPTED",
+        )
+        raise StatusSyncContractError(
+            "AUTHORITY_MIGRATION_INTERRUPTED",
+            "reserved authority migration did not reach a committed transaction; run a new dry-run",
+        )
+    if token_state.get("status") != "unused":
+        raise StatusSyncContractError("AUTHORITY_MIGRATION_TOKEN_INVALID", "authority migration token has an invalid state")
+    expires_at = datetime.fromisoformat(str(token_state.get("expires_at", "")).replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) > expires_at:
+        update_token_state(
+            token_path,
+            token_state,
+            "invalidated",
+            terminal_error_code="AUTHORITY_MIGRATION_TOKEN_EXPIRED",
+        )
+        raise StatusSyncContractError("AUTHORITY_MIGRATION_TOKEN_EXPIRED", "authority migration token expired")
+    snapshot = authority_migration_snapshot(memory_root)
+    binding = authority_migration_binding(snapshot, principal)
+    if token_state.get("binding") != binding or token_state.get("binding_digest") != content_id(binding):
+        update_token_state(
+            token_path,
+            token_state,
+            "invalidated",
+            terminal_error_code="AUTHORITY_MIGRATION_READ_SET_STALE",
+        )
+        raise StatusSyncContractError(
+            "AUTHORITY_MIGRATION_READ_SET_STALE",
+            "authority facts or sidecars changed after the migration dry-run",
+        )
+    transaction_base = "authority-state-migration-" + snapshot["migration_id"].removeprefix("sha256:")[:24]
+    transaction_id = next_status_transaction_id(memory_root, transaction_base)
+    receipt_path = authority_migration_receipt_path(memory_root, snapshot["migration_id"])
+    reserved = update_token_state(
+        token_path,
+        token_state,
+        "reserved",
+        business_transaction_id=transaction_id,
+        receipt_path=str(receipt_path),
+    )
+    try:
+        changed, publication, receipt_path, receipt = apply_authority_migration_snapshot(
+            memory_root,
+            snapshot,
+            principal,
+            transaction_id,
+            args.fail_after_stage,
+        )
+    except Exception as exc:
+        code = exc.error_code if isinstance(exc, StatusSyncContractError) else "AUTHORITY_MIGRATION_APPLY_FAILED"
+        update_token_state(token_path, reserved, "invalidated", terminal_error_code=code)
+        raise
+    update_token_state(token_path, reserved, "consumed")
+    emit(
+        authority_migration_result(
+            project_root,
+            memory_root,
+            snapshot,
+            status="committed",
+            dry_run=False,
+            receipt_path=receipt_path,
+            receipt=receipt,
+            publication=publication,
+            changed_paths=changed,
+        ),
+        args.output,
+    )
+    return 0
 
 
 def consume_status_intents(
@@ -4056,6 +4682,12 @@ def main() -> int:
             return run_stale(args)
         if args.command == "migrate-receipt":
             return run_migrate_receipt(args)
+        if args.command == "migrate-authority-state":
+            project_root = require_project_root(args.project_root)
+            memory_root = resolve_memory_root(project_root, args.memory_root)
+            with fact_write_lock(memory_root):
+                recover_status_transactions(memory_root)
+                return run_authority_migration(args)
         if args.command == "repair":
             project_root = require_project_root(args.project_root)
             memory_root = resolve_memory_root(project_root, args.memory_root)

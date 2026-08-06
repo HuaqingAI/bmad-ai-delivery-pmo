@@ -55,7 +55,36 @@ ATTESTATION_WRAPPER_FIELDS = {
     "original_report",
     "wrapper_attestation",
 }
-PLACEHOLDERS = {"", "-", "tbd", "todo", "none", "n/a", "na", "unknown"}
+PLACEHOLDERS = {
+    "",
+    "-",
+    "tbd",
+    "todo",
+    "none",
+    "n/a",
+    "na",
+    "unknown",
+    "待定",
+    "待确认",
+    "未指定",
+    "未知",
+    "暂无",
+    "不适用",
+    "无",
+}
+BUSINESS_PACKET_FIELD_ALIASES = {
+    "background": {"en": ("Background",), "zh": ("背景",)},
+    "decision": {"en": ("Decision Needed",), "zh": ("待决策事项", "决策事项")},
+    "options": {"en": ("Options",), "zh": ("选项",)},
+    "recommendation": {"en": ("Recommendation",), "zh": ("建议", "推荐方案")},
+    "status": {"en": ("Status",), "zh": ("状态",)},
+    "deadline": {"en": ("Deadline / trigger",), "zh": ("到期日 / 触发条件", "截止日期 / 触发条件")},
+    "owner": {
+        "en": ("Confirming owner", "Confirmer", "Requested decision owner"),
+        "zh": ("确认负责人", "请求决策人", "决策负责人"),
+    },
+    "workstreams": {"en": ("Affected workstreams",), "zh": ("受影响工作线", "受影响工作流")},
+}
 REQUIRED_PREPASS_GAP_FIELDS = {"gap", "category", "gap_type", "blocking", "field", "recommended_workflow"}
 REQUIRED_PREPASS_COLLECTIONS = {
     "sources_read",
@@ -2009,11 +2038,6 @@ def build_audit(
     gaps = list(prepass.get("gaps", []))
 
     freshness = audit_freshness(prepass, memory_root, as_of, max_age_days)
-    completeness = audit_completeness(prepass, memory_root, as_of, max_age_days)
-    consistency = audit_consistency(prepass, freshness)
-    closure = audit_closure(prepass, memory_root, as_of)
-    merge_quality = audit_merge_quality(prepass)
-    action_projection = audit_action_projection_drift(memory_root, prepass)
     requested_scopes = prepass.get("scope", {}).get("workstreams_requested", []) if isinstance(prepass.get("scope"), dict) else []
     skip_wdr_registry = bool(requested_scopes) and not prepass.get("registered_workstreams") and bool(prepass.get("virtual_scopes"))
     selected_scope_ids = {
@@ -2030,6 +2054,12 @@ def build_audit(
         skip_wdr_registry=skip_wdr_registry,
         selected_scope_ids=selected_scope_ids or None,
     )
+    document_locale = str(vnext.get("locale") or "en")
+    completeness = audit_completeness(prepass, memory_root, as_of, max_age_days, document_locale)
+    consistency = audit_consistency(prepass, freshness)
+    closure = audit_closure(prepass, memory_root, as_of, document_locale)
+    merge_quality = audit_merge_quality(prepass)
+    action_projection = audit_action_projection_drift(memory_root, prepass)
 
     contract_findings = canonical_findings(
         freshness,
@@ -2868,6 +2898,7 @@ def audit_completeness(
     memory_root: Path,
     as_of: date,
     max_age_days: int,
+    document_locale: str = "en",
 ) -> dict[str, list[dict[str, Any]]]:
     blocking_gaps: list[dict[str, Any]] = []
     non_blocking_gaps: list[dict[str, Any]] = []
@@ -2902,7 +2933,7 @@ def audit_completeness(
             if gap["field"] == "owner":
                 missing_owner_items.append(item)
 
-    packet_gaps, packet_owner_gaps = business_packet_field_gaps(memory_root)
+    packet_gaps, packet_owner_gaps = business_packet_field_gaps(memory_root, document_locale)
     blocking_gaps.extend(packet_gaps)
     missing_owner_items.extend(packet_owner_gaps)
 
@@ -2970,7 +3001,12 @@ def audit_consistency(prepass: dict[str, Any], freshness: dict[str, Any]) -> dic
     }
 
 
-def audit_closure(prepass: dict[str, Any], memory_root: Path, as_of: date) -> dict[str, list[dict[str, Any]]]:
+def audit_closure(
+    prepass: dict[str, Any],
+    memory_root: Path,
+    as_of: date,
+    document_locale: str = "en",
+) -> dict[str, list[dict[str, Any]]]:
     blocking_gaps: list[dict[str, Any]] = []
     non_blocking_gaps: list[dict[str, Any]] = []
     for gap in prepass_gaps(prepass, category="closure"):
@@ -2993,7 +3029,7 @@ def audit_closure(prepass: dict[str, Any], memory_root: Path, as_of: date) -> di
                 "execution_disposition": "blocked",
             }
         )
-    packets = business_packets(memory_root, as_of)
+    packets = business_packets(memory_root, as_of, document_locale)
     open_packets = [
         public_packet(packet)
         for packet in packets
@@ -3392,19 +3428,42 @@ def action_field_gaps(action: dict[str, Any], as_of: date, max_age_days: int) ->
     return gaps
 
 
-def business_packet_field_gaps(memory_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def business_packet_aliases(field: str, document_locale: str) -> tuple[str, ...]:
+    aliases = BUSINESS_PACKET_FIELD_ALIASES[field]
+    preferred = "zh" if str(document_locale).lower().startswith("zh") else "en"
+    fallback = "en" if preferred == "zh" else "zh"
+    return tuple(dict.fromkeys((*aliases[preferred], *aliases[fallback])))
+
+
+def business_packet_value(text: str, field: str, document_locale: str) -> str:
+    aliases = business_packet_aliases(field, document_locale)
+    for alias in aliases:
+        value = extract_colon_field(text, alias)
+        if value:
+            return value
+    for alias in aliases:
+        value = section_text(text, alias)
+        if value:
+            return value
+    return ""
+
+
+def business_packet_field_gaps(
+    memory_root: Path,
+    document_locale: str = "en",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     gaps: list[dict[str, Any]] = []
     owner_gaps: list[dict[str, Any]] = []
-    for packet in business_packets(memory_root, date.max):
+    for packet in business_packets(memory_root, date.max, document_locale):
         if decision_status_is_terminal(packet.get("status", "")):
             continue
         path = packet["path"]
         text = packet.get("_text", "")
         required = {
-            "background": section_text(text, "Background"),
-            "decision": section_text(text, "Decision Needed"),
-            "options": section_text(text, "Options"),
-            "recommendation": section_text(text, "Recommendation"),
+            "background": business_packet_value(text, "background", document_locale),
+            "decision": business_packet_value(text, "decision", document_locale),
+            "options": business_packet_value(text, "options", document_locale),
+            "recommendation": business_packet_value(text, "recommendation", document_locale),
             "deadline": packet.get("deadline", ""),
             "owner": packet.get("owner", ""),
             "workstreams": packet.get("affected_workstreams", ""),
@@ -3424,15 +3483,19 @@ def business_packet_field_gaps(memory_root: Path) -> tuple[list[dict[str, Any]],
     return gaps, owner_gaps
 
 
-def business_packets(memory_root: Path, as_of: date) -> list[dict[str, Any]]:
+def business_packets(
+    memory_root: Path,
+    as_of: date,
+    document_locale: str = "en",
+) -> list[dict[str, Any]]:
     results = []
     root = memory_root / "decisions" / "business-decision-packets"
     for path in sorted(root.glob("*.md")):
         text = read_text(path)
-        status = extract_colon_field(text, "Status") or "open"
-        deadline = extract_colon_field(text, "Deadline / trigger")
-        owner = extract_colon_field(text, "Confirming owner") or extract_colon_field(text, "Confirmer")
-        affected = extract_colon_field(text, "Affected workstreams")
+        status = business_packet_value(text, "status", document_locale) or "open"
+        deadline = business_packet_value(text, "deadline", document_locale)
+        owner = business_packet_value(text, "owner", document_locale)
+        affected = business_packet_value(text, "workstreams", document_locale)
         deadline_date = parse_date(deadline)
         results.append(
             {
@@ -4351,7 +4414,7 @@ def parse_datetime(value: str) -> datetime | None:
 
 
 def extract_colon_field(text: str, label: str) -> str:
-    pattern = re.compile(rf"^\s*(?:[-*+]\s+)?{re.escape(label)}\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+    pattern = re.compile(rf"^\s*(?:[-*+]\s+)?{re.escape(label)}\s*[:：]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
     match = pattern.search(text)
     return match.group(1).strip() if match else ""
 
@@ -4368,7 +4431,7 @@ def section_text(text: str, heading: str) -> str:
         return ""
     end = len(lines)
     for index in range(start, len(lines)):
-        if lines[index].startswith("## "):
+        if re.match(r"^##\s+", lines[index].strip()):
             end = index
             break
     return "\n".join(lines[start:end]).strip()
@@ -4398,7 +4461,17 @@ def normalize_status(value: Any) -> str:
 
 
 def decision_status_is_terminal(value: Any) -> bool:
-    return normalize_status(value) in TERMINAL_DECISION_STATUSES
+    raw = str(value or "").strip().lower()
+    localized = {
+        "已接受": "accepted",
+        "已关闭": "closed",
+        "已完成": "done",
+        "已取消": "cancelled",
+        "已拒绝": "rejected",
+        "已取代": "superseded",
+        "已废弃": "superseded",
+    }
+    return localized.get(raw, normalize_status(raw)) in TERMINAL_DECISION_STATUSES
 
 
 def normalize_text_key(value: str) -> str:
