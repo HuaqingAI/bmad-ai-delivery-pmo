@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import errno
 import hashlib
 import importlib.util
@@ -70,6 +71,9 @@ REPAIR_RECEIPT_INDEX_REL = Path("state") / "repair-receipt-index.json"
 AUTHORITY_MIGRATION_TOKEN_REL = Path("state") / "authority-migration-tokens"
 AUTHORITY_MIGRATION_RECEIPT_REL = Path("receipts") / "authority-state-migration"
 INTAKE_RECONCILIATION_TOKEN_REL = Path("state") / "intake-reconciliation-tokens"
+INTAKE_RETIREMENT_TOKEN_REL = Path("state") / "intake-retirement-tokens"
+INTAKE_RETIREMENT_RECEIPT_REL = Path("receipts") / "status-sync-retirement"
+INTAKE_RETIREMENT_REASONS = {"never-applied", "superseded-by", "invalid-proposal"}
 WDR_FIELD_REPAIR_TOKEN_REL = Path("state") / "wdr-field-repair-tokens"
 WDR_FIELD_REPAIR_RECEIPT_REL = Path("receipts") / "wdr-field-repair"
 TRANSACTION_REL = Path("state") / "transactions"
@@ -428,6 +432,32 @@ def parse_args() -> argparse.Namespace:
     reconcile.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     reconcile.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
     reconcile.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+
+    retire = subparsers.add_parser(
+        "retire-intake",
+        help="Create a governed content-bound retirement receipt for one historical intake.",
+    )
+    retire.add_argument("project_root", help="Project root containing ADP memory.")
+    retire.add_argument("--updates-file", required=True, help="Exact historical intake JSON to retire without modifying it.")
+    retire.add_argument("--reason", required=True, choices=sorted(INTAKE_RETIREMENT_REASONS))
+    retire.add_argument(
+        "--superseded-by",
+        help="Existing successor intake or durable status-sync receipt; required only for reason superseded-by.",
+    )
+    retire.add_argument(
+        "--justification",
+        help="Explicit governance rationale; required for never-applied and invalid-proposal.",
+    )
+    retire.add_argument("--principal", required=True, help="Governance authority principal bound to the token and receipt.")
+    retire.add_argument("--dry-run", action="store_true", help="Validate retirement governance and issue a single-use token.")
+    retire.add_argument("--token", help="Single-use token returned by a successful dry-run.")
+    retire.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    retire.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
+    retire.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
 
     migrate = subparsers.add_parser(
         "migrate-receipt",
@@ -3593,7 +3623,7 @@ def recover_status_transactions(memory_root: Path) -> list[str]:
         return recovered
     supported = {
         "status-mutation", "repair-business", "repair-attempt",
-        "intake-reconciliation", "wdr-field-repair", "workstream-alias-retirement", "l0-reference-repair",
+        "intake-reconciliation", "intake-retirement", "wdr-field-repair", "workstream-alias-retirement", "l0-reference-repair",
     }
     for manifest_path in sorted(root.glob("*/manifest.json")):
         manifest = load_json_object(manifest_path)
@@ -3971,11 +4001,21 @@ def action_composite_without_source_from_row(row: dict[str, str]) -> tuple[str, 
     )
 
 
+def parse_structured_mapping(raw: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        try:
+            payload = ast.literal_eval(raw)
+        except (ValueError, SyntaxError, TypeError):
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
 def source_provenance_bindings(raw_source: str) -> set[str]:
     bindings = {normalize_text_key(raw_source)} if raw_source.strip() else set()
-    try:
-        payload = json.loads(raw_source)
-    except (TypeError, json.JSONDecodeError):
+    payload = parse_structured_mapping(raw_source)
+    if payload is None:
         return bindings
     recognized = {
         "source", "original_source", "legacy_source", "meeting_source", "source_path",
@@ -4002,6 +4042,26 @@ def source_provenance_bindings(raw_source: str) -> set[str]:
     return bindings
 
 
+def action_ledger_artifact_source(raw_source: str) -> dict[str, str] | None:
+    payload = parse_structured_mapping(raw_source)
+    if payload is None:
+        return None
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    artifact_path = str(payload.get("artifact_path") or "").strip().replace("\\", "/")
+    fingerprint = str(payload.get("source_fingerprint") or "").strip().lower()
+    if (
+        artifact_id.casefold() != "action-ledger"
+        or artifact_path != ACTION_LEDGER_REL.as_posix()
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+    ):
+        return None
+    return {
+        "artifact_id": artifact_id,
+        "artifact_path": artifact_path,
+        "source_fingerprint": fingerprint,
+    }
+
+
 def action_source_lineage(action: ActionUpdate, row: dict[str, str]) -> dict[str, Any] | None:
     requested = normalize_text_key(str(action.source or ""))
     if not requested or requested == normalize_text_key(row.get("Source", "")):
@@ -4020,16 +4080,15 @@ def action_source_lineage(action: ActionUpdate, row: dict[str, str]) -> dict[str
     }
 
 
-def action_daily_log_lineage(memory_root: Path, action: ActionUpdate) -> dict[str, Any] | None:
-    if not action.action_id or not action.status:
-        return None
-    expected_sources = {
-        normalize_text_key(value)
-        for value in (action.source, action.intake_source)
-        if value and not is_missing_action_value(str(value))
-    }
+def action_daily_log_events(memory_root: Path, action_id: str) -> list[dict[str, Any]]:
+    if not action_id:
+        return []
     heading = re.compile(r"^##\s+(\S+)\s+Status sync - (.+?)\s*$")
-    matches: list[dict[str, Any]] = []
+    action_pattern = re.compile(
+        rf"^\s+-\s+(open|in-progress|blocked|done|cancelled):\s+{re.escape(action_id)}\s*$",
+        re.I,
+    )
+    events: list[dict[str, Any]] = []
     for path in sorted((memory_root / "daily").glob("*.md")):
         lines = path.read_text(encoding="utf-8-sig").splitlines()
         for index, line in enumerate(lines):
@@ -4038,39 +4097,184 @@ def action_daily_log_lineage(memory_root: Path, action: ActionUpdate) -> dict[st
                 continue
             end = next((i for i in range(index + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
             block_lines = lines[index + 1:end]
+            action_match = next((action_pattern.match(item) for item in block_lines if action_pattern.match(item)), None)
+            if action_match is None:
+                continue
             source_line = next((item for item in block_lines if item.startswith("- Source:")), "")
             source = source_line.partition(":")[2].strip()
-            action_pattern = re.compile(rf"^\s+-\s+{re.escape(action.status)}:\s+{re.escape(action.action_id)}\s*$", re.I)
-            if not any(action_pattern.match(item) for item in block_lines):
+            try:
+                observed_at = normalize_required_timestamp(match.group(1), "daily action timestamp")
+            except ValueError:
                 continue
-            if expected_sources and normalize_text_key(source) not in expected_sources:
-                continue
-            matches.append({
+            events.append({
                 "type": "ordered-daily-log-action-lineage",
-                "action_id": action.action_id,
-                "status": action.status,
+                "action_id": action_id,
+                "status": action_match.group(1).lower(),
                 "source": source,
                 "workstream_id": safe_normalize_id(match.group(2)),
-                "observed_at": normalize_required_timestamp(match.group(1), "daily action timestamp"),
+                "observed_at": observed_at,
                 "paths": [path.relative_to(memory_root).as_posix()],
                 "fingerprint": sha256_bytes(path.read_bytes()),
                 "sequence": index,
             })
+    return sorted(events, key=lineage_event_sort_key)
+
+
+def lineage_event_sort_key(event: dict[str, Any]) -> tuple[str, str, int]:
+    return (
+        str(event.get("observed_at") or ""),
+        str(event.get("daily_log") or (event.get("paths") or [""])[0]),
+        int(event.get("sequence", -1)),
+    )
+
+
+def lineage_event_is_later(old: dict[str, Any], newer: dict[str, Any]) -> bool:
+    old_at = str(old.get("observed_at") or "")
+    newer_at = str(newer.get("observed_at") or "")
+    if newer_at > old_at:
+        return True
+    if newer_at != old_at:
+        return False
+    old_log = str(old.get("daily_log") or "")
+    newer_log = str(newer.get("daily_log") or "")
+    return bool(
+        old_log
+        and old_log == newer_log
+        and int(newer.get("sequence", -1)) > int(old.get("sequence", -1))
+    )
+
+
+def action_daily_log_lineage(
+    memory_root: Path,
+    action: ActionUpdate,
+    action_id: str | None = None,
+) -> dict[str, Any] | None:
+    resolved_action_id = action_id or action.action_id
+    if not resolved_action_id or not action.status:
+        return None
+    expected_sources = {
+        normalize_text_key(value)
+        for value in (action.source, action.intake_source)
+        if value and not is_missing_action_value(str(value))
+    }
+    expected_workstream = safe_normalize_id(str(action.workstream or ""))
+    matches = [
+        event
+        for event in action_daily_log_events(memory_root, resolved_action_id)
+        if event["status"] == action.status
+        and (not expected_sources or normalize_text_key(event["source"]) in expected_sources)
+        and (
+            not expected_workstream
+            or expected_workstream == "program"
+            or event["workstream_id"] in {expected_workstream, "program"}
+        )
+    ]
     return matches[-1] if matches else None
+
+
+def legacy_action_artifact_lineage(
+    memory_root: Path,
+    action: ActionUpdate,
+    row: dict[str, str],
+) -> list[dict[str, Any]] | None:
+    artifact = action_ledger_artifact_source(row.get("Source", ""))
+    action_id = row.get("Action ID", "")
+    if artifact is None or not action_id or not action.status:
+        return None
+    requested_targets = sorted(action.affected_workstreams or [])
+    if (
+        "affected_workstreams" not in action.declared_fields
+        or not requested_targets
+        or sorted(parse_workstream_cell(row.get("Affected Workstreams", ""))) != requested_targets
+    ):
+        return None
+    allowed_scopes = {"program", *requested_targets}
+    daily = [
+        event
+        for event in action_daily_log_events(memory_root, action_id)
+        if event["status"] == action.status
+        and event["source"].strip()
+        and event["workstream_id"] in allowed_scopes
+    ]
+    if not daily:
+        return None
+    observation = daily[0]
+    return [
+        {
+            "type": "legacy-action-artifact-source-normalization",
+            "action_id": action_id,
+            "requested_source": action.source,
+            "current_source": row.get("Source", ""),
+            "artifact": artifact,
+            "exact_affected_workstreams": requested_targets,
+            "action_revision": action_revision(row),
+            "row_fingerprint": content_id({field: row.get(field, "") for field in ACTION_FIELDS}),
+        },
+        observation,
+    ]
+
+
+def current_action_daily_event(
+    memory_root: Path,
+    row: dict[str, str],
+    old_event: dict[str, Any],
+) -> dict[str, Any] | None:
+    action_id = row.get("Action ID", "")
+    current_source = normalize_text_key(row.get("Source", ""))
+    current_status = row.get("Status", "").strip().lower()
+    current_workstream = safe_normalize_id(row.get("Workstream", ""))
+    matches = [
+        event
+        for event in action_daily_log_events(memory_root, action_id)
+        if event["status"] == current_status
+        and normalize_text_key(event["source"]) == current_source
+        and (not current_workstream or event["workstream_id"] == current_workstream)
+        and lineage_event_is_later(old_event, event)
+    ]
+    return matches[-1] if matches else None
+
+
+def action_revision_lineage(
+    memory_root: Path,
+    action: ActionUpdate,
+    row: dict[str, str],
+    discrepancies: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    revised_fields = sorted(str(item.get("field") or "") for item in discrepancies)
+    if not revised_fields or any(field in {"action", "owner", "due_or_trigger", "closure_criteria"} for field in revised_fields):
+        return None
+    old = action_daily_log_lineage(memory_root, action, row.get("Action ID"))
+    if old is None:
+        return None
+    newer = current_action_daily_event(memory_root, row, old)
+    if newer is None:
+        return None
+    return [
+        old,
+        {
+            **newer,
+            "type": "ordered-daily-log-action-revision",
+            "revised_fields": revised_fields,
+            "current_action_revision": action_revision(row),
+            "current_row_fingerprint": content_id({field: row.get(field, "") for field in ACTION_FIELDS}),
+        },
+    ]
 
 
 def program_action_route_lineage(
     action: ActionUpdate,
     row: dict[str, str],
     daily_lineage: dict[str, Any] | None,
+    resolved_action_id: str | None = None,
 ) -> dict[str, Any] | None:
     requested_workstream = safe_normalize_id(str(action.workstream or ""))
     current_workstream = safe_normalize_id(str(row.get("Workstream", "") or ""))
     affected_workstreams = parse_workstream_cell(row.get("Affected Workstreams", ""))
     daily_workstream = safe_normalize_id(str((daily_lineage or {}).get("workstream_id", "") or ""))
+    action_id = resolved_action_id or action.action_id
     if (
-        not action.action_id
-        or row.get("Action ID") != action.action_id
+        not action_id
+        or row.get("Action ID") != action_id
         or current_workstream != "program"
         or not requested_workstream
         or requested_workstream == "program"
@@ -4082,7 +4286,7 @@ def program_action_route_lineage(
         return None
     return {
         "type": "program-action-route-normalization",
-        "action_id": action.action_id,
+        "action_id": action_id,
         "historical_workstream": requested_workstream,
         "current_workstream": current_workstream,
         "affected_workstreams": affected_workstreams,
@@ -4134,6 +4338,7 @@ def reconcile_action_command(
     matched: dict[str, str] | None = None
     source_lineage: dict[str, Any] | None = None
     route_lineage: dict[str, Any] | None = None
+    legacy_lineage: list[dict[str, Any]] = []
     if action.action_id:
         matched = next((row for row in rows if row.get("Action ID") == action.action_id), None)
         result["match_method"] = "stable-action-id"
@@ -4152,14 +4357,15 @@ def reconcile_action_command(
             result["match_method"] = "action-owner-source-due-closure"
         else:
             base = action_composite_without_source_from_update(action)
-            provenance_candidates = [] if base is None else [
-                (row, action_source_lineage(action, row))
-                for row in rows
-                if action_composite_without_source_from_row(row) == base
+            base_candidates = [] if base is None else [
+                row for row in rows if action_composite_without_source_from_row(row) == base
+            ]
+            provenance_candidates = [
+                (row, action_source_lineage(action, row)) for row in base_candidates
             ]
             provenance_candidates = [(row, lineage) for row, lineage in provenance_candidates if lineage is not None]
-            if action.affected_workstreams:
-                requested_targets = sorted(action.affected_workstreams)
+            if "affected_workstreams" in action.declared_fields:
+                requested_targets = sorted(action.affected_workstreams or [])
                 provenance_candidates = [
                     (row, lineage)
                     for row, lineage in provenance_candidates
@@ -4169,9 +4375,31 @@ def reconcile_action_command(
                 matched, source_lineage = provenance_candidates[0]
                 result["match_method"] = "action-owner-due-closure-plus-provenance"
             else:
-                result["reason"] = "action composite did not resolve exactly once"
-                result["candidate_action_ids"] = sorted(row.get("Action ID", "") for row, _ in provenance_candidates)
-                return result
+                exact_candidates = [
+                    row for row in base_candidates
+                    if "affected_workstreams" in action.declared_fields
+                    and sorted(parse_workstream_cell(row.get("Affected Workstreams", ""))) == sorted(action.affected_workstreams or [])
+                ]
+                lineage_candidates = [
+                    (row, legacy_action_artifact_lineage(memory_root, action, row))
+                    for row in exact_candidates
+                ]
+                lineage_candidates = [(row, lineage) for row, lineage in lineage_candidates if lineage is not None]
+                if len(lineage_candidates) == 1:
+                    matched, legacy_lineage = lineage_candidates[0]
+                    source_lineage = legacy_lineage[0]
+                    daily_lineage = legacy_lineage[1]
+                    route_lineage = program_action_route_lineage(
+                        action,
+                        matched,
+                        daily_lineage,
+                        matched.get("Action ID"),
+                    )
+                    result["match_method"] = "action-owner-due-closure-affected-plus-artifact-lineage"
+                else:
+                    result["reason"] = "action composite did not resolve exactly once"
+                    result["candidate_action_ids"] = sorted(row.get("Action ID", "") for row in exact_candidates)
+                    return result
     if matched is None:
         result["reason"] = "canonical ledger action was not found"
         return result
@@ -4196,12 +4424,19 @@ def reconcile_action_command(
         discrepancies.append(
             {"field": "action_revision", "requested_minimum": action.expected_revision, "current": current_revision}
         )
-    if discrepancies:
+    revision_lineage = action_revision_lineage(memory_root, action, matched, discrepancies)
+    if discrepancies and revision_lineage is None:
         result["reason"] = "canonical action facts do not satisfy the historical command"
         result["discrepancies"] = discrepancies
         return result
     result["satisfied"] = True
-    lineage_evidence = [item for item in (source_lineage, route_lineage) if item is not None]
+    lineage_evidence = [*legacy_lineage]
+    for item in (source_lineage, route_lineage):
+        if item is not None and item not in lineage_evidence:
+            lineage_evidence.append(item)
+    if revision_lineage:
+        lineage_evidence.extend(item for item in revision_lineage if item not in lineage_evidence)
+        result["superseded_fields"] = sorted(str(item.get("field") or "") for item in discrepancies)
     if lineage_evidence:
         result["satisfied_by"] = "superseded-lineage"
         result["lineage_evidence"] = lineage_evidence
@@ -4257,6 +4492,75 @@ def resolve_receipt_input_path(memory_root: Path, raw_path: Any) -> Path | None:
             candidate = memory_root.joinpath(*parts[index + len(anchor):])
             return candidate.resolve() if candidate.is_file() else None
     return None
+
+
+def durable_status_receipt_record(memory_root: Path, receipt_path: Path) -> dict[str, Any] | None:
+    receipt = load_json_object(receipt_path)
+    if (
+        receipt.get("receipt_schema_version") != RECEIPT_SCHEMA_VERSION
+        or receipt.get("receipt_type") not in {"execution", "migration", "reconciliation"}
+        or receipt.get("ok") is not True
+        or receipt.get("status") != "applied"
+        or receipt.get("durable") is not True
+        or receipt.get("dry_run") is not False
+        or receipt.get("mode") != "update"
+    ):
+        return None
+    try:
+        applied_at = normalize_required_timestamp(receipt.get("applied_at"), "receipt applied_at")
+    except ValueError:
+        return None
+    input_path = resolve_receipt_input_path(memory_root, receipt.get("input_path"))
+    if input_path is None:
+        return None
+    input_hash = sha256_bytes(input_path.read_bytes())
+    if receipt.get("input_hash") != input_hash:
+        return None
+    try:
+        payload, updates = load_updates_payload(input_path, "status sync")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if len(updates) != receipt.get("update_count"):
+        return None
+    if receipt.get("receipt_type") == "migration":
+        migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
+        evidence_path = resolve_receipt_input_path(memory_root, migration.get("evidence_path"))
+        if evidence_path is None:
+            return None
+        try:
+            evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+            historical_evidence(
+                evidence_payload,
+                evidence_path,
+                input_path,
+                input_hash,
+                len(updates),
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+    if receipt.get("receipt_type") == "reconciliation":
+        raw_input_path = Path(str(receipt.get("input_path")))
+        if not reconciliation_receipt_valid(receipt, raw_input_path, input_hash, len(updates)):
+            return None
+    return {
+        "receipt": receipt,
+        "receipt_path": receipt_path,
+        "input_path": input_path,
+        "input_hash": input_hash,
+        "payload": payload,
+        "updates": updates,
+        "applied_at": applied_at,
+    }
+
+
+def durable_receipts_for_input(memory_root: Path, input_path: Path) -> list[dict[str, Any]]:
+    expected = input_path.resolve()
+    matches: list[dict[str, Any]] = []
+    for receipt_path in sorted((memory_root / STATUS_SYNC_RECEIPT_REL).glob("*.json")):
+        record = durable_status_receipt_record(memory_root, receipt_path)
+        if record is not None and record["input_path"].resolve() == expected:
+            matches.append(record)
+    return sorted(matches, key=lambda item: item["applied_at"])
 
 
 def update_reconciliation_field_value(update: StatusUpdate, field_name: str) -> str | None:
@@ -4345,7 +4649,7 @@ DAILY_LOG_FIELD_LABELS = {
     "next_actions": "Next actions",
 }
 
-CHANGE_NOTE_STRUCTURED_METADATA = (
+WDR_STRUCTURED_METADATA_SUFFIX = (
     re.compile(r"^(?:audit|checkpoint|risk|severity|likelihood|status|metadata|source|gate)\s*[:=]\s*\S(?:.*\S)?$", re.I),
     re.compile(r"^risk_id\s*:\s*RISK-[A-Z0-9][A-Z0-9._-]*$", re.I),
     re.compile(r"^baseline_revision\s*:\s*[1-9]\d*$", re.I),
@@ -4353,9 +4657,12 @@ CHANGE_NOTE_STRUCTURED_METADATA = (
     re.compile(r"^Candidate\s+CHK-[A-Z0-9][A-Z0-9._-]*\s+from\s+(?:prd|architecture|epics?|stories?|artifact):\S.*$", re.I),
 )
 
+RISK_STRUCTURED_METADATA_SUFFIX = WDR_STRUCTURED_METADATA_SUFFIX[1:4]
 
-def is_structured_change_note_metadata(value: str) -> bool:
-    return any(pattern.fullmatch(value.strip()) for pattern in CHANGE_NOTE_STRUCTURED_METADATA)
+
+def is_structured_wdr_metadata(field_name: str, value: str) -> bool:
+    patterns = RISK_STRUCTURED_METADATA_SUFFIX if field_name == "risks" else WDR_STRUCTURED_METADATA_SUFFIX
+    return any(pattern.fullmatch(value.strip()) for pattern in patterns)
 
 
 def daily_status_lineage_events(memory_root: Path, workstream_id: str, field_name: str) -> list[dict[str, Any]]:
@@ -4408,6 +4715,92 @@ def daily_status_lineage_events(memory_root: Path, workstream_id: str, field_nam
     return events
 
 
+def daily_status_command_events(memory_root: Path, workstream_id: str, field_name: str) -> list[dict[str, Any]]:
+    canonical_label = VOLATILE_FIELDS[field_name][1]
+    heading = re.compile(r"^##\s+(\S+)\s+Status sync - (.+?)\s*$")
+    observations: dict[str, list[dict[str, Any]]] = {}
+    for path in sorted((memory_root / "daily").glob("*.md")):
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        for index, line in enumerate(lines):
+            match = heading.match(line)
+            if not match or safe_normalize_id(match.group(2)) != workstream_id:
+                continue
+            end = next((i for i in range(index + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+            block = lines[index + 1:end]
+            source_line = next((item for item in block if item.startswith("- Source:")), "")
+            source = source_line.partition(":")[2].strip()
+            if not source:
+                continue
+            changed_line = next((item for item in block if item.startswith("- Changed fields:")), "")
+            changed = [item.strip().casefold() for item in changed_line.partition(":")[2].split(",")]
+            if canonical_label.casefold() not in changed:
+                continue
+            try:
+                observed_at = normalize_required_timestamp(match.group(1), "daily status command timestamp")
+            except ValueError:
+                continue
+            observations.setdefault(normalize_text_key(source), []).append({
+                "observed_at": observed_at,
+                "source": source,
+                "daily_log": path.relative_to(memory_root).as_posix(),
+                "sequence": index,
+                "fingerprint": sha256_bytes(path.read_bytes()),
+            })
+    if not observations:
+        return []
+
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    intake_root = memory_root / "intake/status-sync"
+    for intake_path in sorted(intake_root.glob("*.json")):
+        try:
+            _, updates = load_updates_payload(intake_path, "status sync")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        for update in updates:
+            if update.workstream_id != workstream_id:
+                continue
+            value = update_reconciliation_field_value(update, field_name)
+            if value is None or not update.source.strip():
+                continue
+            source_key = normalize_text_key(update.source)
+            if source_key not in observations:
+                continue
+            candidates.setdefault(source_key, []).append({
+                "value": value,
+                "input_path": intake_path,
+                "input_hash": sha256_bytes(intake_path.read_bytes()),
+            })
+
+    events: list[dict[str, Any]] = []
+    for source_key, source_observations in observations.items():
+        source_candidates = candidates.get(source_key, [])
+        unique = {
+            (normalized_reconciliation_value(field_name, item["value"]), item["input_hash"]): item
+            for item in source_candidates
+        }
+        if len(unique) != 1:
+            continue
+        candidate = next(iter(unique.values()))
+        for observation in source_observations:
+            events.append({
+                "type": "ordered-daily-log-intake-command-lineage",
+                "observed_at": observation["observed_at"],
+                "value": candidate["value"],
+                "source": observation["source"],
+                "workstream_id": workstream_id,
+                "field": field_name,
+                "paths": [
+                    observation["daily_log"],
+                    candidate["input_path"].relative_to(memory_root).as_posix(),
+                ],
+                "daily_log": observation["daily_log"],
+                "sequence": observation["sequence"],
+                "fingerprint": observation["fingerprint"],
+                "input_hash": candidate["input_hash"],
+            })
+    return sorted(events, key=lineage_event_sort_key)
+
+
 def status_superseded_lineage(
     memory_root: Path,
     workstream_id: str,
@@ -4422,6 +4815,7 @@ def status_superseded_lineage(
         cache[key] = [
             *durable_status_receipt_events(memory_root, workstream_id, field_name),
             *daily_status_lineage_events(memory_root, workstream_id, field_name),
+            *daily_status_command_events(memory_root, workstream_id, field_name),
         ]
     events = cache[key]
     requested = normalized_reconciliation_value(field_name, requested_value)
@@ -4434,28 +4828,18 @@ def status_superseded_lineage(
         (event for event in events if normalized_reconciliation_value(field_name, event["value"]) == current),
         key=lambda event: event["observed_at"],
     )
-    def is_later(old: dict[str, Any], newer: dict[str, Any]) -> bool:
-        if newer["observed_at"] > old["observed_at"]:
-            return True
-        return bool(
-            newer["observed_at"] == old["observed_at"]
-            and newer.get("type") == old.get("type") == "daily-log-status-lineage"
-            and newer.get("daily_log") == old.get("daily_log")
-            and int(newer.get("sequence", -1)) > int(old.get("sequence", -1))
-        )
-
     pairs = [
         (old, newer)
         for old in old_events
         for newer in current_events
-        if is_later(old, newer)
+        if lineage_event_is_later(old, newer)
     ]
-    if not pairs and field_name == "change_notes" and current_wdr:
+    if not pairs and field_name in {"change_notes", "risks"} and current_wdr:
         requested_parts = [part.strip() for part in str(requested_value or "").split(";") if part.strip()]
         current_parts = [part.strip() for part in str(current_value or "").split(";") if part.strip()]
         suffix = current_parts[len(requested_parts):] if current_parts[:len(requested_parts)] == requested_parts else []
         daily_old_events = [event for event in old_events if event.get("type") == "daily-log-status-lineage"]
-        if suffix and daily_old_events and all(is_structured_change_note_metadata(part) for part in suffix):
+        if suffix and daily_old_events and all(is_structured_wdr_metadata(field_name, part) for part in suffix):
             old = daily_old_events[-1]
             state = current_wdr["state"]
             return [old, {
@@ -4573,7 +4957,243 @@ def reconcile_refresh_actions(
     return result
 
 
+MILESTONE_CORRECTION_INTAKE_REF = re.compile(
+    r"(?:_bmad-output/adp/memory/)?(intake/status-sync/[A-Za-z0-9][A-Za-z0-9._-]*\.json)(?:#[^;\s]+)?"
+)
+
+
+def milestone_command_values(milestone: MilestoneUpdate, baseline_revision: int) -> dict[str, str]:
+    values = {
+        "Status": milestone.status,
+        "Baseline Revision": str(baseline_revision),
+        "Source": "; ".join(milestone.evidence),
+    }
+    if milestone.forecast:
+        values["Forecast"] = milestone.forecast
+    if milestone.actual:
+        values["Actual"] = milestone.actual
+    return values
+
+
+def milestone_daily_log_events(
+    memory_root: Path,
+    workstream_id: str,
+    milestone_id: str,
+) -> list[dict[str, Any]]:
+    heading = re.compile(r"^##\s+(\S+)\s+Status sync - (.+?)\s*$")
+    row_pattern = re.compile(
+        rf"^\s{{2}}-\s+{re.escape(milestone_id)}:\s+(planned|in-progress|at-risk|done|blocked)(?:\s+\((.*?)\))?\s*$",
+        re.I,
+    )
+    events: list[dict[str, Any]] = []
+    for path in sorted((memory_root / "daily").glob("*.md")):
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        for index, line in enumerate(lines):
+            match = heading.match(line)
+            if not match or safe_normalize_id(match.group(2)) != workstream_id:
+                continue
+            end = next((i for i in range(index + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+            block = lines[index + 1:end]
+            for block_index, item in enumerate(block):
+                row_match = row_pattern.match(item)
+                if row_match is None:
+                    continue
+                details = {"Forecast": "", "Actual": ""}
+                for part in [value.strip() for value in str(row_match.group(2) or "").split(",") if value.strip()]:
+                    if part.startswith("forecast "):
+                        details["Forecast"] = part.removeprefix("forecast ").strip()
+                    elif part.startswith("actual "):
+                        details["Actual"] = part.removeprefix("actual ").strip()
+                evidence: list[str] = []
+                for following in block[block_index + 1:]:
+                    if following.startswith("    - Evidence:"):
+                        evidence.append(following.partition(":")[2].strip())
+                    elif following.startswith("  - ") or (following.startswith("-") and following.strip()):
+                        break
+                try:
+                    observed_at = normalize_required_timestamp(match.group(1), "daily milestone timestamp")
+                except ValueError:
+                    continue
+                events.append({
+                    "type": "ordered-daily-log-milestone-lineage",
+                    "observed_at": observed_at,
+                    "workstream_id": workstream_id,
+                    "milestone_id": milestone_id,
+                    "values": {
+                        "Status": row_match.group(1).lower(),
+                        "Forecast": details["Forecast"],
+                        "Actual": details["Actual"],
+                        "Source": "; ".join(evidence),
+                    },
+                    "source": next((line.partition(":")[2].strip() for line in block if line.startswith("- Source:")), ""),
+                    "paths": [path.relative_to(memory_root).as_posix()],
+                    "daily_log": path.relative_to(memory_root).as_posix(),
+                    "sequence": index + block_index,
+                    "fingerprint": sha256_bytes(path.read_bytes()),
+                })
+    return sorted(events, key=lineage_event_sort_key)
+
+
+def milestone_receipt_events(
+    memory_root: Path,
+    workstream_id: str,
+    milestone_id: str,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for receipt_path in sorted((memory_root / STATUS_SYNC_RECEIPT_REL).glob("*.json")):
+        record = durable_status_receipt_record(memory_root, receipt_path)
+        if record is None:
+            continue
+        for update in record["updates"]:
+            if update.workstream_id != workstream_id:
+                continue
+            for milestone in update.milestones:
+                if milestone.milestone_id != milestone_id:
+                    continue
+                expected_revision = milestone.expected_baseline_revision
+                values = milestone_command_values(milestone, expected_revision or 0)
+                events.append({
+                    "type": "status-execution-receipt-milestone-lineage",
+                    "observed_at": record["applied_at"],
+                    "workstream_id": workstream_id,
+                    "milestone_id": milestone_id,
+                    "values": values,
+                    "baseline_revision": expected_revision,
+                    "paths": [
+                        receipt_path.relative_to(memory_root).as_posix(),
+                        *([record["input_path"].relative_to(memory_root).as_posix()]
+                          if record["input_path"].is_relative_to(memory_root) else []),
+                    ],
+                    "receipt": receipt_path.relative_to(memory_root).as_posix(),
+                    "input_hash": record["input_hash"],
+                })
+    return sorted(events, key=lineage_event_sort_key)
+
+
+def milestone_event_matches(event: dict[str, Any], expected: dict[str, str]) -> bool:
+    values = event.get("values") if isinstance(event.get("values"), dict) else {}
+    return all(
+        normalized_reconciliation_value(field, values.get(field, ""))
+        == normalized_reconciliation_value(field, value)
+        for field, value in expected.items()
+        if field != "Baseline Revision"
+    )
+
+
+def milestone_correction_references(memory_root: Path, source: str) -> list[Path]:
+    paths: list[Path] = []
+    for match in MILESTONE_CORRECTION_INTAKE_REF.finditer(source):
+        path = memory_root / match.group(1)
+        if path.is_file() and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def milestone_superseded_lineage(
+    memory_root: Path,
+    update: StatusUpdate,
+    milestone: MilestoneUpdate,
+    row: dict[str, str],
+    historical_revision: int,
+    current_revision: int,
+    wdr: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, list[str]]:
+    historical_values = milestone_command_values(milestone, historical_revision)
+    old_events = sorted([
+        event
+        for event in [
+            *milestone_daily_log_events(memory_root, update.workstream_id, milestone.milestone_id),
+            *milestone_receipt_events(memory_root, update.workstream_id, milestone.milestone_id),
+        ]
+        if milestone_event_matches(event, historical_values)
+        and (
+            event.get("baseline_revision") in {None, 0, historical_revision}
+            or event.get("type") == "ordered-daily-log-milestone-lineage"
+        )
+    ], key=lineage_event_sort_key)
+    current_values = {
+        field: row.get(field, "")
+        for field in ("Status", "Forecast", "Actual", "Source")
+        if field in historical_values or field in {"Status", "Source"}
+    }
+    correction_paths = milestone_correction_references(memory_root, row.get("Source", ""))
+    missing_receipts: list[str] = []
+    if not old_events and not correction_paths:
+        return None, []
+    current_events: list[dict[str, Any]] = []
+    if correction_paths:
+        for correction_path in correction_paths:
+            receipts = durable_receipts_for_input(memory_root, correction_path)
+            if not receipts:
+                missing_receipts.append(correction_path.relative_to(memory_root).as_posix())
+                continue
+            for receipt_record in receipts:
+                matches = [
+                    candidate
+                    for candidate_update in receipt_record["updates"]
+                    if candidate_update.workstream_id == update.workstream_id
+                    for candidate in candidate_update.milestones
+                    if candidate.milestone_id == milestone.milestone_id
+                ]
+                if len(matches) != 1:
+                    continue
+                candidate = matches[0]
+                candidate_values = milestone_command_values(
+                    candidate,
+                    candidate.expected_baseline_revision or current_revision,
+                )
+                effective_values = {**current_values, **candidate_values}
+                synthetic = {"values": effective_values}
+                if not milestone_event_matches(synthetic, current_values):
+                    continue
+                current_events.append({
+                    "type": "receipt-bound-milestone-correction-lineage",
+                    "observed_at": receipt_record["applied_at"],
+                    "workstream_id": update.workstream_id,
+                    "milestone_id": milestone.milestone_id,
+                    "baseline_revision": candidate.expected_baseline_revision or current_revision,
+                    "correction_intake": correction_path.relative_to(memory_root).as_posix(),
+                    "receipt": receipt_record["receipt_path"].relative_to(memory_root).as_posix(),
+                    "input_hash": receipt_record["input_hash"],
+                    "values": candidate_values,
+                    "paths": [
+                        correction_path.relative_to(memory_root).as_posix(),
+                        receipt_record["receipt_path"].relative_to(memory_root).as_posix(),
+                    ],
+                })
+    else:
+        current_events = [
+            event
+            for event in [
+                *milestone_daily_log_events(memory_root, update.workstream_id, milestone.milestone_id),
+                *milestone_receipt_events(memory_root, update.workstream_id, milestone.milestone_id),
+            ]
+            if milestone_event_matches(event, current_values)
+            and (
+                historical_revision == current_revision
+                or event.get("baseline_revision") == current_revision
+            )
+        ]
+    if missing_receipts:
+        return None, sorted(missing_receipts)
+    if not old_events:
+        return None, []
+    old = old_events[-1]
+    later = [event for event in current_events if lineage_event_is_later(old, event)]
+    if not later:
+        return None, sorted(missing_receipts)
+    newer = sorted(later, key=lineage_event_sort_key)[-1]
+    return [old, {
+        **newer,
+        "roadmap_revision": wdr["state"].get("wdr_revision"),
+        "file_generation": wdr["state"].get("file_generation"),
+        "current_baseline_revision": current_revision,
+        "current_wdr_fingerprint": wdr["state"].get("wdr_fingerprint"),
+    }], sorted(missing_receipts)
+
+
 def reconcile_milestone_command(
+    memory_root: Path,
     update: StatusUpdate,
     milestone: MilestoneUpdate,
     baseline: dict[str, Any],
@@ -4581,20 +5201,22 @@ def reconcile_milestone_command(
     wdr: dict[str, Any],
     ordinal: int,
 ) -> dict[str, Any]:
+    historical_revision = milestone.expected_baseline_revision or baseline_revision
     result: dict[str, Any] = {
         "command_type": "milestone",
         "command_index": ordinal,
         "workstream_id": update.workstream_id,
         "milestone_id": milestone.milestone_id,
         "satisfied": False,
+        "historical_baseline_revision": historical_revision,
         "current_baseline_revision": baseline_revision,
         "lineage": {
             "wdr_revision": wdr["state"]["wdr_revision"],
             "file_generation": wdr["state"]["file_generation"],
         },
     }
-    if milestone.expected_baseline_revision is not None and milestone.expected_baseline_revision != baseline_revision:
-        result["reason"] = "historical milestone command targets a different baseline revision"
+    if historical_revision > baseline_revision:
+        result["reason"] = "historical milestone command targets a future baseline revision"
         return result
     baseline_rows = baseline.get("milestones")
     if not isinstance(baseline_rows, list):
@@ -4615,23 +5237,43 @@ def reconcile_milestone_command(
         return result
     row = matches[0]
     discrepancies: list[dict[str, Any]] = []
-    requested = {
-        "Status": milestone.status,
-        "Baseline Revision": str(baseline_revision),
-        "Source": "; ".join(milestone.evidence),
-    }
-    if milestone.forecast:
-        requested["Forecast"] = milestone.forecast
-    if milestone.actual:
-        requested["Actual"] = milestone.actual
+    requested = milestone_command_values(milestone, historical_revision)
     for field_name, expected in requested.items():
         if normalized_reconciliation_value(field_name, expected) != normalized_reconciliation_value(field_name, row.get(field_name, "")):
             discrepancies.append({"field": field_name, "requested": expected, "current": row.get(field_name, "")})
-    if discrepancies:
-        result["reason"] = "current milestone facts do not satisfy the historical command"
-        result["discrepancies"] = discrepancies
+    row_baseline_revision = normalized_reconciliation_value("baseline_revision", row.get("Baseline Revision", ""))
+    if row_baseline_revision != baseline_revision:
+        discrepancies.append({
+            "field": "current_baseline_revision",
+            "requested": baseline_revision,
+            "current": row_baseline_revision,
+        })
+    if not discrepancies:
+        result.update({"satisfied": True, "satisfied_by": "current-fact"})
         return result
-    result["satisfied"] = True
+    lineage, missing_receipts = milestone_superseded_lineage(
+        memory_root,
+        update,
+        milestone,
+        row,
+        historical_revision,
+        baseline_revision,
+        wdr,
+    )
+    if lineage:
+        result.update({
+            "satisfied": True,
+            "satisfied_by": "superseded-lineage",
+            "superseded_fields": sorted(str(item["field"]) for item in discrepancies),
+            "lineage_evidence": lineage,
+        })
+        return result
+    if missing_receipts:
+        result["reason"] = "milestone correction lineage is referenced but lacks a durable correction receipt"
+        result["missing_correction_receipts"] = missing_receipts
+    else:
+        result["reason"] = "current milestone facts do not satisfy the historical command"
+    result["discrepancies"] = discrepancies
     return result
 
 
@@ -4812,7 +5454,7 @@ def reconciliation_snapshot(
         for milestone in update.milestones:
             ordinal += 1
             command_results.append(
-                reconcile_milestone_command(update, milestone, baseline, baseline_revision, wdr, ordinal)
+                reconcile_milestone_command(memory_root, update, milestone, baseline, baseline_revision, wdr, ordinal)
             )
         for intent_id in update.consumed_intent_ids:
             ordinal += 1
@@ -5097,6 +5739,576 @@ def run_reconcile_intake(args: argparse.Namespace) -> int:
         },
         args.output,
     )
+    return 0
+
+
+def intake_retirement_token_path(memory_root: Path, token: str) -> Path:
+    digest = sha256_bytes(token.encode("utf-8")).removeprefix("sha256:")
+    return memory_root / INTAKE_RETIREMENT_TOKEN_REL / f"{digest}.json"
+
+
+def retirement_successor_binding(
+    project_root: Path,
+    memory_root: Path,
+    input_path: Path,
+    raw_target: str | None,
+) -> dict[str, Any] | None:
+    if not raw_target:
+        return None
+    target = Path(raw_target).expanduser()
+    if not target.is_absolute():
+        project_candidate = (project_root / target).resolve()
+        memory_candidate = (memory_root / target).resolve()
+        target = project_candidate if project_candidate.is_file() else memory_candidate
+    target = target.resolve()
+    if not target.is_file():
+        raise StatusSyncContractError("INTAKE_RETIREMENT_SUCCESSOR_INVALID", f"superseded-by target not found: {target}")
+    try:
+        relative = target.relative_to(memory_root)
+    except ValueError as exc:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "superseded-by target must be inside ADP memory",
+        ) from exc
+    if target == input_path:
+        raise StatusSyncContractError("INTAKE_RETIREMENT_SUCCESSOR_INVALID", "an intake cannot supersede itself")
+    fingerprint = sha256_bytes(target.read_bytes())
+    if relative.parts[:2] == ("intake", "status-sync"):
+        try:
+            payload, updates = load_updates_payload(target, "status sync")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+                "superseded-by intake must be a valid status-sync intake",
+            ) from exc
+        receipts = durable_receipts_for_input(memory_root, target)
+        binding: dict[str, Any] = {
+            "binding_type": "intake",
+            "path": relative.as_posix(),
+            "fingerprint": fingerprint,
+            "update_count": len(updates),
+            "payload_id": content_id(payload),
+        }
+        if receipts:
+            latest = receipts[-1]
+            binding["durable_receipt"] = {
+                "path": latest["receipt_path"].relative_to(memory_root).as_posix(),
+                "fingerprint": sha256_bytes(latest["receipt_path"].read_bytes()),
+                "receipt_type": latest["receipt"].get("receipt_type"),
+                "applied_at": latest["applied_at"],
+            }
+        return binding
+    if relative.parts[:2] == ("receipts", "status-sync"):
+        record = durable_status_receipt_record(memory_root, target)
+        if record is None:
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+                "superseded-by receipt is not a valid durable status-sync receipt",
+            )
+        return {
+            "binding_type": "durable-receipt",
+            "path": relative.as_posix(),
+            "fingerprint": fingerprint,
+            "receipt_type": record["receipt"].get("receipt_type"),
+            "input_path": record["input_path"].relative_to(memory_root).as_posix()
+            if record["input_path"].is_relative_to(memory_root)
+            else str(record["input_path"]),
+            "input_hash": record["input_hash"],
+            "applied_at": record["applied_at"],
+        }
+    raise StatusSyncContractError(
+        "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+        "superseded-by must reference a status-sync intake or durable status-sync receipt",
+    )
+
+
+def retirement_successor_binding_valid(memory_root: Path, binding: Any, input_path: Path) -> bool:
+    if not isinstance(binding, dict):
+        return False
+    raw_path = str(binding.get("path") or "")
+    fingerprint = str(binding.get("fingerprint") or "").strip().lower()
+    path = memory_root / raw_path
+    try:
+        relative = path.resolve().relative_to(memory_root.resolve())
+    except ValueError:
+        return False
+    if (
+        not raw_path
+        or path.resolve() == input_path.resolve()
+        or not path.is_file()
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+        or sha256_bytes(path.read_bytes()) != fingerprint
+    ):
+        return False
+    if binding.get("binding_type") == "intake":
+        if relative.parts[:2] != ("intake", "status-sync"):
+            return False
+        try:
+            payload, updates = load_updates_payload(path, "status sync")
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return False
+        if binding.get("update_count") != len(updates) or binding.get("payload_id") != content_id(payload):
+            return False
+        durable = binding.get("durable_receipt")
+        if durable is None:
+            return True
+        if not isinstance(durable, dict):
+            return False
+        receipt_path = memory_root / str(durable.get("path") or "")
+        record = durable_status_receipt_record(memory_root, receipt_path)
+        return bool(
+            record is not None
+            and sha256_bytes(receipt_path.read_bytes()) == durable.get("fingerprint")
+            and record["input_path"].resolve() == path.resolve()
+        )
+    if binding.get("binding_type") == "durable-receipt":
+        if relative.parts[:2] != ("receipts", "status-sync"):
+            return False
+        record = durable_status_receipt_record(memory_root, path)
+        return bool(
+            record is not None
+            and record["input_hash"] == binding.get("input_hash")
+            and record["input_path"].resolve() != input_path.resolve()
+        )
+    return False
+
+
+def retirement_execution_scan(
+    memory_root: Path,
+    input_path: Path,
+    input_hash: str,
+    updates: list[StatusUpdate],
+) -> dict[str, Any]:
+    try:
+        reconciliation = reconciliation_snapshot(memory_root, input_path, input_hash, updates)
+    except (StatusSyncContractError, ValueError, OSError) as exc:
+        return {
+            "verification_status": "blocked",
+            "error_code": exc.error_code if isinstance(exc, StatusSyncContractError) else "INTAKE_RETIREMENT_EVIDENCE_UNAVAILABLE",
+            "error": str(exc),
+            "satisfied_commands": [],
+            "read_set": [],
+        }
+    satisfied = [result for result in reconciliation["command_results"] if result.get("satisfied")]
+    return {
+        "verification_status": reconciliation["verification_status"],
+        "snapshot_id": reconciliation["snapshot_id"],
+        "satisfied_commands": satisfied,
+        "missing_commands": reconciliation["missing_commands"],
+        "read_set": reconciliation["read_set"],
+    }
+
+
+def intake_retirement_snapshot(
+    project_root: Path,
+    memory_root: Path,
+    input_path: Path,
+    reason: str,
+    superseded_by: str | None,
+    justification: str | None,
+) -> dict[str, Any]:
+    if reason not in INTAKE_RETIREMENT_REASONS:
+        raise StatusSyncContractError("INTAKE_RETIREMENT_REASON_INVALID", f"unsupported retirement reason: {reason}")
+    try:
+        intake_relative = input_path.resolve().relative_to((memory_root / "intake/status-sync").resolve())
+    except ValueError as exc:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_TARGET_INVALID",
+            "updates-file must be a JSON file under memory/intake/status-sync",
+        ) from exc
+    if len(intake_relative.parts) != 1 or input_path.suffix.lower() != ".json":
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_TARGET_INVALID",
+            "updates-file must be one direct JSON intake under memory/intake/status-sync",
+        )
+    payload, updates = load_updates_payload(input_path, "status sync")
+    if not isinstance(payload, dict):
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_TARGET_INVALID",
+            "historical intake root must be a JSON object",
+        )
+    input_hash = sha256_bytes(input_path.read_bytes())
+    if durable_receipts_for_input(memory_root, input_path):
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_ALREADY_EXECUTED",
+            "a durable successful receipt already binds this intake; execution and retirement are distinct semantics",
+        )
+    if reason == "superseded-by":
+        if not superseded_by:
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_SUCCESSOR_REQUIRED",
+                "reason superseded-by requires --superseded-by",
+            )
+    elif superseded_by:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "--superseded-by is accepted only with reason superseded-by",
+        )
+    rationale = str(justification or "").strip()
+    if reason in {"never-applied", "invalid-proposal"} and not rationale:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_JUSTIFICATION_REQUIRED",
+            f"reason {reason} requires an explicit governance --justification",
+        )
+    successor = retirement_successor_binding(project_root, memory_root, input_path, superseded_by)
+    scan = retirement_execution_scan(memory_root, input_path, input_hash, updates)
+    if reason in {"never-applied", "invalid-proposal"}:
+        if scan["verification_status"] == "blocked":
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_EVIDENCE_UNAVAILABLE",
+                "retirement cannot exclude possible execution because canonical evidence could not be evaluated",
+                {"evidence_scan": scan},
+            )
+        if scan["satisfied_commands"]:
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_EXECUTION_POSSIBLE",
+                "retirement cannot hide commands already supported by canonical facts or lineage",
+                {"satisfied_commands": scan["satisfied_commands"]},
+            )
+    read_paths = {input_path}
+    if successor:
+        read_paths.add(memory_root / successor["path"])
+        durable = successor.get("durable_receipt") if isinstance(successor.get("durable_receipt"), dict) else None
+        if durable:
+            read_paths.add(memory_root / durable["path"])
+    for item in scan.get("read_set", []):
+        if isinstance(item, dict) and item.get("path"):
+            candidate = memory_root / str(item["path"])
+            if candidate.is_file():
+                read_paths.add(candidate)
+    read_set = [
+        {
+            "path": path.relative_to(memory_root).as_posix() if path.is_relative_to(memory_root) else str(path),
+            "fingerprint": sha256_bytes(path.read_bytes()),
+        }
+        for path in sorted(read_paths)
+    ]
+    body = {
+        "input_path": str(input_path),
+        "input_hash": input_hash,
+        "update_count": len(updates),
+        "reason": reason,
+        "justification": rationale or None,
+        "superseded_by": successor,
+        "evidence_scan": scan,
+        "read_set": read_set,
+    }
+    return {**body, "snapshot_id": content_id(body), "payload_id": content_id(payload)}
+
+
+def intake_retirement_binding(snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    return {
+        "input_path": snapshot["input_path"],
+        "input_hash": snapshot["input_hash"],
+        "principal": principal,
+        "reason": snapshot["reason"],
+        "snapshot_id": snapshot["snapshot_id"],
+        "read_set": snapshot["read_set"],
+    }
+
+
+def issue_intake_retirement_token(memory_root: Path, snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    issued = datetime.now(timezone.utc)
+    token = f"retire_{secrets.token_urlsafe(32)}"
+    binding = intake_retirement_binding(snapshot, principal)
+    state = {
+        "schema_version": "1.0.0",
+        "token_hash": sha256_bytes(token.encode("utf-8")),
+        "principal": principal,
+        "binding": binding,
+        "binding_digest": content_id(binding),
+        "status": "unused",
+        "issued_at": issued.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "expires_at": (issued + timedelta(minutes=15)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "previous_state_id": None,
+    }
+    state["state_id"] = content_id(state)
+    write_json_atomic(intake_retirement_token_path(memory_root, token), state)
+    return {"token": token, "token_state": state}
+
+
+def build_intake_retirement_receipt(snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    receipt = {
+        "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
+        "receipt_type": "intake-retirement",
+        "ok": True,
+        "status": "retired",
+        "durable": True,
+        "dry_run": False,
+        "mode": "retire-intake",
+        "input_path": snapshot["input_path"],
+        "input_hash": snapshot["input_hash"],
+        "update_count": snapshot["update_count"],
+        "retired_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "reason": snapshot["reason"],
+        "principal": principal,
+        "governance": {
+            "authority_principal": principal,
+            "justification": snapshot["justification"],
+        },
+        "superseded_by": snapshot["superseded_by"],
+        "payload_id": snapshot["payload_id"],
+        "snapshot_id": snapshot["snapshot_id"],
+        "read_set": snapshot["read_set"],
+        "evidence_scan": snapshot["evidence_scan"],
+    }
+    receipt["retirement_id"] = content_id(receipt)
+    return receipt
+
+
+def intake_retirement_receipt_path(memory_root: Path, receipt: dict[str, Any]) -> Path:
+    digest = str(receipt["retirement_id"]).removeprefix("sha256:")
+    return memory_root / INTAKE_RETIREMENT_RECEIPT_REL / f"irr-{digest[:32]}.json"
+
+
+def intake_retirement_receipt_valid(
+    memory_root: Path,
+    receipt: dict[str, Any],
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+) -> bool:
+    body = dict(receipt)
+    retirement_id = body.pop("retirement_id", None)
+    governance = receipt.get("governance") if isinstance(receipt.get("governance"), dict) else {}
+    evidence_scan = receipt.get("evidence_scan") if isinstance(receipt.get("evidence_scan"), dict) else {}
+    reason = receipt.get("reason")
+    try:
+        normalize_required_timestamp(receipt.get("retired_at"), "retirement receipt retired_at")
+        payload, _ = load_updates_payload(input_path, "status sync")
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return False
+    read_set = receipt.get("read_set")
+    read_set_valid = bool(
+        isinstance(read_set, list)
+        and any(
+            isinstance(item, dict)
+            and item.get("fingerprint") == input_hash
+            and (memory_root / str(item.get("path") or "")).resolve() == input_path.resolve()
+            for item in read_set
+        )
+    )
+    snapshot_body = {
+        "input_path": receipt.get("input_path"),
+        "input_hash": receipt.get("input_hash"),
+        "update_count": receipt.get("update_count"),
+        "reason": reason,
+        "justification": governance.get("justification"),
+        "superseded_by": receipt.get("superseded_by"),
+        "evidence_scan": evidence_scan,
+        "read_set": read_set,
+    }
+    semantics_valid = bool(
+        governance.get("authority_principal") == receipt.get("principal")
+        and (
+            reason == "superseded-by"
+            and retirement_successor_binding_valid(memory_root, receipt.get("superseded_by"), input_path)
+            or reason in {"never-applied", "invalid-proposal"}
+            and bool(str(governance.get("justification") or "").strip())
+            and receipt.get("superseded_by") is None
+            and evidence_scan.get("verification_status") != "blocked"
+            and evidence_scan.get("satisfied_commands") == []
+        )
+    )
+    return bool(
+        semantics_valid
+        and read_set_valid
+        and receipt.get("payload_id") == content_id(payload)
+        and receipt.get("snapshot_id") == content_id(snapshot_body)
+        and receipt.get("receipt_schema_version") == RECEIPT_SCHEMA_VERSION
+        and receipt.get("receipt_type") == "intake-retirement"
+        and receipt.get("ok") is True
+        and receipt.get("status") == "retired"
+        and receipt.get("durable") is True
+        and receipt.get("dry_run") is False
+        and receipt.get("mode") == "retire-intake"
+        and receipt.get("input_path") == str(input_path)
+        and receipt.get("input_hash") == input_hash
+        and receipt.get("update_count") == update_count
+        and receipt.get("reason") in INTAKE_RETIREMENT_REASONS
+        and isinstance(receipt.get("principal"), str)
+        and bool(receipt.get("principal"))
+        and isinstance(receipt.get("retired_at"), str)
+        and retirement_id == content_id(body)
+    )
+
+
+def existing_intake_retirement_receipt(
+    memory_root: Path,
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+) -> tuple[Path, dict[str, Any]] | None:
+    for path in sorted((memory_root / INTAKE_RETIREMENT_RECEIPT_REL).glob("irr-*.json")):
+        receipt = load_json_object(path)
+        if receipt.get("input_hash") != input_hash:
+            continue
+        if intake_retirement_receipt_valid(memory_root, receipt, input_path, input_hash, update_count):
+            return path, receipt
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_RECEIPT_INVALID",
+            f"durable intake retirement receipt is invalid: {path}",
+        )
+    return None
+
+
+def consumed_intake_retirement_token_state(
+    token_state: dict[str, Any],
+    receipt_path: Path,
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    updated = dict(token_state)
+    updated["previous_state_id"] = token_state["state_id"]
+    updated["status"] = "consumed"
+    updated["consumed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    updated["receipt_path"] = str(receipt_path)
+    updated["retirement_id"] = receipt["retirement_id"]
+    updated.pop("state_id", None)
+    updated["state_id"] = content_id(updated)
+    return updated
+
+
+def apply_intake_retirement_receipt(
+    memory_root: Path,
+    token_path: Path,
+    token_state: dict[str, Any],
+    snapshot: dict[str, Any],
+    principal: str,
+    fail_after_stage: bool,
+) -> tuple[Path, dict[str, Any], dict[str, Any], list[str]]:
+    receipt = build_intake_retirement_receipt(snapshot, principal)
+    receipt_path = intake_retirement_receipt_path(memory_root, receipt)
+    receipt_rel = receipt_path.relative_to(memory_root)
+    token_rel = token_path.relative_to(memory_root)
+    with tempfile.TemporaryDirectory(prefix=".intake-retirement-", dir=memory_root.parent) as temp_dir:
+        staged_root = Path(temp_dir) / "memory"
+        copy_memory_tree(memory_root, staged_root)
+        write_json_atomic(staged_root / receipt_rel, receipt)
+        write_json_atomic(
+            staged_root / token_rel,
+            consumed_intake_retirement_token_state(token_state, receipt_path, receipt),
+        )
+        changed = changed_staged_files(memory_root, staged_root)
+        allowed = {receipt_rel, token_rel}
+        unexpected = [path.as_posix() for path in changed if path not in allowed]
+        if unexpected:
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_TARGET_INVALID",
+                "retirement staged unexpected targets: " + ", ".join(unexpected),
+            )
+        if fail_after_stage:
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_INJECTED_FAILURE",
+                "injected failure after retirement staging",
+            )
+        publication = publish_staged_files(
+            memory_root,
+            staged_root,
+            changed,
+            transaction_kind="intake-retirement",
+        )
+    return receipt_path, receipt, publication, [path.as_posix() for path in changed]
+
+
+def run_retire_intake(args: argparse.Namespace) -> int:
+    project_root = require_project_root(args.project_root)
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    input_path = require_file(args.updates_file, "updates-file")
+    input_hash = sha256_bytes(input_path.read_bytes())
+    _, updates = load_updates_payload(input_path, "status sync")
+    existing = existing_intake_retirement_receipt(memory_root, input_path, input_hash, len(updates))
+    if existing:
+        receipt_path, receipt = existing
+        emit({
+            "ok": True,
+            "mode": "retire-intake",
+            "dry_run": False,
+            "status": "already-retired",
+            "reused": True,
+            "receipt": receipt,
+            "receipt_path": str(receipt_path),
+            "changed_paths": [],
+        }, args.output)
+        return 0
+    principal = str(args.principal or "").strip()
+    snapshot = intake_retirement_snapshot(
+        project_root,
+        memory_root,
+        input_path,
+        args.reason,
+        args.superseded_by,
+        args.justification,
+    )
+    if args.dry_run:
+        if args.token:
+            raise StatusSyncContractError("INTAKE_RETIREMENT_TOKEN_INVALID", "--token is not accepted with --dry-run")
+        token = issue_intake_retirement_token(memory_root, snapshot, principal)["token"]
+        emit({
+            "ok": True,
+            "mode": "retire-intake",
+            "dry_run": True,
+            "verification_status": "verified",
+            "input_path": str(input_path),
+            "input_hash": input_hash,
+            "snapshot_id": snapshot["snapshot_id"],
+            "reason": snapshot["reason"],
+            "superseded_by": snapshot["superseded_by"],
+            "evidence_scan": snapshot["evidence_scan"],
+            "token": token,
+            "receipt": None,
+            "receipt_path": None,
+        }, args.output)
+        return 0
+    if not args.token:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_TOKEN_REQUIRED",
+            "durable retirement requires the single-use token from a verified dry-run",
+        )
+    token_path = intake_retirement_token_path(memory_root, args.token)
+    token_state = load_json_object(token_path)
+    if not token_state:
+        raise StatusSyncContractError("INTAKE_RETIREMENT_TOKEN_INVALID", "retirement token is unknown")
+    claimed_state_id = token_state.get("state_id")
+    state_body = dict(token_state)
+    state_body.pop("state_id", None)
+    if claimed_state_id != content_id(state_body) or token_state.get("token_hash") != sha256_bytes(args.token.encode("utf-8")):
+        raise StatusSyncContractError("INTAKE_RETIREMENT_TOKEN_INVALID", "retirement token identity is invalid")
+    if token_state.get("principal") != principal:
+        raise StatusSyncContractError("INTAKE_RETIREMENT_TOKEN_INVALID", "retirement token belongs to another principal")
+    if token_state.get("status") == "consumed":
+        raise StatusSyncContractError("INTAKE_RETIREMENT_TOKEN_USED", "retirement token was already consumed")
+    if token_state.get("status") != "unused":
+        raise StatusSyncContractError("INTAKE_RETIREMENT_TOKEN_INVALID", "retirement token has an invalid state")
+    expires_at = datetime.fromisoformat(str(token_state.get("expires_at", "")).replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) > expires_at:
+        update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RETIREMENT_TOKEN_EXPIRED")
+        raise StatusSyncContractError("INTAKE_RETIREMENT_TOKEN_EXPIRED", "retirement token expired")
+    binding = intake_retirement_binding(snapshot, principal)
+    if token_state.get("binding") != binding or token_state.get("binding_digest") != content_id(binding):
+        update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RETIREMENT_READ_SET_STALE")
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_READ_SET_STALE",
+            "intake, successor, or canonical evidence changed after retirement dry-run",
+        )
+    receipt_path, receipt, publication, changed = apply_intake_retirement_receipt(
+        memory_root,
+        token_path,
+        token_state,
+        snapshot,
+        principal,
+        args.fail_after_stage,
+    )
+    emit({
+        "ok": True,
+        "mode": "retire-intake",
+        "dry_run": False,
+        "status": "retired",
+        "reused": False,
+        "receipt": receipt,
+        "receipt_path": str(receipt_path),
+        "publication": publication,
+        "changed_paths": changed,
+    }, args.output)
     return 0
 
 
@@ -6352,6 +7564,12 @@ def main() -> int:
             with fact_write_lock(memory_root):
                 recover_status_transactions(memory_root)
                 return run_reconcile_intake(args)
+        if args.command == "retire-intake":
+            project_root = require_project_root(args.project_root)
+            memory_root = resolve_memory_root(project_root, args.memory_root)
+            with fact_write_lock(memory_root):
+                recover_status_transactions(memory_root)
+                return run_retire_intake(args)
         if args.command == "migrate-authority-state":
             project_root = require_project_root(args.project_root)
             memory_root = resolve_memory_root(project_root, args.memory_root)

@@ -43,10 +43,11 @@ NON_EXECUTABLE_INTAKE_STATES = {
     "preview",
     "proposal",
     "rejected",
-    "superseded",
 }
 STATUS_SYNC_RECEIPT_SCHEMA_VERSION = 1
 STATUS_SYNC_RECEIPT_REL = Path("receipts") / "status-sync"
+INTAKE_RETIREMENT_RECEIPT_REL = Path("receipts") / "status-sync-retirement"
+INTAKE_RETIREMENT_REASONS = {"never-applied", "superseded-by", "invalid-proposal"}
 ATTESTATION_WRAPPER_FIELDS = {
     "attestation",
     "attested_at",
@@ -3105,6 +3106,7 @@ def pending_status_intents(memory_root: Path) -> list[dict[str, str]]:
 def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
     root = memory_root / "intake" / "status-sync"
     receipts = load_status_sync_receipts(memory_root)
+    retirements = load_intake_retirement_receipts(memory_root)
     results: list[dict[str, Any]] = []
     for path in sorted(root.glob("*.json")):
         try:
@@ -3136,6 +3138,8 @@ def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
         lifecycle_status = intake_lifecycle_status(payload)
         if has_successful_intake_receipt(path, payload, receipts):
             continue
+        if has_valid_intake_retirement(path, payload, retirements, memory_root):
+            continue
         results.append(
             {
                 "path": rel_to_memory(memory_root, path),
@@ -3151,8 +3155,6 @@ def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
 def is_canonical_status_sync_intake(payload: dict[str, Any]) -> bool:
     control = payload.get("_control") if isinstance(payload.get("_control"), dict) else {}
     if control.get("execute_allowed") is False or payload.get("execute_allowed") is False:
-        return False
-    if payload.get("superseded") is True:
         return False
     if payload.get("dry_run") is True:
         return False
@@ -3201,6 +3203,190 @@ def load_status_sync_receipts(memory_root: Path) -> dict[Path, dict[str, Any]]:
         if isinstance(payload, dict):
             receipts[path.resolve()] = payload
     return receipts
+
+
+def load_intake_retirement_receipts(memory_root: Path) -> dict[Path, dict[str, Any]]:
+    root = memory_root / INTAKE_RETIREMENT_RECEIPT_REL
+    receipts: dict[Path, dict[str, Any]] = {}
+    for path in sorted(root.glob("*.json")):
+        try:
+            payload = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            receipts[path.resolve()] = payload
+    return receipts
+
+
+def has_valid_intake_retirement(
+    intake_path: Path,
+    intake_payload: dict[str, Any],
+    receipts: dict[Path, dict[str, Any]],
+    memory_root: Path,
+) -> bool:
+    return any(
+        valid_intake_retirement_receipt(receipt, intake_path, intake_payload, memory_root)
+        for receipt in receipts.values()
+    )
+
+
+def valid_retirement_successor(binding: Any, memory_root: Path, intake_path: Path) -> bool:
+    if not isinstance(binding, dict):
+        return False
+    raw_path = binding.get("path")
+    fingerprint = str(binding.get("fingerprint") or "").strip().lower()
+    if not isinstance(raw_path, str) or not raw_path.strip() or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint):
+        return False
+    raw_candidate = Path(raw_path).expanduser()
+    path = (
+        (memory_root / raw_candidate).resolve()
+        if not raw_candidate.is_absolute()
+        else resolve_portable_memory_path(raw_path, memory_root)
+    )
+    try:
+        relative = path.resolve().relative_to(memory_root.resolve())
+    except ValueError:
+        return False
+    if not path.is_file() or path.resolve() == intake_path.resolve():
+        return False
+    if fingerprint.removeprefix("sha256:") != hashlib.sha256(path.read_bytes()).hexdigest():
+        return False
+    binding_type = binding.get("binding_type")
+    if binding_type == "intake":
+        if relative.parts[:2] != ("intake", "status-sync"):
+            return False
+        try:
+            payload = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            return False
+        updates = payload.get("updates") if isinstance(payload, dict) else None
+        if not isinstance(updates, list) or not updates:
+            return False
+        if binding.get("update_count") != len(updates) or binding.get("payload_id") != receipt_content_id(payload):
+            return False
+        durable = binding.get("durable_receipt")
+        if durable is None:
+            return True
+        if not isinstance(durable, dict):
+            return False
+        durable_raw = str(durable.get("path") or "")
+        durable_candidate = Path(durable_raw).expanduser()
+        durable_path = (
+            (memory_root / durable_candidate).resolve()
+            if not durable_candidate.is_absolute()
+            else resolve_portable_memory_path(durable_raw, memory_root)
+        )
+        durable_hash = str(durable.get("fingerprint") or "").strip().lower()
+        if not durable_path.is_file() or not re.fullmatch(r"sha256:[0-9a-f]{64}", durable_hash):
+            return False
+        if durable_hash.removeprefix("sha256:") != hashlib.sha256(durable_path.read_bytes()).hexdigest():
+            return False
+        try:
+            durable_receipt = load_json(durable_path)
+        except (OSError, json.JSONDecodeError):
+            return False
+        return successful_receipt_payload(durable_receipt, path, payload)
+    if binding_type == "durable-receipt":
+        if relative.parts[:2] != ("receipts", "status-sync"):
+            return False
+        try:
+            durable_receipt = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            return False
+        target_input = resolve_portable_memory_path(str(durable_receipt.get("input_path") or ""), memory_root)
+        if not target_input.is_file() or target_input.resolve() == intake_path.resolve():
+            return False
+        try:
+            target_payload = load_json(target_input)
+        except (OSError, json.JSONDecodeError):
+            return False
+        return successful_receipt_payload(durable_receipt, target_input, target_payload)
+    return False
+
+
+def valid_intake_retirement_receipt(
+    receipt: dict[str, Any],
+    intake_path: Path,
+    intake_payload: dict[str, Any],
+    memory_root: Path,
+) -> bool:
+    if (
+        receipt.get("receipt_schema_version") != STATUS_SYNC_RECEIPT_SCHEMA_VERSION
+        or receipt.get("receipt_type") != "intake-retirement"
+        or receipt.get("ok") is not True
+        or receipt.get("status") != "retired"
+        or receipt.get("durable") is not True
+        or receipt.get("dry_run") is not False
+        or receipt.get("mode") != "retire-intake"
+        or receipt.get("reason") not in INTAKE_RETIREMENT_REASONS
+        or not valid_receipt_timestamp(receipt.get("retired_at"))
+    ):
+        return False
+    updates = intake_payload.get("updates")
+    if not isinstance(updates, list) or not updates or receipt.get("update_count") != len(updates):
+        return False
+    input_path = receipt.get("input_path")
+    if not isinstance(input_path, str) or not portable_memory_path_matches(input_path, intake_path, memory_root):
+        return False
+    input_hash = str(receipt.get("input_hash") or "").strip().lower()
+    raw_hash = hashlib.sha256(intake_path.read_bytes()).hexdigest()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", input_hash) or input_hash.removeprefix("sha256:") != raw_hash:
+        return False
+    if receipt.get("payload_id") != receipt_content_id(intake_payload):
+        return False
+    principal = str(receipt.get("principal") or "").strip()
+    governance = receipt.get("governance") if isinstance(receipt.get("governance"), dict) else {}
+    if not principal or governance.get("authority_principal") != principal:
+        return False
+    reason = receipt.get("reason")
+    justification = str(governance.get("justification") or "").strip()
+    evidence_scan = receipt.get("evidence_scan") if isinstance(receipt.get("evidence_scan"), dict) else {}
+    if reason in {"never-applied", "invalid-proposal"}:
+        if not justification or evidence_scan.get("verification_status") == "blocked":
+            return False
+        if evidence_scan.get("satisfied_commands") != []:
+            return False
+        if receipt.get("superseded_by") is not None:
+            return False
+    elif reason == "superseded-by":
+        if not valid_retirement_successor(receipt.get("superseded_by"), memory_root, intake_path):
+            return False
+    read_set = receipt.get("read_set")
+    if not isinstance(read_set, list) or not all(
+        isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", str(item.get("fingerprint") or ""))
+        for item in read_set
+    ):
+        return False
+    if not any(
+        (memory_root / str(item.get("path"))).resolve() == intake_path.resolve()
+        and fingerprints_equal(item.get("fingerprint"), input_hash)
+        for item in read_set
+    ):
+        return False
+    successor = receipt.get("superseded_by") if isinstance(receipt.get("superseded_by"), dict) else None
+    if successor and not any(
+        str(item.get("path")) == str(successor.get("path"))
+        and fingerprints_equal(item.get("fingerprint"), successor.get("fingerprint"))
+        for item in read_set
+    ):
+        return False
+    snapshot_body = {
+        "input_path": receipt.get("input_path"),
+        "input_hash": receipt.get("input_hash"),
+        "update_count": receipt.get("update_count"),
+        "reason": reason,
+        "justification": governance.get("justification"),
+        "superseded_by": receipt.get("superseded_by"),
+        "evidence_scan": evidence_scan,
+        "read_set": read_set,
+    }
+    if receipt.get("snapshot_id") != receipt_content_id(snapshot_body):
+        return False
+    body = dict(receipt)
+    retirement_id = body.pop("retirement_id", None)
+    return retirement_id == receipt_content_id(body)
 
 
 def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intake_payload: dict[str, Any]) -> bool:

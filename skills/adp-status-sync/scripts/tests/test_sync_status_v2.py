@@ -1373,6 +1373,392 @@ class StatusSyncV2Tests(unittest.TestCase):
             self.assertFalse(blocked["all_satisfied"])
             self.assertIn("workstream",{item["field"] for item in blocked["command_results"][0]["discrepancies"]})
 
+    def test_legacy_action_without_id_uses_exact_artifact_and_daily_lineage(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-LEGACY-NOID")
+            memory = root / MEMORY_REL
+            ledger = Path(created["action_ledger"])
+            rows = module.parse_action_ledger(ledger)
+            row = next(item for item in rows if item["Action ID"] == "ACT-LEGACY-NOID")
+            row["Source"] = str({
+                "artifact_id": "ACTION-LEDGER",
+                "artifact_path": "actions/action-ledger.md",
+                "source_fingerprint": "sha256:" + "a" * 64,
+            })
+            row["Workstream"] = "program"
+            module.write_action_ledger(ledger, rows, False)
+            module.write_action_ledger_state(memory, ledger, rows, [])
+            daily = memory / "daily/2026-07-16.md"
+            daily.parent.mkdir(parents=True, exist_ok=True)
+            daily.write_text(
+                "# Daily Log - 2026-07-16\n\n"
+                "## 2026-07-16T10:00:00Z Status sync - l1-checkout\n\n"
+                "- Source: approved action-ledger normalization\n"
+                "- Changed fields: no reliable field change\n"
+                "- Actions:\n  - open: ACT-LEGACY-NOID\n",
+                encoding="utf-8",
+            )
+            historical = self.write_updates(root, "legacy-no-id.json", [{
+                "id": "l1-checkout",
+                "actions": [{
+                    "owner": "FDE-A",
+                    "workstream": "l1-checkout",
+                    "affected_workstreams": ["l1-checkout"],
+                    "action": "Publish evidence for l1-checkout",
+                    "source": "meeting#1",
+                    "due": "Friday",
+                    "status": "open",
+                    "closure_criteria": "Evidence link is reviewed",
+                }],
+            }])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+
+            command = result["command_results"][0]
+            self.assertTrue(command["satisfied"])
+            self.assertEqual(command["matched_action_id"], "ACT-LEGACY-NOID")
+            self.assertEqual(command["satisfied_by"], "superseded-lineage")
+            self.assertEqual(
+                command["match_method"],
+                "action-owner-due-closure-affected-plus-artifact-lineage",
+            )
+            self.assertIn(
+                "legacy-action-artifact-source-normalization",
+                {item["type"] for item in command["lineage_evidence"]},
+            )
+
+    def test_legacy_action_without_id_never_auto_selects_multiple_exact_candidates(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-LEGACY-A")
+            memory = root / MEMORY_REL
+            ledger = Path(created["action_ledger"])
+            rows = module.parse_action_ledger(ledger)
+            first = next(item for item in rows if item["Action ID"] == "ACT-LEGACY-A")
+            first["Source"] = str({
+                "artifact_id": "ACTION-LEDGER",
+                "artifact_path": "actions/action-ledger.md",
+                "source_fingerprint": "sha256:" + "b" * 64,
+            })
+            second = dict(first)
+            second["Action ID"] = "ACT-LEGACY-B"
+            rows.append(second)
+            module.write_action_ledger(ledger, rows, False)
+            module.write_action_ledger_state(memory, ledger, rows, [])
+            daily = memory / "daily/2026-07-16.md"
+            daily.parent.mkdir(parents=True, exist_ok=True)
+            daily.write_text(
+                "# Daily Log - 2026-07-16\n\n"
+                "## 2026-07-16T10:00:00Z Status sync - l1-checkout\n\n"
+                "- Source: approved action-ledger normalization\n"
+                "- Changed fields: no reliable field change\n"
+                "- Actions:\n  - open: ACT-LEGACY-A\n  - open: ACT-LEGACY-B\n",
+                encoding="utf-8",
+            )
+            historical = self.write_updates(root, "legacy-ambiguous.json", [{
+                "id": "l1-checkout",
+                "actions": [{
+                    "owner": "FDE-A", "workstream": "l1-checkout",
+                    "affected_workstreams": ["l1-checkout"],
+                    "action": "Publish evidence for l1-checkout", "source": "meeting#1",
+                    "due": "Friday", "status": "open", "closure_criteria": "Evidence link is reviewed",
+                }],
+            }])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+
+            command = result["missing_commands"][0]
+            self.assertEqual(command["candidate_action_ids"], ["ACT-LEGACY-A", "ACT-LEGACY-B"])
+            self.assertEqual(command["reason"], "action composite did not resolve exactly once")
+
+    def test_legacy_action_artifact_candidate_without_daily_log_remains_partial(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-LEGACY-NOLOG")
+            memory = root / MEMORY_REL
+            ledger = Path(created["action_ledger"])
+            rows = module.parse_action_ledger(ledger)
+            row = next(item for item in rows if item["Action ID"] == "ACT-LEGACY-NOLOG")
+            row["Source"] = str({
+                "artifact_id": "ACTION-LEDGER",
+                "artifact_path": "actions/action-ledger.md",
+                "source_fingerprint": "sha256:" + "c" * 64,
+            })
+            module.write_action_ledger(ledger, rows, False)
+            module.write_action_ledger_state(memory, ledger, rows, [])
+            for daily in (memory / "daily").glob("*.md"):
+                daily.unlink()
+            historical = self.write_updates(root, "legacy-no-log.json", [{
+                "id": "l1-checkout",
+                "actions": [{
+                    "owner": "FDE-A", "workstream": "l1-checkout",
+                    "affected_workstreams": ["l1-checkout"],
+                    "action": "Publish evidence for l1-checkout", "source": "meeting#1",
+                    "due": "Friday", "status": "open", "closure_criteria": "Evidence link is reviewed",
+                }],
+            }])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+
+            self.assertFalse(result["all_satisfied"])
+            self.assertEqual(result["missing_commands"][0]["candidate_action_ids"], ["ACT-LEGACY-NOLOG"])
+
+    def test_action_revision_lineage_proves_ordered_status_closure_and_route_changes(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-REV-001")
+            memory = root / MEMORY_REL
+            ledger = Path(created["action_ledger"])
+            rows = module.parse_action_ledger(ledger)
+            row = next(item for item in rows if item["Action ID"] == "ACT-REV-001")
+            row.update({
+                "Status": "done",
+                "Workstream": "l1-checkout",
+                "Source": "owner update 2026-07-20",
+                "Closure Criteria Verifiable": "true",
+                "Action Revision": "3",
+            })
+            module.write_action_ledger(ledger, rows, False)
+            module.write_action_ledger_state(memory, ledger, rows, [])
+            daily = memory / "daily/2026-07-20.md"
+            daily.parent.mkdir(parents=True, exist_ok=True)
+            daily.write_text(
+                "# Daily Log - 2026-07-20\n\n"
+                "## 2026-07-20T10:00:00Z Status sync - program\n\n"
+                "- Source: closure review 2026-07-20\n- Changed fields: no reliable field change\n"
+                "- Actions:\n  - blocked: ACT-REV-001\n\n"
+                "## 2026-07-20T12:00:00Z Status sync - l1-checkout\n\n"
+                "- Source: owner update 2026-07-20\n- Changed fields: no reliable field change\n"
+                "- Actions:\n  - done: ACT-REV-001\n",
+                encoding="utf-8",
+            )
+            historical = self.write_updates(root, "historical-revision.json", [{
+                "id": "program",
+                "source": "closure review 2026-07-20",
+                "actions": [{
+                    "action_id": "ACT-REV-001",
+                    "status": "blocked",
+                    "workstream": "program",
+                    "affected_workstreams": ["l1-checkout"],
+                    "closure_criteria_verifiable": False,
+                    "source": "meeting#1",
+                }],
+            }])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+
+            command = result["command_results"][0]
+            self.assertTrue(result["all_satisfied"])
+            self.assertEqual(
+                command["superseded_fields"],
+                ["closure_criteria_verifiable", "status", "workstream"],
+            )
+            self.assertIn(
+                "ordered-daily-log-action-revision",
+                {item["type"] for item in command["lineage_evidence"]},
+            )
+
+    def test_risks_accept_only_structured_metadata_suffix(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            record = self.create_record(root, "l1-checkout")
+            old = self.write_updates(root, "old-risk.json", [{"id": "l1-checkout", "risks": ["Finance gate blocked"]}])
+            self.run_cli("update", str(root), "--updates-file", str(old))
+            metadata = "risk_id:RISK-ABC123; baseline_revision:4; related_plan_item_ids:MS-CHECKOUT-COMPLETE"
+            before = record.read_bytes()
+            record.write_text(
+                record.read_text(encoding="utf-8").replace(
+                    "- Risks: Finance gate blocked",
+                    f"- Risks: Finance gate blocked; {metadata}",
+                ),
+                encoding="utf-8",
+            )
+            module.update_wdr_state(record, before, record.read_bytes())
+            historical = self.write_updates(root, "historical-risk.json", [{"id": "l1-checkout", "risks": ["Finance gate blocked"]}])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+
+            command = result["command_results"][0]
+            self.assertTrue(command["satisfied"])
+            self.assertEqual(command["lineage_evidence"][1]["field"], "risks")
+            self.assertEqual(command["lineage_evidence"][1]["appended_metadata"], metadata.split("; "))
+
+    def test_risks_reject_unstructured_suffix_without_ordered_revision_evidence(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            record = self.create_record(root, "l1-checkout")
+            old = self.write_updates(root, "old-risk.json", [{"id": "l1-checkout", "risks": ["Finance gate blocked"]}])
+            self.run_cli("update", str(root), "--updates-file", str(old))
+            before = record.read_bytes()
+            record.write_text(
+                record.read_text(encoding="utf-8").replace(
+                    "- Risks: Finance gate blocked",
+                    "- Risks: Finance gate blocked; follow up when convenient",
+                ),
+                encoding="utf-8",
+            )
+            module.update_wdr_state(record, before, record.read_bytes())
+            historical = self.write_updates(root, "historical-risk.json", [{"id": "l1-checkout", "risks": ["Finance gate blocked"]}])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+
+            self.assertFalse(result["all_satisfied"])
+            self.assertEqual(
+                result["missing_commands"][0]["reason"],
+                "current canonical WDR fact differs and no durable superseded lineage proves the historical value",
+            )
+
+    def test_status_revision_uses_exact_intake_bound_daily_log_and_later_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            intake_root = root / MEMORY_REL / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            old = intake_root / "old-status.json"
+            old.write_text(json.dumps({"updates": [{"id": "l1-checkout", "source": "owner old", "status": "blocked"}]}) + "\n")
+            _, old_result = self.run_cli("update", str(root), "--updates-file", str(old))
+            Path(old_result["receipt_path"]).unlink()
+            newer = intake_root / "new-status.json"
+            newer.write_text(json.dumps({"updates": [{"id": "l1-checkout", "source": "owner new", "status": "in-progress"}]}) + "\n")
+            self.run_cli("update", str(root), "--updates-file", str(newer))
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(old), "--dry-run")
+
+            command = result["command_results"][0]
+            self.assertTrue(command["satisfied"])
+            self.assertEqual(command["satisfied_by"], "superseded-lineage")
+            self.assertIn(
+                "ordered-daily-log-intake-command-lineage",
+                {item["type"] for item in command["lineage_evidence"]},
+            )
+
+    def test_milestone_correction_lineage_requires_durable_correction_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            baseline = root / MEMORY_REL / "plans/program-baseline.md"
+            baseline.parent.mkdir(parents=True, exist_ok=True)
+            model = {
+                "revision": 4,
+                "milestones": [{
+                    "id": "MS-CHECKOUT-COMPLETE", "name": "Checkout complete",
+                    "workstream_id": "l1-checkout", "planned_date": "2026-10-15",
+                    "owner": "FDE-A", "dependencies": [], "baseline_revision": 4,
+                }],
+            }
+            baseline.write_text(
+                "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+                + json.dumps(model, indent=2) + "\n```\n",
+                encoding="utf-8",
+            )
+            intake_root = root / MEMORY_REL / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            old = intake_root / "old-milestone.json"
+            old_evidence = "owner old; intake/status-sync/old-milestone.json#l1-checkout"
+            old.write_text(json.dumps({"baseline_revision": 4, "updates": [{
+                "id": "l1-checkout", "source": "owner old",
+                "milestones": [{"milestone_id": "MS-CHECKOUT-COMPLETE", "status": "done", "actual": "2026-07-24", "evidence": [old_evidence]}],
+            }]}) + "\n")
+            _, old_result = self.run_cli("update", str(root), "--updates-file", str(old))
+            Path(old_result["receipt_path"]).unlink()
+            correction = intake_root / "milestone-correction.json"
+            correction_evidence = "correction; intake/status-sync/milestone-correction.json#l1-checkout"
+            correction.write_text(json.dumps({"baseline_revision": 4, "updates": [{
+                "id": "l1-checkout", "source": "correction",
+                "milestones": [{"milestone_id": "MS-CHECKOUT-COMPLETE", "status": "in-progress", "evidence": [correction_evidence]}],
+            }]}) + "\n")
+            _, correction_result = self.run_cli("update", str(root), "--updates-file", str(correction))
+            correction_receipt_path = Path(correction_result["receipt_path"])
+            daily_path = Path(old_result["updates"][0]["daily_log"])
+            daily_text = daily_path.read_text(encoding="utf-8")
+            daily_text = daily_text.replace(
+                daily_text.splitlines()[2],
+                "## 2026-08-05T00:00:00Z Status sync - l1-checkout",
+                1,
+            )
+            daily_path.write_text(daily_text, encoding="utf-8")
+
+            _, verified = self.run_cli("reconcile-intake", str(root), "--updates-file", str(old), "--dry-run")
+            self.assertTrue(verified["all_satisfied"])
+            milestone_result = verified["command_results"][0]
+            self.assertEqual(milestone_result["satisfied_by"], "superseded-lineage")
+            self.assertIn(
+                "receipt-bound-milestone-correction-lineage",
+                {item["type"] for item in milestone_result["lineage_evidence"]},
+            )
+
+            correction_receipt_path.unlink()
+            _, partial = self.run_cli("reconcile-intake", str(root), "--updates-file", str(old), "--dry-run")
+            missing = partial["missing_commands"][0]
+            self.assertEqual(
+                missing["reason"],
+                "milestone correction lineage is referenced but lacks a durable correction receipt",
+            )
+            self.assertEqual(
+                missing["missing_correction_receipts"],
+                ["intake/status-sync/milestone-correction.json"],
+            )
+
+    def test_retire_intake_writes_distinct_receipt_without_modifying_input(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            intake_root = root / MEMORY_REL / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            old = intake_root / "old.json"
+            successor = intake_root / "successor.json"
+            old.write_text(json.dumps({"updates": [{"id": "l1-checkout", "progress": "old"}]}) + "\n")
+            successor.write_text(json.dumps({"updates": [{"id": "l1-checkout", "progress": "new"}]}) + "\n")
+            before = old.read_bytes()
+
+            _, preview = self.run_cli(
+                "retire-intake", str(root), "--updates-file", str(old),
+                "--reason", "superseded-by", "--superseded-by", "intake/status-sync/successor.json",
+                "--principal", "PMO-A", "--dry-run",
+            )
+            _, applied = self.run_cli(
+                "retire-intake", str(root), "--updates-file", str(old),
+                "--reason", "superseded-by", "--superseded-by", "intake/status-sync/successor.json",
+                "--principal", "PMO-A", "--token", preview["token"],
+            )
+
+            self.assertEqual(old.read_bytes(), before)
+            self.assertEqual(applied["receipt"]["receipt_type"], "intake-retirement")
+            self.assertEqual(applied["receipt"]["mode"], "retire-intake")
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            self.assertIn(module.INTAKE_RETIREMENT_RECEIPT_REL.as_posix(), applied["receipt_path"])
+
+    def test_never_applied_retirement_rejects_canonical_execution_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            intake_root = root / MEMORY_REL / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            intake = intake_root / "possibly-applied.json"
+            intake.write_text(json.dumps({"updates": [{"id": "l1-checkout", "progress": "Applied"}]}) + "\n")
+            _, applied = self.run_cli("update", str(root), "--updates-file", str(intake))
+            Path(applied["receipt_path"]).unlink()
+
+            completed, result = self.run_cli(
+                "retire-intake", str(root), "--updates-file", str(intake),
+                "--reason", "never-applied", "--justification", "Governance confirmed the proposal was never authorized",
+                "--principal", "PMO-A", "--dry-run", check=False,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["error_code"], "INTAKE_RETIREMENT_EXECUTION_POSSIBLE")
+
     def test_repair_wdr_field_requires_review_only_for_conflicting_values(self) -> None:
         module = load_module()
         for conflict in (False, True):

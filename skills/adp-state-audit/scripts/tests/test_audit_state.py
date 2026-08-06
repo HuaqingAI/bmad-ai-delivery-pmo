@@ -24,6 +24,8 @@ VALIDATE_FLOW_GRAPH_CONTRACT = SCRIPT_GLOBALS["validate_flow_graph_contract"]
 FINGERPRINTS_EQUAL = SCRIPT_GLOBALS["fingerprints_equal"]
 BUSINESS_PACKET_VALUE = SCRIPT_GLOBALS["business_packet_value"]
 RECEIPT_CONTENT_ID = SCRIPT_GLOBALS["receipt_content_id"]
+PENDING_STATUS_SYNC_INTAKES = SCRIPT_GLOBALS["pending_status_sync_intakes"]
+VALID_INTAKE_RETIREMENT_RECEIPT = SCRIPT_GLOBALS["valid_intake_retirement_receipt"]
 PREPASS_SCRIPT = SCRIPT.parents[2] / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
 STATUS_SYNC_SCRIPT = SCRIPT.parents[2] / "adp-status-sync" / "scripts" / "sync_status.py"
 LOCALE_CATALOG_PATH = SCRIPT.parents[2] / "adp-plan-baseline" / "assets" / "locale-catalog.json"
@@ -1516,9 +1518,67 @@ class AdpStateAuditTests(unittest.TestCase):
                     "intake/status-sync/applied-actions.json",
                     "intake/status-sync/legacy-actions.json",
                     "intake/status-sync/release-plan.json",
+                    "intake/status-sync/superseded-actions.json",
                     "intake/status-sync/weekly-report.json",
                 },
             )
+
+    def test_durable_retirement_receipt_is_required_and_successor_tamper_reopens_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "_bmad-output/adp/memory"
+            intake_root = memory_root / "intake/status-sync"
+            intake_root.mkdir(parents=True)
+            old = intake_root / "old.json"
+            successor = intake_root / "successor.json"
+            mutable = intake_root / "mutable-superseded.json"
+            old_payload = {"updates": [{"id": "l1-checkout", "progress": "old"}]}
+            old.write_text(json.dumps(old_payload) + "\n", encoding="utf-8")
+            successor.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "progress": "new"}]}) + "\n",
+                encoding="utf-8",
+            )
+            mutable.write_text(
+                json.dumps({"superseded": True, "updates": [{"id": "l1-checkout", "progress": "mutable"}]}) + "\n",
+                encoding="utf-8",
+            )
+            preview = json.loads(subprocess.run(
+                [
+                    sys.executable, str(STATUS_SYNC_SCRIPT), "retire-intake", str(project_root),
+                    "--updates-file", str(old), "--reason", "superseded-by",
+                    "--superseded-by", "intake/status-sync/successor.json",
+                    "--principal", "PMO-A", "--dry-run",
+                ],
+                check=True, capture_output=True, text=True, encoding="utf-8",
+            ).stdout)
+            applied = json.loads(subprocess.run(
+                [
+                    sys.executable, str(STATUS_SYNC_SCRIPT), "retire-intake", str(project_root),
+                    "--updates-file", str(old), "--reason", "superseded-by",
+                    "--superseded-by", "intake/status-sync/successor.json",
+                    "--principal", "PMO-A", "--token", preview["token"],
+                ],
+                check=True, capture_output=True, text=True, encoding="utf-8",
+            ).stdout)
+
+            self.assertTrue(
+                VALID_INTAKE_RETIREMENT_RECEIPT(applied["receipt"], old, old_payload, memory_root)
+            )
+            pending = {item["path"] for item in PENDING_STATUS_SYNC_INTAKES(memory_root)}
+            self.assertEqual(
+                pending,
+                {
+                    "intake/status-sync/mutable-superseded.json",
+                    "intake/status-sync/successor.json",
+                },
+            )
+
+            successor.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "progress": "tampered"}]}) + "\n",
+                encoding="utf-8",
+            )
+            reopened = {item["path"] for item in PENDING_STATUS_SYNC_INTAKES(memory_root)}
+            self.assertIn("intake/status-sync/old.json", reopened)
 
     def test_noncanonical_cross_link_warning_keeps_wdr_path_and_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
