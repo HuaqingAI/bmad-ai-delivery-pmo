@@ -344,15 +344,27 @@ def section(lines: list[str], heading: str) -> list[str]:
     return lines[start:end]
 
 
-def parse_key_bullets(lines: list[str]) -> dict[str, str]:
+def parse_key_bullets(lines: list[str]) -> tuple[dict[str, str], list[dict[str, Any]]]:
     fields: dict[str, str] = {}
-    for line in lines:
+    occurrences: dict[str, list[dict[str, Any]]] = {}
+    for offset, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped.startswith("- ") or ":" not in stripped:
             continue
         key, value = stripped[2:].split(":", 1)
-        fields[key.strip().lower()] = value.strip()
-    return fields
+        normalized_key = key.strip().lower()
+        normalized_value = value.strip()
+        occurrences.setdefault(normalized_key, []).append(
+            {"line_offset": offset, "value": normalized_value}
+        )
+        if normalized_key not in fields:
+            fields[normalized_key] = normalized_value
+    duplicates = [
+        {"key": key, "occurrences": rows}
+        for key, rows in sorted(occurrences.items())
+        if len(rows) > 1
+    ]
+    return fields, duplicates
 
 
 def parse_list_after_label(lines: list[str], label: str) -> list[str]:
@@ -544,8 +556,8 @@ def discover_workstream_records(memory_root: Path, selected: list[str]) -> tuple
 
 def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_days: int) -> Workstream:
     lines = read_text(record_path).splitlines()
-    identity = parse_key_bullets(section(lines, "Identity"))
-    status = parse_key_bullets(section(lines, "Project Status"))
+    identity, identity_duplicates = parse_key_bullets(section(lines, "Identity"))
+    status, status_duplicates = parse_key_bullets(section(lines, "Project Status"))
     cross = section(lines, "Cross-Workstream Links")
     depends_on, dependency_facts, dependency_lines = split_cross_workstream_entries(
         parse_list_after_label_with_lines(lines, "Cross-Workstream Links", "Depends on")
@@ -577,6 +589,45 @@ def parse_workstream(record_path: Path, memory_root: Path, as_of: date, max_age_
         cross_link_lines={"depends_on": dependency_lines, "impacts": impact_lines},
         l0_references=parse_list_after_label(cross, "L0 references"),
     )
+    canonical_keys = {
+        "Identity": {
+            "workstream id",
+            "name",
+            "fde owner",
+            "business owner",
+            "current bmm phase",
+            "current adp status",
+        },
+        "Project Status": {
+            "progress",
+            "blockers",
+            "risks",
+            "dependencies",
+            "scope or change notes",
+            "next actions",
+            "last status sync",
+        },
+    }
+    for section_name, duplicates in (
+        ("Identity", identity_duplicates),
+        ("Project Status", status_duplicates),
+    ):
+        for duplicate in duplicates:
+            if duplicate["key"] not in canonical_keys[section_name]:
+                continue
+            ws.gaps.append(
+                {
+                    "gap": f"duplicate canonical WDR field: {duplicate['key']}",
+                    "category": "consistency",
+                    "gap_type": "duplicate_canonical_field",
+                    "blocking": True,
+                    "field": duplicate["key"].replace(" ", "_"),
+                    "policy_rule_id": "wdr-canonical-field-unique",
+                    "recommended_workflow": "adp-status-sync",
+                    "section": section_name,
+                    "occurrences": duplicate["occurrences"],
+                }
+            )
     scan_workstream_sidecars(ws, memory_root)
     collect_workstream_gaps(ws, as_of, max_age_days)
     collect_wdr_actions(ws)
@@ -987,7 +1038,7 @@ def split_workstream_list(value: str) -> list[str]:
 
 
 def extract_action_ids(text: str) -> list[str]:
-    return sorted({match.upper() for match in re.findall(r"\bACT-[A-Z0-9]+(?:-[A-Z0-9]+)*\b", text or "", flags=re.IGNORECASE)})
+    return sorted(set(re.findall(r"\[action_id:(ACT-[A-Z0-9]+(?:-[A-Z0-9]+)*)\]", text or "")))
 
 
 def normalize_match_text(value: str) -> str:

@@ -22,6 +22,8 @@ ATOMIC_WRITE_PAIR = SCRIPT_GLOBALS["atomic_write_pair"]
 SUCCESSFUL_RECEIPT_PAYLOAD = SCRIPT_GLOBALS["successful_receipt_payload"]
 VALIDATE_FLOW_GRAPH_CONTRACT = SCRIPT_GLOBALS["validate_flow_graph_contract"]
 FINGERPRINTS_EQUAL = SCRIPT_GLOBALS["fingerprints_equal"]
+BUSINESS_PACKET_VALUE = SCRIPT_GLOBALS["business_packet_value"]
+RECEIPT_CONTENT_ID = SCRIPT_GLOBALS["receipt_content_id"]
 PREPASS_SCRIPT = SCRIPT.parents[2] / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
 STATUS_SYNC_SCRIPT = SCRIPT.parents[2] / "adp-status-sync" / "scripts" / "sync_status.py"
 LOCALE_CATALOG_PATH = SCRIPT.parents[2] / "adp-plan-baseline" / "assets" / "locale-catalog.json"
@@ -2633,6 +2635,63 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertEqual("global", result["execution"]["scope"]["scenario"])
             self.assertEqual(list(project_root.rglob(".memlog.md")), [])
 
+
+    def test_reconciliation_receipt_consumes_exact_intake_without_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir) / "_bmad-output/adp/memory"
+            intake = memory_root / "intake/status-sync/historical.json"
+            intake.parent.mkdir(parents=True)
+            payload = {"updates": [{"id": "l1-checkout", "progress": "Ready"}]}
+            intake.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            input_hash = f"sha256:{hashlib.sha256(intake.read_bytes()).hexdigest()}"
+            command_results = [{"command_type": "status-field", "command_index": 1, "satisfied": True}]
+            read_set = [{"path": "workstreams/l1-checkout/delivery-record.md", "fingerprint": "sha256:" + "1" * 64}]
+            snapshot = {
+                "input_path": str(intake.resolve()),
+                "input_hash": input_hash,
+                "update_count": 1,
+                "command_results": command_results,
+                "read_set": read_set,
+            }
+            receipt = {
+                "receipt_schema_version": 1,
+                "receipt_type": "reconciliation",
+                "execution_id": "ssr-" + "a" * 32,
+                "ok": True,
+                "status": "applied",
+                "durable": True,
+                "dry_run": False,
+                "input_path": str(intake.resolve()),
+                "input_hash": input_hash,
+                "applied_at": "2026-08-06T10:00:00Z",
+                "mode": "update",
+                "update_count": 1,
+                "reconciliation": {
+                    "verification_method": "canonical-fact-reconciliation",
+                    "verification_status": "verified",
+                    "all_satisfied": True,
+                    "missing_commands": [],
+                    "snapshot_id": RECEIPT_CONTENT_ID(snapshot),
+                    "principal": "PMO-A",
+                    "read_set": read_set,
+                    "command_results": command_results,
+                },
+            }
+            receipt["receipt_id"] = RECEIPT_CONTENT_ID(receipt)
+            self.assertTrue(SUCCESSFUL_RECEIPT_PAYLOAD(receipt, intake, payload))
+            receipt["reconciliation"]["command_results"][0]["satisfied"] = False
+            self.assertFalse(SUCCESSFUL_RECEIPT_PAYLOAD(receipt, intake, payload))
+
+    def test_chinese_deadline_heading_aliases_are_complete(self) -> None:
+        for heading in (
+            "截止日或触发条件",
+            "到期日或触发条件",
+            "到期日 / 触发条件",
+            "截止日 / 触发条件",
+        ):
+            with self.subTest(heading=heading):
+                text = f"# 决策包\n\n## {heading}\n\n2026-08-20\n"
+                self.assertEqual(BUSINESS_PACKET_VALUE(text, "deadline", "zh"), "2026-08-20")
 
 if __name__ == "__main__":
     unittest.main()

@@ -1575,5 +1575,86 @@ class SyncStatusTests(unittest.TestCase):
             self.assertEqual("ADP-VIRTUAL-SCOPE-NOT-WDR-TARGET", rejected_result["error_code"])
 
 
+    def test_reconcile_intake_validates_milestone_baseline_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            self.create_record(project_root)
+            baseline = self.create_baseline(project_root)
+            payload = {
+                "baseline_revision": 3,
+                "updates": [{"id": "l1-checkout", "milestones": [{
+                    "milestone_id": "MS-CHECKOUT-COMPLETE",
+                    "status": "at-risk",
+                    "forecast": "2026-10-20",
+                    "evidence": ["workstreams/l1-checkout/evidence.md#forecast-20261020"],
+                }]}],
+            }
+            applied_input = project_root / "applied-milestone.json"
+            applied_input.write_text(json.dumps(payload), encoding="utf-8")
+            subprocess.run(
+                [sys.executable, str(SCRIPT), "update", str(project_root), "--updates-file", str(applied_input)],
+                check=True, capture_output=True, text=True, encoding="utf-8",
+            )
+            intake = project_root / "historical-milestone.json"
+            intake.write_text(json.dumps(payload), encoding="utf-8")
+            preview = json.loads(subprocess.run(
+                [sys.executable, str(SCRIPT), "reconcile-intake", str(project_root), "--updates-file", str(intake), "--dry-run"],
+                check=True, capture_output=True, text=True, encoding="utf-8",
+            ).stdout)
+            self.assertTrue(preview["all_satisfied"])
+
+            baseline.write_text(baseline.read_text(encoding="utf-8").replace('"revision": 3', '"revision": 4', 1), encoding="utf-8")
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "reconcile-intake", str(project_root), "--updates-file", str(intake), "--token", preview["token"]],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            result = json.loads(completed.stdout)
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["error_code"], "INTAKE_RECONCILIATION_FACTS_STALE")
+            self.assertEqual(result["missing_commands"][0]["command_type"], "milestone")
+
+    def test_writer_merges_identical_duplicate_canonical_fields_before_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            duplicate = RECORD.replace(
+                "- Progress: TBD",
+                "- Progress: TBD\n- Progress: TBD",
+            ).replace(
+                "- Blockers: TBD",
+                "- Blockers: TBD\n- Blockers: TBD",
+            )
+            record = self.create_record(project_root, text=duplicate)
+
+            result = self.run_script(project_root, "update", str(project_root), "--id", "l1-checkout", "--progress", "Merged")
+            self.assertTrue(result["ok"])
+            text = record.read_text(encoding="utf-8")
+            self.assertEqual(text.count("- Progress:"), 1)
+            self.assertEqual(text.count("- Blockers:"), 1)
+            repairs = [item for item in result["updates"][0]["changed_fields"] if item.get("repair")]
+            self.assertEqual({item["field"] for item in repairs}, {"Progress", "Blockers"})
+
+    def test_writer_fails_closed_for_conflicting_duplicate_canonical_fields(self) -> None:
+        for label in ("Next actions", "Progress", "Blockers"):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                project_root = Path(temp_dir)
+                marker = next(line for line in RECORD.splitlines() if line.startswith(f"- {label}:"))
+                duplicate = RECORD.replace(marker, marker + f"\n- {label}: conflicting historical value")
+                record = self.create_record(project_root, text=duplicate)
+                before = record.read_bytes()
+
+                completed = subprocess.run(
+                    [sys.executable, str(SCRIPT), "update", str(project_root), "--id", "l1-checkout", "--status", "active"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                result = json.loads(completed.stdout)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(result["error_code"], "WDR_DUPLICATE_CANONICAL_FIELD")
+                self.assertEqual(result["field"], label)
+                self.assertEqual(result["repair_plan"]["operation"], "deduplicate-canonical-field")
+                self.assertEqual(record.read_bytes(), before)
+
 if __name__ == "__main__":
     unittest.main()

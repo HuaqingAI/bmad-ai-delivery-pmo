@@ -78,7 +78,16 @@ BUSINESS_PACKET_FIELD_ALIASES = {
     "options": {"en": ("Options",), "zh": ("选项",)},
     "recommendation": {"en": ("Recommendation",), "zh": ("建议", "推荐方案")},
     "status": {"en": ("Status",), "zh": ("状态",)},
-    "deadline": {"en": ("Deadline / trigger",), "zh": ("到期日 / 触发条件", "截止日期 / 触发条件")},
+    "deadline": {
+        "en": ("Deadline / trigger",),
+        "zh": (
+            "到期日 / 触发条件",
+            "截止日期 / 触发条件",
+            "截止日或触发条件",
+            "到期日或触发条件",
+            "截止日 / 触发条件",
+        ),
+    },
     "owner": {
         "en": ("Confirming owner", "Confirmer", "Requested decision owner"),
         "zh": ("确认负责人", "请求决策人", "决策负责人"),
@@ -3184,7 +3193,7 @@ def load_status_sync_receipts(memory_root: Path) -> dict[Path, dict[str, Any]]:
 def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intake_payload: dict[str, Any]) -> bool:
     if not receipt or receipt.get("receipt_schema_version") != STATUS_SYNC_RECEIPT_SCHEMA_VERSION:
         return False
-    if receipt.get("receipt_type") not in {"execution", "migration"}:
+    if receipt.get("receipt_type") not in {"execution", "migration", "reconciliation"}:
         return False
     if receipt.get("dry_run") is not False or receipt.get("durable") is not True:
         return False
@@ -3209,6 +3218,8 @@ def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intak
     if not isinstance(updates, list) or receipt.get("update_count") != len(updates):
         return False
     if receipt.get("receipt_type") == "migration" and not valid_migration_receipt(receipt, memory_root):
+        return False
+    if receipt.get("receipt_type") == "reconciliation" and not valid_reconciliation_receipt(receipt):
         return False
     return True
 
@@ -3253,6 +3264,42 @@ def portable_memory_path_matches(value: str, expected: Path, memory_root: Path) 
     if direct == expected.resolve():
         return True
     return resolve_portable_memory_path(value, memory_root) == expected.resolve()
+
+
+def receipt_content_id(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def valid_reconciliation_receipt(receipt: dict[str, Any]) -> bool:
+    reconciliation = receipt.get("reconciliation")
+    if not isinstance(reconciliation, dict):
+        return False
+    command_results = reconciliation.get("command_results")
+    read_set = reconciliation.get("read_set")
+    if (
+        reconciliation.get("verification_method") != "canonical-fact-reconciliation"
+        or reconciliation.get("verification_status") != "verified"
+        or reconciliation.get("all_satisfied") is not True
+        or reconciliation.get("missing_commands") != []
+        or not isinstance(command_results, list)
+        or not command_results
+        or not all(isinstance(item, dict) and item.get("satisfied") is True for item in command_results)
+        or not isinstance(read_set, list)
+    ):
+        return False
+    snapshot_body = {
+        "input_path": receipt.get("input_path"),
+        "input_hash": receipt.get("input_hash"),
+        "update_count": receipt.get("update_count"),
+        "command_results": command_results,
+        "read_set": read_set,
+    }
+    if reconciliation.get("snapshot_id") != receipt_content_id(snapshot_body):
+        return False
+    receipt_body = dict(receipt)
+    receipt_id = receipt_body.pop("receipt_id", None)
+    return receipt_id == receipt_content_id(receipt_body)
 
 
 def valid_migration_receipt(receipt: dict[str, Any], memory_root: Path) -> bool:

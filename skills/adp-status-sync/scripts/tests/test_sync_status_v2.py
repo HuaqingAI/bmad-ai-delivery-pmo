@@ -1197,5 +1197,114 @@ class StatusSyncV2Tests(unittest.TestCase):
             self.assertEqual(attempts["attempts"][0]["outcome"], "committed")
 
 
+    def test_reconcile_intake_matches_legacy_action_by_full_composite_without_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-RECON-001")
+            ledger = Path(created["action_ledger"])
+            before = ledger.read_bytes()
+            intake = self.write_updates(
+                root,
+                "historical-intake.json",
+                [{"id": "l1-checkout", "actions": [{
+                    "owner": "FDE-A",
+                    "action": "Publish evidence for l1-checkout",
+                    "source": "meeting#1",
+                    "due": "Friday",
+                    "closure_criteria": "Evidence link is reviewed",
+                }]}],
+            )
+
+            _, preview = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--dry-run"
+            )
+            self.assertTrue(preview["all_satisfied"])
+            self.assertEqual(preview["command_results"][0]["match_method"], "action-owner-source-due-closure")
+            self.assertTrue(preview["token"])
+
+            _, applied = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--token", preview["token"]
+            )
+            self.assertEqual(ledger.read_bytes(), before)
+            self.assertEqual(applied["receipt"]["receipt_type"], "reconciliation")
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            replay, error = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--token", preview["token"], check=False
+            )
+            self.assertEqual(replay.returncode, 0, error)
+            self.assertTrue(error["reused"])
+
+    def test_reconcile_intake_apply_is_atomic_after_staging_failure(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            self.create_action(root, "l1-checkout", "ACT-ATOMIC-001")
+            intake = self.write_updates(
+                root,
+                "atomic-intake.json",
+                [{"id": "l1-checkout", "actions": [{"action_id": "ACT-ATOMIC-001", "action": "Publish evidence for l1-checkout"}]}],
+            )
+            _, preview = self.run_cli("reconcile-intake", str(root), "--updates-file", str(intake), "--dry-run")
+            token_path = module.reconciliation_token_path(root / MEMORY_REL, preview["token"])
+            before_token = token_path.read_bytes()
+            before_receipts = sorted((root / MEMORY_REL / "receipts/status-sync").glob("*.json"))
+
+            completed, result = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--token", preview["token"],
+                "--fail-after-stage", check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["error_code"], "INTAKE_RECONCILIATION_INJECTED_FAILURE")
+            self.assertEqual(token_path.read_bytes(), before_token)
+            self.assertEqual(sorted((root / MEMORY_REL / "receipts/status-sync").glob("*.json")), before_receipts)
+
+    def test_reconcile_intake_partial_match_lists_missing_commands_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-RECON-001")
+            receipt_root = root / MEMORY_REL / "receipts/status-sync"
+            existing_receipts = sorted(receipt_root.glob("*.json"))
+            intake = self.write_updates(
+                root,
+                "partial-intake.json",
+                [{"id": "l1-checkout", "actions": [
+                    {"action_id": "ACT-RECON-001", "action": "Publish evidence for l1-checkout"},
+                    {"action_id": "ACT-MISSING-999", "action": "Missing historical command"},
+                ]}],
+            )
+
+            _, preview = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--dry-run"
+            )
+            self.assertEqual(preview["verification_status"], "partial")
+            self.assertFalse(preview["all_satisfied"])
+            self.assertIsNone(preview["token"])
+            self.assertEqual([item["requested_action_id"] for item in preview["missing_commands"]], ["ACT-MISSING-999"])
+            self.assertEqual(sorted(receipt_root.glob("*.json")), existing_receipts)
+            self.assertEqual(Path(created["action_ledger"]).read_text(encoding="utf-8").count("ACT-MISSING-999"), 0)
+
+    def test_reconcile_intake_rejects_stale_status_lineage_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            record = self.create_record(root, "l1-checkout")
+            matching = self.write_updates(root, "matching-status.json", [{"id": "l1-checkout", "progress": "Ready"}])
+            self.run_cli("update", str(root), "--updates-file", str(matching))
+            intake = self.write_updates(root, "historical-status.json", [{"id": "l1-checkout", "progress": "Ready"}])
+            _, preview = self.run_cli("reconcile-intake", str(root), "--updates-file", str(intake), "--dry-run")
+            newer = self.write_updates(root, "newer-status.json", [{"id": "l1-checkout", "progress": "Newer fact"}])
+            self.run_cli("update", str(root), "--updates-file", str(newer))
+
+            completed, result = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--token", preview["token"], check=False
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["error_code"], "INTAKE_RECONCILIATION_FACTS_STALE")
+            text = record.read_text(encoding="utf-8")
+            self.assertIn("- Progress: Newer fact", text)
+            self.assertNotIn("- Progress: Ready", text)
+
 if __name__ == "__main__":
     unittest.main()

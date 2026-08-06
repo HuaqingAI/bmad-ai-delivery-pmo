@@ -474,5 +474,54 @@ class AdpStatePrepassTests(unittest.TestCase):
             self.assertIn("invalid choice", completed.stderr)
 
 
+    def test_wdr_action_body_act_reference_is_not_treated_as_projection_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+            record.write_text(
+                RECORD.replace(
+                    "FDE-A confirm payment owner by 2026-07-05",
+                    "[action_id:ACT-20260702-001] FDE-A: Include existing ACT-20260710-023 in rollout evidence",
+                ),
+                encoding="utf-8",
+            )
+            ledger = memory_root / "actions/action-ledger.md"
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text(
+                "# Action Ledger\n\n"
+                "| Action ID | Status | Owner | Workstream | Action | Source | Reason | Due / Trigger | Closure Criteria | Last Updated | Owning Workflow |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                "| ACT-20260702-001 | open | FDE-A | l1-checkout | Include existing ACT-20260710-023 in rollout evidence | meeting#1 | Follow-up | Friday | Evidence linked | 2026-07-02T09:00:00+08:00 | adp-status-sync |\n",
+                encoding="utf-8",
+            )
+
+            result = json.loads(self.run_script(project_root, "--capability", "fde-action-list", "--as-of", "2026-07-02").stdout)
+            cross_check = result["action_cross_check"][0]
+            self.assertEqual(cross_check["wdr_next_actions"][0]["action_ids"], ["ACT-20260702-001"])
+            self.assertEqual(cross_check["wdr_action_ids_without_open_ledger_reference"], [])
+            self.assertNotIn("ACT-20260710-023", json.dumps(cross_check["wdr_action_ids_without_open_ledger_reference"]))
+
+    def test_duplicate_canonical_wdr_fields_keep_first_value_and_emit_typed_consistency_finding(self) -> None:
+        for label, field, first in (
+            ("Next actions", "next_actions", "FDE-A confirm payment owner by 2026-07-05"),
+            ("Progress", "progress", "Validation running"),
+            ("Blockers", "blockers", "Payment owner confirmation missing"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                project_root = Path(temp_dir)
+                memory_root = self.scaffold(project_root)
+                record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+                marker = next(line for line in RECORD.splitlines() if line.startswith(f"- {label}:"))
+                record.write_text(RECORD.replace(marker, marker + f"\n- {label}: conflicting later value"), encoding="utf-8")
+
+                result = json.loads(self.run_script(project_root, "--as-of", "2026-07-02").stdout)
+                workstream = result["workstreams"][0]
+                self.assertEqual(workstream[field], first)
+                finding = next(item for item in result["gaps"] if item.get("gap_type") == "duplicate_canonical_field")
+                self.assertEqual(finding["category"], "consistency")
+                self.assertTrue(finding["blocking"])
+                self.assertEqual(finding["policy_rule_id"], "wdr-canonical-field-unique")
+
 if __name__ == "__main__":
     unittest.main()

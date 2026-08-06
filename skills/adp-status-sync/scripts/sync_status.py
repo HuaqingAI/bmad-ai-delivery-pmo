@@ -69,6 +69,7 @@ REPAIR_ATTEMPT_LEDGER_REL = Path("state") / "repair-attempt-ledger.json"
 REPAIR_RECEIPT_INDEX_REL = Path("state") / "repair-receipt-index.json"
 AUTHORITY_MIGRATION_TOKEN_REL = Path("state") / "authority-migration-tokens"
 AUTHORITY_MIGRATION_RECEIPT_REL = Path("receipts") / "authority-state-migration"
+INTAKE_RECONCILIATION_TOKEN_REL = Path("state") / "intake-reconciliation-tokens"
 TRANSACTION_REL = Path("state") / "transactions"
 FACT_LOCK_REL = Path("state") / "fact-write.lock"
 WINDOWS_LOCK_RETRY_SECONDS = 0.05
@@ -151,8 +152,9 @@ ACTION_PATCH_FIELDS = {
 
 
 class StatusSyncContractError(ValueError):
-    def __init__(self, error_code: str, message: str) -> None:
+    def __init__(self, error_code: str, message: str, details: dict[str, Any] | None = None) -> None:
         self.error_code = error_code
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -227,6 +229,7 @@ class ActionUpdate:
     related_plan_item_ids: list[str] | None = None
     related_flow_edge_ids: list[str] | None = None
     present_fields: set[str] = field(default_factory=set)
+    declared_fields: set[str] = field(default_factory=set)
     evidence: list[dict[str, Any]] = field(default_factory=list)
     evidence_observed_at: list[str] = field(default_factory=list)
 
@@ -375,6 +378,33 @@ def parse_args() -> argparse.Namespace:
     authority_migration.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
     authority_migration.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
 
+    reconcile = subparsers.add_parser(
+        "reconcile-intake",
+        help="Reconcile one historical receipt-less intake against current canonical facts.",
+    )
+    reconcile.add_argument("project_root", help="Project root containing ADP memory.")
+    reconcile.add_argument("--updates-file", required=True, help="Exact historical intake JSON to reconcile.")
+    reconcile.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compare every command to canonical facts and issue a single-use token only when all are satisfied.",
+    )
+    reconcile.add_argument("--token", help="Single-use token returned by a fully satisfied dry-run.")
+    reconcile.add_argument(
+        "--principal",
+        default="adp-status-sync",
+        help="Stable operator or automation principal bound to the token and receipt.",
+    )
+    reconcile.add_argument("--source", default="status sync", help="Default source used by legacy intake parsing.")
+    reconcile.add_argument(
+        "--memory-root",
+        default="_bmad-output/adp/memory",
+        help="ADP memory root, relative to project root unless absolute. Default: _bmad-output/adp/memory.",
+    )
+    reconcile.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
+    reconcile.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
+    reconcile.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+
     migrate = subparsers.add_parser(
         "migrate-receipt",
         help="Create one explicit compatibility receipt from historical successful execution evidence.",
@@ -483,30 +513,53 @@ def normalize_required_timestamp(raw: str, label: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def updates_from_payload(payload: Any, default_source: str) -> list[StatusUpdate]:
+    items = payload.get("updates", payload) if isinstance(payload, dict) else payload
+    if isinstance(payload, dict) and not isinstance(items, list):
+        items = status_batch_updates(payload)
+    payload_revision = (
+        parse_optional_revision(payload.get("baseline_revision"), "baseline_revision")
+        if isinstance(payload, dict)
+        else None
+    )
+    payload_refresh_actions = (
+        boolean_value(payload.get("refresh_actions", False), "refresh_actions")
+        if isinstance(payload, dict)
+        else False
+    )
+    if not isinstance(items, list):
+        raise ValueError("updates-file must contain a list or an object with an 'updates' list")
+    updates: list[StatusUpdate] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("each batch update must be a JSON object")
+        updates.append(
+            update_from_mapping(
+                item,
+                default_source=default_source,
+                default_revision=payload_revision,
+                default_refresh_actions=payload_refresh_actions,
+            )
+        )
+    if isinstance(payload, dict):
+        bind_status_intents(updates, payload.get("status_intents", []))
+    if not updates:
+        raise ValueError("updates-file must contain at least one executable update")
+    return updates
+
+
+def load_updates_payload(path: Path, default_source: str) -> tuple[Any, list[StatusUpdate]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"updates-file must contain valid JSON: {exc}") from exc
+    return payload, updates_from_payload(payload, default_source)
+
+
 def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
     updates: list[StatusUpdate] = []
     if args.updates_file:
-        payload = json.loads(Path(args.updates_file).read_text(encoding="utf-8"))
-        items = payload.get("updates", payload) if isinstance(payload, dict) else payload
-        if isinstance(payload, dict) and not isinstance(items, list):
-            items = status_batch_updates(payload)
-        payload_revision = parse_optional_revision(payload.get("baseline_revision"), "baseline_revision") if isinstance(payload, dict) else None
-        payload_refresh_actions = boolean_value(payload.get("refresh_actions", False), "refresh_actions") if isinstance(payload, dict) else False
-        if not isinstance(items, list):
-            raise ValueError("updates-file must contain a list or an object with an 'updates' list")
-        for item in items:
-            if not isinstance(item, dict):
-                raise ValueError("each batch update must be a JSON object")
-            updates.append(
-                update_from_mapping(
-                    item,
-                    default_source=args.source,
-                    default_revision=payload_revision,
-                    default_refresh_actions=payload_refresh_actions,
-                )
-            )
-        if isinstance(payload, dict):
-            bind_status_intents(updates, payload.get("status_intents", []))
+        _, updates = load_updates_payload(Path(args.updates_file), args.source)
 
     single_has_fields = any(
         [
@@ -899,6 +952,9 @@ def actions_from_mapping(
         for field_name, field_aliases in aliases.items():
             if has_any_key(raw_action, *field_aliases):
                 present_fields.add(field_name)
+        if operation == "create" and "source" in item:
+            present_fields.add("source")
+        declared_fields = set(present_fields)
         if operation == "create":
             present_fields = set(ACTION_PATCH_FIELDS)
 
@@ -987,6 +1043,7 @@ def actions_from_mapping(
                     else None
                 ),
                 present_fields=present_fields,
+                declared_fields=declared_fields,
                 evidence=normalized_evidence,
                 evidence_observed_at=sorted(evidence_observed_at),
             )
@@ -2970,6 +3027,7 @@ def apply_update(
             "no_op": True,
         }
 
+    normalized_original, duplicate_repairs = normalize_duplicate_canonical_fields(original)
     values = update_values(update, timestamp)
     active_summaries = active_action_summaries(ledger_actions, update.workstream_id) if update.refresh_actions else []
     if update.next_actions_provided:
@@ -2980,8 +3038,8 @@ def apply_update(
         values["next_actions"] = "; ".join(projected_actions)
     if values and "last_status_sync" not in values:
         values["last_status_sync"] = timestamp
-    changed_fields: list[dict[str, str]] = []
-    updated = original
+    changed_fields: list[dict[str, Any]] = list(duplicate_repairs)
+    updated = normalized_original
     for field_name, value in values.items():
         section, label = VOLATILE_FIELDS[field_name]
         updated, old_value, did_change = set_section_bullet(updated, section, label, value)
@@ -3066,6 +3124,68 @@ def update_values(update: StatusUpdate, timestamp: str) -> dict[str, str]:
     return values
 
 
+def duplicate_canonical_field_error(
+    section_title: str,
+    label: str,
+    occurrences: list[dict[str, Any]],
+) -> StatusSyncContractError:
+    return StatusSyncContractError(
+        "WDR_DUPLICATE_CANONICAL_FIELD",
+        f"{section_title}.{label} has conflicting duplicate canonical fields",
+        {
+            "section": section_title,
+            "field": label,
+            "occurrences": occurrences,
+            "repair_plan": {
+                "operation": "deduplicate-canonical-field",
+                "strategy": "choose one authoritative value, remove every other occurrence, then retry",
+                "automatic_merge_allowed": False,
+            },
+        },
+    )
+
+
+def normalize_duplicate_canonical_fields(markdown: str) -> tuple[str, list[dict[str, Any]]]:
+    lines = markdown.splitlines()
+    repairs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for section_title, label in VOLATILE_FIELDS.values():
+        identity = (section_title.lower(), label.lower())
+        if identity in seen:
+            continue
+        seen.add(identity)
+        start, end = find_section(lines, section_title)
+        if start is None:
+            continue
+        pattern = re.compile(rf"^\s*-\s*{re.escape(label)}\s*:\s*(.*)$", re.IGNORECASE)
+        matches = [
+            {"index": index, "line": index + 1, "value": pattern.match(lines[index]).group(1).strip()}
+            for index in range(start + 1, end)
+            if pattern.match(lines[index])
+        ]
+        if len(matches) < 2:
+            continue
+        values = {item["value"] for item in matches}
+        public_occurrences = [{"line": item["line"], "value": item["value"]} for item in matches]
+        if len(values) != 1:
+            raise duplicate_canonical_field_error(section_title, label, public_occurrences)
+        for item in reversed(matches[1:]):
+            del lines[item["index"]]
+        repairs.append(
+            {
+                "field": label,
+                "section": section_title,
+                "before": f"{len(matches)} identical occurrences",
+                "after": matches[0]["value"],
+                "repair": "deduplicated-canonical-field",
+            }
+        )
+    normalized = "\n".join(lines)
+    if markdown.endswith("\n"):
+        normalized += "\n"
+    return normalized, repairs
+
+
 def set_section_bullet(markdown: str, section_title: str, label: str, value: str) -> tuple[str, str, bool]:
     lines = markdown.splitlines()
     start, end = find_section(lines, section_title)
@@ -3079,14 +3199,25 @@ def set_section_bullet(markdown: str, section_title: str, label: str, value: str
         return "\n".join(lines) + "\n", "", True
 
     pattern = re.compile(rf"^\s*-\s*{re.escape(label)}\s*:\s*(.*)$", re.IGNORECASE)
-    for index in range(start + 1, end):
-        match = pattern.match(lines[index])
-        if match:
-            old_value = match.group(1).strip()
-            if old_value == value:
-                return markdown, old_value, False
-            lines[index] = bullet
-            return "\n".join(lines) + "\n", old_value, True
+    matches = [
+        {"index": index, "line": index + 1, "value": pattern.match(lines[index]).group(1).strip()}
+        for index in range(start + 1, end)
+        if pattern.match(lines[index])
+    ]
+    if len(matches) > 1:
+        values = {item["value"] for item in matches}
+        public_occurrences = [{"line": item["line"], "value": item["value"]} for item in matches]
+        if len(values) != 1:
+            raise duplicate_canonical_field_error(section_title, label, public_occurrences)
+        for item in reversed(matches[1:]):
+            del lines[item["index"]]
+    if matches:
+        first = matches[0]
+        old_value = first["value"]
+        if old_value == value and len(matches) == 1:
+            return markdown, old_value, False
+        lines[first["index"]] = bullet
+        return "\n".join(lines) + "\n", old_value, True
 
     insert_at = end
     while insert_at > start + 1 and lines[insert_at - 1].strip() == "":
@@ -3435,7 +3566,7 @@ def recover_status_transactions(memory_root: Path) -> list[str]:
     recovered: list[str] = []
     if not root.is_dir():
         return recovered
-    supported = {"status-mutation", "repair-business", "repair-attempt"}
+    supported = {"status-mutation", "repair-business", "repair-attempt", "intake-reconciliation"}
     for manifest_path in sorted(root.glob("*/manifest.json")):
         manifest = load_json_object(manifest_path)
         if manifest.get("kind") not in supported or manifest.get("status") != "prepared":
@@ -3526,6 +3657,7 @@ def completed_status_receipt(
     memory_root: Path,
     input_hash: str,
     update_count: int,
+    input_path: Path | None = None,
 ) -> tuple[Path, dict[str, Any]] | None:
     root = memory_root / STATUS_SYNC_RECEIPT_REL
     if not root.is_dir():
@@ -3536,9 +3668,8 @@ def completed_status_receipt(
         if receipt.get("input_hash") != input_hash:
             continue
         execution_id = receipt.get("execution_id")
-        valid = (
+        common_valid = (
             receipt.get("receipt_schema_version") == RECEIPT_SCHEMA_VERSION
-            and receipt.get("receipt_type") == "execution"
             and isinstance(execution_id, str)
             and re.fullmatch(r"ssr-[0-9a-f]{32}", execution_id) is not None
             and path.name == f"{execution_id}.json"
@@ -3552,6 +3683,10 @@ def completed_status_receipt(
             and bool(receipt.get("input_path"))
             and isinstance(receipt.get("applied_at"), str)
         )
+        if receipt.get("receipt_type") == "reconciliation":
+            valid = bool(input_path and common_valid and reconciliation_receipt_valid(receipt, input_path, input_hash, update_count))
+        else:
+            valid = common_valid and receipt.get("receipt_type") == "execution"
         if not valid:
             raise StatusSyncContractError(
                 "STATUS_RECEIPT_INVALID",
@@ -3717,6 +3852,753 @@ def migration_plan_token(
     return f"status-sync-migration-{digest}"
 
 
+ACTION_RECONCILIATION_ROW_FIELDS = {
+    "status": "Status",
+    "owner": "Owner",
+    "workstream": "Workstream",
+    "affected_workstreams": "Affected Workstreams",
+    "action": "Action",
+    "source": "Source",
+    "reason": "Reason",
+    "due_or_trigger": "Due / Trigger",
+    "closure_criteria": "Closure Criteria",
+    "closure_criteria_verifiable": "Closure Criteria Verifiable",
+    "created_at": "Created At",
+    "started_at": "Started At",
+    "done_at": "Done At",
+    "cancelled_at": "Cancelled At",
+    "baseline_revision": "Baseline Revision",
+    "related_plan_item_ids": "Related Plan Items",
+    "related_flow_edge_ids": "Related Flow Edges",
+    "owning_workflow": "Owning Workflow",
+}
+
+
+def normalized_reconciliation_value(field_name: str, value: Any) -> Any:
+    if field_name in {"affected_workstreams", "related_plan_item_ids", "related_flow_edge_ids"}:
+        if isinstance(value, list):
+            values = value
+        else:
+            values = [item.strip() for item in re.split(r"\s*[;,]\s*", str(value or "")) if item.strip()]
+        return sorted(normalize_text_key(str(item)) for item in values)
+    if field_name == "closure_criteria_verifiable":
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        return True if text == "true" else False if text == "false" else None
+    if field_name == "baseline_revision":
+        text = str(value or "").strip()
+        return int(text) if text.isdigit() else None
+    return normalize_text_key(str(value or ""))
+
+
+def requested_action_value(action: ActionUpdate, field_name: str) -> Any:
+    return getattr(action, field_name)
+
+
+def action_status_is_satisfied(requested: str | None, row: dict[str, str]) -> bool:
+    if not requested:
+        return True
+    current = row.get("Status", "").strip().lower()
+    if requested == current:
+        return True
+    if requested == "open":
+        return current in ACTION_STATUSES
+    if requested == "in-progress":
+        return current in {"in-progress", "blocked", "done"} and bool(row.get("Started At", "").strip())
+    return False
+
+
+def action_composite_key_from_update(action: ActionUpdate) -> tuple[str, ...] | None:
+    values = (
+        action.action,
+        action.owner,
+        action.source,
+        action.due_or_trigger,
+        action.closure_criteria,
+    )
+    if any(is_missing_action_value(str(value or "")) for value in values):
+        return None
+    return tuple(normalize_text_key(str(value)) for value in values)
+
+
+def action_composite_key_from_row(row: dict[str, str]) -> tuple[str, ...]:
+    return tuple(
+        normalize_text_key(row.get(field, ""))
+        for field in ("Action", "Owner", "Source", "Due / Trigger", "Closure Criteria")
+    )
+
+
+def reconcile_action_command(
+    action: ActionUpdate,
+    rows: list[dict[str, str]],
+    applied_commands: dict[str, dict[str, Any]],
+    ordinal: int,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "command_type": "action",
+        "command_index": ordinal,
+        "command_id": action.command_id,
+        "operation": action.operation,
+        "requested_action_id": action.action_id,
+        "satisfied": False,
+    }
+    if action.command_id and action.command_id in applied_commands:
+        applied = applied_commands[action.command_id]
+        if applied.get("command_fingerprint") != action_command_fingerprint(action):
+            result["reason"] = "canonical command ledger contains the command_id with different command facts"
+            return result
+        matched_id = str(applied.get("action_id") or "")
+        if not any(row.get("Action ID") == matched_id for row in rows):
+            result["reason"] = "canonical command ledger points to a missing action"
+            return result
+        result.update({"satisfied": True, "match_method": "command-ledger", "matched_action_id": matched_id})
+        return result
+
+    matched: dict[str, str] | None = None
+    if action.action_id:
+        matched = next((row for row in rows if row.get("Action ID") == action.action_id), None)
+        result["match_method"] = "stable-action-id"
+    else:
+        composite = action_composite_key_from_update(action)
+        if composite is None:
+            result["reason"] = "action lacks a stable action_id and the full action+owner+source+due+closure composite"
+            return result
+        candidates = [row for row in rows if action_composite_key_from_row(row) == composite]
+        if len(candidates) != 1:
+            result["reason"] = "action composite did not resolve exactly once"
+            result["candidate_action_ids"] = sorted(row.get("Action ID", "") for row in candidates)
+            return result
+        matched = candidates[0]
+        result["match_method"] = "action-owner-source-due-closure"
+    if matched is None:
+        result["reason"] = "canonical ledger action was not found"
+        return result
+    result["matched_action_id"] = matched.get("Action ID")
+    discrepancies: list[dict[str, Any]] = []
+    for field_name in sorted(action.declared_fields):
+        if field_name == "status":
+            if not action_status_is_satisfied(action.status, matched):
+                discrepancies.append({"field": field_name, "requested": action.status, "current": matched.get("Status", "")})
+            continue
+        requested = normalized_reconciliation_value(field_name, requested_action_value(action, field_name))
+        current = normalized_reconciliation_value(field_name, matched.get(ACTION_RECONCILIATION_ROW_FIELDS[field_name], ""))
+        if requested != current:
+            discrepancies.append({"field": field_name, "requested": requested, "current": current})
+    current_revision = action_revision(matched)
+    result["current_action_revision"] = current_revision
+    if action.expected_revision is not None and current_revision < action.expected_revision:
+        discrepancies.append(
+            {"field": "action_revision", "requested_minimum": action.expected_revision, "current": current_revision}
+        )
+    if discrepancies:
+        result["reason"] = "canonical action facts do not satisfy the historical command"
+        result["discrepancies"] = discrepancies
+        return result
+    result["satisfied"] = True
+    return result
+
+
+def load_reconciliation_wdr(memory_root: Path, workstream_id: str) -> dict[str, Any]:
+    record_path = memory_root / "workstreams" / workstream_id / "delivery-record.md"
+    state_path = wdr_state_path(record_path)
+    if not record_path.is_file() or not state_path.is_file():
+        raise StatusSyncContractError(
+            "INTAKE_RECONCILIATION_LINEAGE_MISSING",
+            f"current WDR lineage is missing for {workstream_id}",
+        )
+    state = load_existing_json_object(state_path, "INTAKE_RECONCILIATION_LINEAGE_INVALID", "WDR state")
+    errors = validate_wdr_state(record_path, state)
+    if errors:
+        raise StatusSyncContractError(
+            "INTAKE_RECONCILIATION_LINEAGE_INVALID",
+            f"current WDR lineage is invalid for {workstream_id}: " + "; ".join(errors),
+        )
+    text = record_path.read_text(encoding="utf-8")
+    return {"record_path": record_path, "state_path": state_path, "state": state, "text": text}
+
+
+def canonical_wdr_field_value(markdown: str, section_title: str, label: str) -> tuple[str | None, str | None]:
+    lines = markdown.splitlines()
+    start, end = find_section(lines, section_title)
+    if start is None:
+        return None, "canonical section is missing"
+    pattern = re.compile(rf"^\s*-\s*{re.escape(label)}\s*:\s*(.*)$", re.IGNORECASE)
+    matches = [pattern.match(lines[index]).group(1).strip() for index in range(start + 1, end) if pattern.match(lines[index])]
+    if not matches:
+        return None, "canonical field is missing"
+    if len(matches) != 1:
+        return None, "canonical field occurs more than once"
+    return matches[0], None
+
+
+def reconcile_status_field(
+    update: StatusUpdate,
+    field_name: str,
+    requested_value: Any,
+    wdr: dict[str, Any],
+    ordinal: int,
+) -> dict[str, Any]:
+    section_title, label = VOLATILE_FIELDS[field_name]
+    current, error = canonical_wdr_field_value(wdr["text"], section_title, label)
+    result = {
+        "command_type": "status-field",
+        "command_index": ordinal,
+        "workstream_id": update.workstream_id,
+        "field": field_name,
+        "requested": requested_value,
+        "satisfied": False,
+        "lineage": {
+            "wdr_revision": wdr["state"]["wdr_revision"],
+            "file_generation": wdr["state"]["file_generation"],
+        },
+    }
+    if error:
+        result["reason"] = error
+        return result
+    requested = normalized_reconciliation_value(field_name, requested_value)
+    actual = normalized_reconciliation_value(field_name, current)
+    result["current"] = current
+    result["satisfied"] = requested == actual
+    if not result["satisfied"]:
+        result["reason"] = "current canonical WDR fact differs from the historical status update"
+    return result
+
+
+def reconcile_refresh_actions(
+    update: StatusUpdate,
+    rows: list[dict[str, str]],
+    ledger_state: dict[str, Any],
+    wdr: dict[str, Any],
+    ordinal: int,
+) -> dict[str, Any]:
+    result = {
+        "command_type": "refresh-actions",
+        "command_index": ordinal,
+        "workstream_id": update.workstream_id,
+        "satisfied": False,
+    }
+    sidecar_path = wdr["record_path"].with_name(ACTION_PROJECTION_REL)
+    if not sidecar_path.is_file():
+        result["reason"] = "canonical action projection sidecar is missing"
+        return result
+    sidecar = load_existing_json_object(
+        sidecar_path,
+        "INTAKE_RECONCILIATION_LINEAGE_INVALID",
+        "action projection",
+    )
+    expected = build_action_projection_payload(update.workstream_id, rows, ledger_state, wdr["state"])
+    if sidecar != expected:
+        result["reason"] = "canonical action projection sidecar is not current"
+        return result
+    current_next_actions, error = canonical_wdr_field_value(wdr["text"], "Project Status", "Next actions")
+    if error:
+        result["reason"] = error
+        return result
+    expected_ids = sorted(item["action_id"] for item in expected["actions"])
+    current_ids = sorted(
+        action_id
+        for item in split_next_actions(current_next_actions or "")
+        if (action_id := action_summary_id(item))
+    )
+    if current_ids != expected_ids:
+        result["reason"] = "WDR Next actions markers do not match the canonical open-action projection"
+        result["expected_action_ids"] = expected_ids
+        result["current_action_ids"] = current_ids
+        return result
+    result.update({"satisfied": True, "action_ids": expected_ids})
+    return result
+
+
+def reconcile_milestone_command(
+    update: StatusUpdate,
+    milestone: MilestoneUpdate,
+    baseline: dict[str, Any],
+    baseline_revision: int,
+    wdr: dict[str, Any],
+    ordinal: int,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "command_type": "milestone",
+        "command_index": ordinal,
+        "workstream_id": update.workstream_id,
+        "milestone_id": milestone.milestone_id,
+        "satisfied": False,
+        "current_baseline_revision": baseline_revision,
+        "lineage": {
+            "wdr_revision": wdr["state"]["wdr_revision"],
+            "file_generation": wdr["state"]["file_generation"],
+        },
+    }
+    if milestone.expected_baseline_revision is not None and milestone.expected_baseline_revision != baseline_revision:
+        result["reason"] = "historical milestone command targets a different baseline revision"
+        return result
+    baseline_rows = baseline.get("milestones")
+    if not isinstance(baseline_rows, list):
+        result["reason"] = "current canonical baseline milestone list is invalid"
+        return result
+    baseline_matches = [row for row in baseline_rows if isinstance(row, dict) and row.get("id") == milestone.milestone_id]
+    if len(baseline_matches) != 1:
+        result["reason"] = "milestone ID does not resolve exactly once in the current canonical baseline"
+        return result
+    baseline_item = baseline_matches[0]
+    if normalize_id(str(baseline_item.get("workstream_id") or "")) != update.workstream_id:
+        result["reason"] = "milestone belongs to a different current baseline workstream"
+        return result
+    _, rows, _, _, _ = parse_roadmap_table(wdr["text"])
+    matches = [row for row in rows if row.get("Milestone ID") == milestone.milestone_id]
+    if len(matches) != 1:
+        result["reason"] = "canonical WDR roadmap does not contain exactly one stable milestone row"
+        return result
+    row = matches[0]
+    discrepancies: list[dict[str, Any]] = []
+    requested = {
+        "Status": milestone.status,
+        "Baseline Revision": str(baseline_revision),
+        "Source": "; ".join(milestone.evidence),
+    }
+    if milestone.forecast:
+        requested["Forecast"] = milestone.forecast
+    if milestone.actual:
+        requested["Actual"] = milestone.actual
+    for field_name, expected in requested.items():
+        if normalized_reconciliation_value(field_name, expected) != normalized_reconciliation_value(field_name, row.get(field_name, "")):
+            discrepancies.append({"field": field_name, "requested": expected, "current": row.get(field_name, "")})
+    if discrepancies:
+        result["reason"] = "current milestone facts do not satisfy the historical command"
+        result["discrepancies"] = discrepancies
+        return result
+    result["satisfied"] = True
+    return result
+
+
+def reconcile_consumed_intent(
+    update: StatusUpdate,
+    intent_id: str,
+    input_hash: str,
+    outbox_rows: dict[str, dict[str, Any]],
+    ordinal: int,
+) -> dict[str, Any]:
+    row = outbox_rows.get(intent_id)
+    result = {
+        "command_type": "status-intent-consumption",
+        "command_index": ordinal,
+        "workstream_id": update.workstream_id,
+        "intent_id": intent_id,
+        "satisfied": False,
+    }
+    if not row:
+        result["reason"] = "canonical status intent outbox row is missing"
+        return result
+    expected_intent = update.consumed_intents.get(intent_id)
+    result["satisfied"] = (
+        row.get("intent") == expected_intent
+        and row.get("state") == "consumed"
+        and row.get("consumed_by") == input_hash
+    )
+    if not result["satisfied"]:
+        result["reason"] = "canonical status intent lineage does not prove this intake consumed the intent"
+    return result
+
+
+def reconciliation_token_path(memory_root: Path, token: str) -> Path:
+    return memory_root / INTAKE_RECONCILIATION_TOKEN_REL / f"{sha256_bytes(token.encode('utf-8')).removeprefix('sha256:')}.json"
+
+
+def reconciliation_binding(snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    return {
+        "input_path": snapshot["input_path"],
+        "input_hash": snapshot["input_hash"],
+        "principal": principal,
+        "snapshot_id": snapshot["snapshot_id"],
+        "read_set": snapshot["read_set"],
+        "command_results_digest": content_id(snapshot["command_results"]),
+    }
+
+
+def issue_reconciliation_token(memory_root: Path, snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    issued = datetime.now(timezone.utc)
+    token = f"reconcile_{secrets.token_urlsafe(32)}"
+    binding = reconciliation_binding(snapshot, principal)
+    state = {
+        "schema_version": "1.0.0",
+        "token_hash": sha256_bytes(token.encode("utf-8")),
+        "principal": principal,
+        "binding": binding,
+        "binding_digest": content_id(binding),
+        "status": "unused",
+        "issued_at": issued.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "expires_at": (issued + timedelta(minutes=15)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "previous_state_id": None,
+    }
+    state["state_id"] = content_id(state)
+    write_json_atomic(reconciliation_token_path(memory_root, token), state)
+    return {"token": token, "token_state": state}
+
+
+def reconciliation_snapshot(
+    memory_root: Path,
+    input_path: Path,
+    input_hash: str,
+    updates: list[StatusUpdate],
+) -> dict[str, Any]:
+    action_updates = [action for update in updates for action in update.actions]
+    needs_ledger = bool(action_updates) or any(update.refresh_actions for update in updates)
+    ledger_path = memory_root / ACTION_LEDGER_REL
+    ledger_state_path = memory_root / ACTION_LEDGER_STATE_REL
+    rows: list[dict[str, str]] = []
+    ledger_state: dict[str, Any] = {}
+    read_paths: set[Path] = set()
+    if needs_ledger:
+        if not ledger_path.is_file() or not ledger_state_path.is_file():
+            raise StatusSyncContractError(
+                "INTAKE_RECONCILIATION_LINEAGE_MISSING",
+                "canonical action ledger lineage is required for action reconciliation",
+            )
+        ledger_state = load_existing_json_object(
+            ledger_state_path,
+            "INTAKE_RECONCILIATION_LINEAGE_INVALID",
+            "action ledger state",
+        )
+        validate_action_ledger_state(ledger_path, ledger_state)
+        rows = parse_action_ledger(ledger_path)
+        read_paths.update({ledger_path, ledger_state_path})
+    applied_commands = {
+        str(item.get("command_id")): item
+        for item in ledger_state.get("applied_commands", [])
+        if isinstance(item, dict) and item.get("command_id")
+    }
+    needs_baseline = any(update.milestones for update in updates)
+    baseline: dict[str, Any] = {}
+    baseline_revision = 0
+    if needs_baseline:
+        baseline_path = memory_root / BASELINE_REL
+        baseline = parse_program_baseline(baseline_path)
+        baseline_revision = parse_optional_revision(baseline.get("revision"), "program baseline revision") or 0
+        read_paths.add(baseline_path)
+    outbox_rows: dict[str, dict[str, Any]] = {}
+    if any(update.consumed_intent_ids for update in updates):
+        outbox_path = memory_root / "state/status-intent-outbox.json"
+        outbox = load_existing_json_object(
+            outbox_path,
+            "INTAKE_RECONCILIATION_LINEAGE_INVALID",
+            "status intent outbox",
+        )
+        raw_rows = outbox.get("intents")
+        if not isinstance(raw_rows, list):
+            raise StatusSyncContractError("INTAKE_RECONCILIATION_LINEAGE_INVALID", "status intent outbox rows are invalid")
+        validate_status_intent_outbox(outbox, raw_rows)
+        outbox_rows = {str(row.get("intent_id")): row for row in raw_rows if isinstance(row, dict)}
+        read_paths.add(outbox_path)
+    wdr_cache: dict[str, dict[str, Any]] = {}
+    command_results: list[dict[str, Any]] = []
+    ordinal = 0
+    for action in action_updates:
+        ordinal += 1
+        command_results.append(reconcile_action_command(action, rows, applied_commands, ordinal))
+    for update in updates:
+        needs_wdr = bool(update.current_fields_present or update.next_actions_provided or update.refresh_actions or update.milestones)
+        wdr = None
+        if needs_wdr:
+            wdr = wdr_cache.setdefault(update.workstream_id, load_reconciliation_wdr(memory_root, update.workstream_id))
+            read_paths.update({wdr["record_path"], wdr["state_path"]})
+        for field_name in sorted(update.current_fields_present):
+            ordinal += 1
+            value = getattr(update, field_name)
+            requested = "; ".join(value) if isinstance(value, list) else value
+            command_results.append(reconcile_status_field(update, field_name, requested, wdr, ordinal))
+        if update.next_actions_provided:
+            ordinal += 1
+            command_results.append(
+                reconcile_status_field(update, "next_actions", "; ".join(update.next_actions), wdr, ordinal)
+            )
+        if update.refresh_actions:
+            ordinal += 1
+            command_results.append(reconcile_refresh_actions(update, rows, ledger_state, wdr, ordinal))
+            read_paths.add(wdr["record_path"].with_name(ACTION_PROJECTION_REL))
+        for milestone in update.milestones:
+            ordinal += 1
+            command_results.append(
+                reconcile_milestone_command(update, milestone, baseline, baseline_revision, wdr, ordinal)
+            )
+        for intent_id in update.consumed_intent_ids:
+            ordinal += 1
+            command_results.append(reconcile_consumed_intent(update, intent_id, input_hash, outbox_rows, ordinal))
+    if not command_results:
+        raise ValueError("updates-file contains no action, status, milestone, refresh, or intent-consumption commands")
+    read_set = [
+        {"path": path.relative_to(memory_root).as_posix(), "fingerprint": optional_sha256_file(path)}
+        for path in sorted(read_paths)
+    ]
+    missing = [result for result in command_results if not result.get("satisfied")]
+    body = {
+        "input_path": str(input_path),
+        "input_hash": input_hash,
+        "update_count": len(updates),
+        "command_results": command_results,
+        "read_set": read_set,
+    }
+    return {
+        **body,
+        "snapshot_id": content_id(body),
+        "verification_status": "verified" if not missing else "partial",
+        "all_satisfied": not missing,
+        "missing_commands": missing,
+    }
+
+
+def reconciliation_receipt_valid(receipt: dict[str, Any], input_path: Path, input_hash: str, update_count: int) -> bool:
+    receipt_id = receipt.get("receipt_id")
+    body = dict(receipt)
+    body.pop("receipt_id", None)
+    reconciliation = receipt.get("reconciliation")
+    return bool(
+        receipt.get("receipt_schema_version") == RECEIPT_SCHEMA_VERSION
+        and receipt.get("receipt_type") == "reconciliation"
+        and receipt.get("ok") is True
+        and receipt.get("status") == "applied"
+        and receipt.get("durable") is True
+        and receipt.get("dry_run") is False
+        and receipt.get("mode") == "update"
+        and receipt.get("input_path") == str(input_path)
+        and receipt.get("input_hash") == input_hash
+        and receipt.get("update_count") == update_count
+        and isinstance(receipt.get("applied_at"), str)
+        and isinstance(reconciliation, dict)
+        and reconciliation.get("verification_method") == "canonical-fact-reconciliation"
+        and reconciliation.get("verification_status") == "verified"
+        and reconciliation.get("all_satisfied") is True
+        and reconciliation.get("missing_commands") == []
+        and receipt_id == content_id(body)
+    )
+
+
+def existing_reconciliation_receipt(
+    memory_root: Path,
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+) -> tuple[Path, dict[str, Any]] | None:
+    root = memory_root / STATUS_SYNC_RECEIPT_REL
+    if not root.is_dir():
+        return None
+    for path in sorted(root.glob("ssr-*.json")):
+        receipt = load_json_object(path)
+        if receipt.get("receipt_type") != "reconciliation" or receipt.get("input_hash") != input_hash:
+            continue
+        if reconciliation_receipt_valid(receipt, input_path, input_hash, update_count):
+            return path, receipt
+        raise StatusSyncContractError(
+            "INTAKE_RECONCILIATION_RECEIPT_INVALID",
+            f"durable reconciliation receipt is invalid: {path}",
+        )
+    return None
+
+
+def build_reconciliation_receipt(snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    receipt = status_sync_receipt(
+        receipt_type="reconciliation",
+        input_path=Path(snapshot["input_path"]),
+        input_hash=snapshot["input_hash"],
+        update_count=snapshot["update_count"],
+        applied_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        dry_run=False,
+    )
+    receipt["reconciliation"] = {
+        "verification_method": "canonical-fact-reconciliation",
+        "verification_status": "verified",
+        "all_satisfied": True,
+        "missing_commands": [],
+        "snapshot_id": snapshot["snapshot_id"],
+        "principal": principal,
+        "read_set": snapshot["read_set"],
+        "command_results": snapshot["command_results"],
+    }
+    receipt["receipt_id"] = content_id(receipt)
+    return receipt
+
+
+def consumed_reconciliation_token_state(
+    token_state: dict[str, Any],
+    receipt_path: Path,
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    updated = dict(token_state)
+    updated["previous_state_id"] = token_state["state_id"]
+    updated["status"] = "consumed"
+    updated["consumed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    updated["receipt_path"] = str(receipt_path)
+    updated["receipt_id"] = receipt["receipt_id"]
+    updated.pop("state_id", None)
+    updated["state_id"] = content_id(updated)
+    return updated
+
+
+def apply_reconciliation_receipt(
+    memory_root: Path,
+    token_path: Path,
+    token_state: dict[str, Any],
+    snapshot: dict[str, Any],
+    principal: str,
+    fail_after_stage: bool,
+) -> tuple[Path, dict[str, Any], dict[str, Any], list[str]]:
+    receipt = build_reconciliation_receipt(snapshot, principal)
+    receipt_rel = receipt_relative_path(receipt)
+    receipt_path = memory_root / receipt_rel
+    token_rel = token_path.relative_to(memory_root)
+    with tempfile.TemporaryDirectory(prefix=".intake-reconciliation-", dir=memory_root.parent) as temp_dir:
+        staged_root = Path(temp_dir) / "memory"
+        copy_memory_tree(memory_root, staged_root)
+        write_json_atomic(staged_root / receipt_rel, receipt)
+        write_json_atomic(
+            staged_root / token_rel,
+            consumed_reconciliation_token_state(token_state, receipt_path, receipt),
+        )
+        changed = changed_staged_files(memory_root, staged_root)
+        allowed = {receipt_rel, token_rel}
+        unexpected = [path.as_posix() for path in changed if path not in allowed]
+        if unexpected:
+            raise StatusSyncContractError(
+                "INTAKE_RECONCILIATION_TARGET_INVALID",
+                "reconciliation staged unexpected targets: " + ", ".join(unexpected),
+            )
+        if fail_after_stage:
+            raise StatusSyncContractError(
+                "INTAKE_RECONCILIATION_INJECTED_FAILURE",
+                "injected failure after reconciliation staging",
+            )
+        publication = publish_staged_files(
+            memory_root,
+            staged_root,
+            changed,
+            transaction_kind="intake-reconciliation",
+        )
+    return receipt_path, receipt, publication, [path.as_posix() for path in changed]
+
+
+def run_reconcile_intake(args: argparse.Namespace) -> int:
+    project_root = require_project_root(args.project_root)
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    input_path = require_file(args.updates_file, "updates-file")
+    input_hash = sha256_bytes(input_path.read_bytes())
+    _, updates = load_updates_payload(input_path, args.source)
+    principal = " ".join(args.principal.split())
+    if not principal:
+        raise StatusSyncContractError("INTAKE_RECONCILIATION_PRINCIPAL_INVALID", "principal must not be empty")
+    existing = existing_reconciliation_receipt(memory_root, input_path, input_hash, len(updates))
+    if existing:
+        receipt_path, receipt = existing
+        emit(
+            {
+                "ok": True,
+                "mode": "reconcile-intake",
+                "dry_run": bool(args.dry_run),
+                "verification_status": "verified",
+                "all_satisfied": True,
+                "reused": True,
+                "token": None,
+                "missing_commands": [],
+                "receipt": receipt,
+                "receipt_path": str(receipt_path),
+            },
+            args.output,
+        )
+        return 0
+    snapshot = reconciliation_snapshot(memory_root, input_path, input_hash, updates)
+    if args.dry_run:
+        if args.token:
+            raise StatusSyncContractError(
+                "INTAKE_RECONCILIATION_TOKEN_INVALID",
+                "--token is not accepted with --dry-run",
+            )
+        token = None
+        if snapshot["all_satisfied"]:
+            memory_root.mkdir(parents=True, exist_ok=True)
+            token = issue_reconciliation_token(memory_root, snapshot, principal)["token"]
+        emit(
+            {
+                "ok": True,
+                "mode": "reconcile-intake",
+                "dry_run": True,
+                "verification_status": snapshot["verification_status"],
+                "all_satisfied": snapshot["all_satisfied"],
+                "input_path": str(input_path),
+                "input_hash": input_hash,
+                "snapshot_id": snapshot["snapshot_id"],
+                "command_results": snapshot["command_results"],
+                "missing_commands": snapshot["missing_commands"],
+                "token": token,
+                "receipt": None,
+                "receipt_path": None,
+            },
+            args.output,
+        )
+        return 0
+    if not args.token:
+        raise StatusSyncContractError(
+            "INTAKE_RECONCILIATION_TOKEN_REQUIRED",
+            "durable reconciliation requires the single-use token from a fully satisfied dry-run",
+        )
+    token_path = reconciliation_token_path(memory_root, args.token)
+    token_state = load_json_object(token_path)
+    if not token_state:
+        raise StatusSyncContractError("INTAKE_RECONCILIATION_TOKEN_INVALID", "reconciliation token is unknown")
+    claimed_state_id = token_state.get("state_id")
+    state_body = dict(token_state)
+    state_body.pop("state_id", None)
+    if claimed_state_id != content_id(state_body) or token_state.get("token_hash") != sha256_bytes(args.token.encode("utf-8")):
+        raise StatusSyncContractError("INTAKE_RECONCILIATION_TOKEN_INVALID", "reconciliation token identity is invalid")
+    if token_state.get("principal") != principal:
+        raise StatusSyncContractError("INTAKE_RECONCILIATION_TOKEN_INVALID", "reconciliation token belongs to another principal")
+    if token_state.get("status") == "consumed":
+        raise StatusSyncContractError("INTAKE_RECONCILIATION_TOKEN_USED", "reconciliation token was already consumed")
+    if token_state.get("status") != "unused":
+        raise StatusSyncContractError("INTAKE_RECONCILIATION_TOKEN_INVALID", "reconciliation token has an invalid state")
+    expires_at = datetime.fromisoformat(str(token_state.get("expires_at", "")).replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) > expires_at:
+        update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RECONCILIATION_TOKEN_EXPIRED")
+        raise StatusSyncContractError("INTAKE_RECONCILIATION_TOKEN_EXPIRED", "reconciliation token expired")
+    if not snapshot["all_satisfied"]:
+        update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RECONCILIATION_FACTS_STALE")
+        raise StatusSyncContractError(
+            "INTAKE_RECONCILIATION_FACTS_STALE",
+            "canonical facts no longer satisfy every historical command",
+            {"missing_commands": snapshot["missing_commands"]},
+        )
+    binding = reconciliation_binding(snapshot, principal)
+    if token_state.get("binding") != binding or token_state.get("binding_digest") != content_id(binding):
+        update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RECONCILIATION_READ_SET_STALE")
+        raise StatusSyncContractError(
+            "INTAKE_RECONCILIATION_READ_SET_STALE",
+            "canonical facts or lineage changed after the reconciliation dry-run",
+        )
+    receipt_path, receipt, publication, changed = apply_reconciliation_receipt(
+        memory_root,
+        token_path,
+        token_state,
+        snapshot,
+        principal,
+        args.fail_after_stage,
+    )
+    emit(
+        {
+            "ok": True,
+            "mode": "reconcile-intake",
+            "dry_run": False,
+            "verification_status": "verified",
+            "all_satisfied": True,
+            "reused": False,
+            "missing_commands": [],
+            "receipt": receipt,
+            "receipt_path": str(receipt_path),
+            "publication": publication,
+            "changed_paths": changed,
+        },
+        args.output,
+    )
+    return 0
+
+
 def run_context(args: argparse.Namespace) -> int:
     project_root = require_project_root(args.project_root)
     config_script = require_file(args.config_script, "config-script")
@@ -3764,17 +4646,32 @@ def run_update(args: argparse.Namespace) -> int:
     validate_update_targets(memory_root, updates)
     baseline_context = validate_milestone_updates(memory_root, updates)
     completed_receipt = (
-        completed_status_receipt(memory_root, input_hash, len(updates))
+        completed_status_receipt(memory_root, input_hash, len(updates), input_path)
         if input_hash and not args.dry_run
         else None
     )
     if completed_receipt:
         receipt_path, receipt = completed_receipt
-        replayed_action_ids, intent_convergence = validate_completed_input_replay(
-            memory_root,
-            updates,
-            input_hash,
-        )
+        if receipt.get("receipt_type") == "reconciliation":
+            replayed_action_ids = sorted(
+                {
+                    str(item.get("matched_action_id"))
+                    for item in receipt.get("reconciliation", {}).get("command_results", [])
+                    if isinstance(item, dict) and item.get("matched_action_id")
+                }
+            )
+            intent_convergence = {
+                "status": "reconciled",
+                "pending_intent_ids": [],
+                "consumed_intent_ids": [],
+                "outbox": None,
+            }
+        else:
+            replayed_action_ids, intent_convergence = validate_completed_input_replay(
+                memory_root,
+                updates,
+                input_hash,
+            )
         ledger_path = memory_root / ACTION_LEDGER_REL
         action_flow_path = memory_root / "views/action-flow.json"
         ledger_state_path = memory_root / ACTION_LEDGER_STATE_REL
@@ -4682,6 +5579,12 @@ def main() -> int:
             return run_stale(args)
         if args.command == "migrate-receipt":
             return run_migrate_receipt(args)
+        if args.command == "reconcile-intake":
+            project_root = require_project_root(args.project_root)
+            memory_root = resolve_memory_root(project_root, args.memory_root)
+            with fact_write_lock(memory_root):
+                recover_status_transactions(memory_root)
+                return run_reconcile_intake(args)
         if args.command == "migrate-authority-state":
             project_root = require_project_root(args.project_root)
             memory_root = resolve_memory_root(project_root, args.memory_root)
@@ -4697,6 +5600,7 @@ def main() -> int:
         raise ValueError(f"unknown command: {args.command}")
     except StatusSyncContractError as exc:
         payload = {"ok": False, "error_code": exc.error_code, "error": str(exc)}
+        payload.update(exc.details)
         emit(payload, getattr(args, "output", None))
         return 2
     except Exception as exc:
