@@ -15,15 +15,28 @@ def emit(v,o):
  t=json.dumps(v,ensure_ascii=False,indent=2); Path(o).write_text(t+"\n",encoding="utf-8") if o else print(t)
 def token_path(memory,t): return memory/TOKEN_REL/(hashlib.sha256(t.encode()).hexdigest()+".json")
 def merge_refs(text,refs):
- lines=text.splitlines(); start=next((i for i,x in enumerate(lines) if x.strip().casefold()=="l0 references:"),None)
- if start is None: raise ValueError("WDR Cross-Workstream Links / L0 references label is missing")
- end=len(lines)
- for i in range(start+1,len(lines)):
-  stripped=lines[i].strip()
-  if stripped.endswith(":") and not stripped.startswith(("-","*")) or lines[i].startswith("## "): end=i; break
- existing=[]
- for line in lines[start+1:end]:
-  if line.strip().startswith(("- ","* ")): existing.append(re.sub(r"^[-*]\s+","",line.strip()).strip())
+ lines=text.splitlines(); cross=next((i for i,x in enumerate(lines) if x.strip().casefold()=="## cross-workstream links"),None); existing=[]
+ if cross is None:
+  project=next((i for i,x in enumerate(lines) if x.strip().casefold()=="## project status"),None)
+  if project is not None: insert=next((i for i in range(project+1,len(lines)) if lines[i].startswith("## ")),len(lines))
+  else: insert=next((i for i,x in enumerate(lines) if x.strip().casefold() in {"## decisions and evidence","## record rule"}),len(lines))
+  block=["## Cross-Workstream Links","","Depends on:","","Impacts:","","L0 references:",""]
+  if insert and lines[insert-1].strip(): block.insert(0,"")
+  lines[insert:insert]=block; start=insert+block.index("L0 references:"); end=start+2
+ else:
+  section_end=next((i for i in range(cross+1,len(lines)) if lines[i].startswith("## ")),len(lines))
+  start=next((i for i in range(cross+1,section_end) if lines[i].strip().casefold()=="l0 references:"),None)
+  if start is None:
+   block=[] if section_end and not lines[section_end-1].strip() else [""]
+   block.extend(["L0 references:",""])
+   lines[section_end:section_end]=block; start=section_end+block.index("L0 references:"); end=start+2
+  else:
+   end=section_end
+   for i in range(start+1,section_end):
+    stripped=lines[i].strip()
+    if stripped.endswith(":") and not stripped.startswith(("-","*")): end=i; break
+   for line in lines[start+1:end]:
+    if line.strip().startswith(("- ","* ")): existing.append(re.sub(r"^[-*]\s+","",line.strip()).strip())
  merged=[]
  for value in [*existing,*refs]:
   value=" ".join(value.split())

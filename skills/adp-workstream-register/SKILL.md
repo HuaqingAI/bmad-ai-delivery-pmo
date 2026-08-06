@@ -84,7 +84,7 @@ Never delete a duplicate workstream directory or copy facts between two WDRs wit
 uv run "{skill-root}/scripts/manage_workstream_alias.py" "{project-root}" --canonical <canonical-id> --alias <retired-id> --memory-root <memory-root> --principal <operator-id> --dry-run
 ```
 
-Review identity, action and exact cross-reference conflicts. Only a conflict-free dry-run issues a 15-minute token; apply with the same arguments and `--token <token>`. The transaction preserves the alias directory, writes `workstream-alias.json`, updates exact WDR references, the alias registry and affected sidecars, and records a durable retirement receipt. Retired aliases are excluded from the physical WDR registry and state audit.
+Review identity, action and exact cross-reference conflicts. `TBD`, empty, or missing identity values on either side are absent facts rather than conflicts; retirement preserves the alias WDR as-is and never promotes its identity into the canonical WDR. Only a conflict-free dry-run issues a 15-minute token; apply with the same arguments and `--token <token>`. The transaction preserves the alias directory, writes `workstream-alias.json`, updates exact WDR references, the alias registry and affected sidecars, and records a durable retirement receipt. Retired aliases are excluded from the physical WDR registry and state audit.
 
 ## Normalize Existing Lines
 

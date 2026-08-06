@@ -231,5 +231,90 @@ Keep details.
             self.assertTrue(Path(applied["receipt_path"]).is_file())
             projection=json.loads(record.with_name("action-projection.json").read_text(encoding="utf-8")); state=json.loads(record.with_name("delivery-record.state.json").read_text(encoding="utf-8")); self.assertEqual(projection["wdr_revision"],state["wdr_revision"])
 
+    def test_repair_creates_missing_l0_label_without_changing_other_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); memory=root/"_bmad-output/adp/memory"; record=memory/"workstreams/l8b/delivery-record.md"; record.parent.mkdir(parents=True)
+            record.write_text("""# WDR
+
+## Identity
+
+- Workstream ID: l8b
+- Current BMM phase: PRD
+- Current ADP status: draft
+
+## Project Status
+
+- Progress: 40%
+- Blockers: governance review
+- Risks: provider dependency
+- Dependencies: see cross-workstream links
+- Scope or change notes: preserve this fact
+- Next actions: review contract
+
+## Cross-Workstream Links
+
+Depends on:
+
+- l0-foundation-platform
+
+Impacts:
+
+- l1-transaction-loop
+
+## Record Rule
+
+Keep details.
+""",encoding="utf-8")
+            update=root/"seed-action.json"; update.write_text(json.dumps({"updates":[{"id":"l8b","refresh_actions":True,"actions":[{"operation":"create","command_id":"CMD-L0-LABEL","action_id":"ACT-L0-LABEL","owner":"FDE-A","action":"Seed lineage","source":"meeting#label","due":"Friday","closure_criteria":"Done","evidence":[{"source":"meeting#label"}]}]}]}),encoding="utf-8")
+            subprocess.run([sys.executable,str(STATUS_SCRIPT),"update",str(root),"--updates-file",str(update)],check=True,capture_output=True,text=True)
+            before=record.read_text(encoding="utf-8")
+            command=[sys.executable,str(REPAIR_SCRIPT),str(root),"--id","l8b","--l0-reference","G19-B Evidence Ledger"]
+            preview=json.loads(subprocess.run([*command,"--dry-run"],check=True,capture_output=True,text=True).stdout)
+            subprocess.run([*command,"--token",preview["token"]],check=True,capture_output=True,text=True)
+            after=record.read_text(encoding="utf-8")
+            self.assertIn("Impacts:\n\n- l1-transaction-loop\n\nL0 references:\n\n- G19-B Evidence Ledger",after)
+            self.assertEqual(after.replace("\nL0 references:\n\n- G19-B Evidence Ledger\n", ""),before)
+
+    def test_repair_creates_missing_cross_workstream_section_from_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); memory=root/"_bmad-output/adp/memory"; record=memory/"workstreams/l8b-customer-ops-identity/delivery-record.md"; record.parent.mkdir(parents=True)
+            record.write_text("""# WDR
+
+## Identity
+
+- Workstream ID: l8b-customer-ops-identity
+- Current BMM phase: PRD
+- Current ADP status: blocked
+
+## Project Status
+
+- Progress: 60%
+- Blockers: owner review
+- Risks: delivery evidence
+- Dependencies: see cross-workstream links
+- Scope or change notes: preserve current scope
+- Next actions: close gates
+
+## Meeting Sync Update: 2026-08-03 - M-004
+
+- Source: meeting.md
+- Status: accepted
+""",encoding="utf-8")
+            update=root/"seed-action.json"; update.write_text(json.dumps({"updates":[{"id":"l8b-customer-ops-identity","refresh_actions":True,"actions":[{"operation":"create","command_id":"CMD-L0-SECTION","action_id":"ACT-L0-SECTION","owner":"FDE-A","action":"Seed lineage","source":"meeting#section","due":"Friday","closure_criteria":"Done","evidence":[{"source":"meeting#section"}]}]}]}),encoding="utf-8")
+            subprocess.run([sys.executable,str(STATUS_SCRIPT),"update",str(root),"--updates-file",str(update)],check=True,capture_output=True,text=True)
+            before=record.read_text(encoding="utf-8")
+            references=["L8B Customer Query/Create Workflow Contract v0","L8B Email Template Management Contract v0","Mailchimp Secret Reference Boundary","G19-B Evidence Ledger","G06 Cutover Evidence"]
+            command=[sys.executable,str(REPAIR_SCRIPT),str(root),"--id","l8b-customer-ops-identity"]
+            for reference in references: command.extend(["--l0-reference",reference])
+            preview=json.loads(subprocess.run([*command,"--dry-run"],check=True,capture_output=True,text=True).stdout)
+            applied=json.loads(subprocess.run([*command,"--token",preview["token"]],check=True,capture_output=True,text=True).stdout)
+            after=record.read_text(encoding="utf-8")
+            section="## Cross-Workstream Links\n\nDepends on:\n\nImpacts:\n\nL0 references:\n\n"+"".join(f"- {reference}\n" for reference in references)
+            self.assertIn(section,after)
+            self.assertLess(after.index("## Cross-Workstream Links"),after.index("## Meeting Sync Update"))
+            self.assertEqual(after.replace("\n"+section,""),before)
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            projection=json.loads(record.with_name("action-projection.json").read_text(encoding="utf-8")); state=json.loads(record.with_name("delivery-record.state.json").read_text(encoding="utf-8")); self.assertEqual(projection["wdr_revision"],state["wdr_revision"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,8 @@ def snapshot(st,memory,canonical,alias):
     if clean(cb.get("workstream id"))!=canonical or clean(ab.get("workstream id"))!=alias: raise st.StatusSyncContractError("WORKSTREAM_ALIAS_IDENTITY_INVALID","WDR identity does not match directory")
     conflicts=[]
     for key in ("fde owner","business owner"):
-        if clean(ab.get(key)) not in PLACEHOLDERS and clean(ab.get(key))!=clean(cb.get(key)): conflicts.append({"kind":"identity","field":key,"alias":ab.get(key),"canonical":cb.get(key)})
+        alias_value=clean(ab.get(key)); canonical_value=clean(cb.get(key))
+        if alias_value not in PLACEHOLDERS and canonical_value not in PLACEHOLDERS and alias_value!=canonical_value: conflicts.append({"kind":"identity","field":key,"alias":ab.get(key),"canonical":cb.get(key)})
     for key in ("progress","blockers","risks","scope or change notes","next actions"):
         if clean(ab.get(key)) not in PLACEHOLDERS: conflicts.append({"kind":"alias-fact","field":key,"value":ab.get(key)})
     ledger=memory/st.ACTION_LEDGER_REL; ledger_state_path=memory/st.ACTION_LEDGER_STATE_REL

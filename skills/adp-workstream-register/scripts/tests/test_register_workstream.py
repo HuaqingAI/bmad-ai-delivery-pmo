@@ -233,5 +233,26 @@ class RegisterWorkstreamTests(unittest.TestCase):
             self.assertIn("l13-workforce-identity-access",ids)
             self.assertNotIn("l13-iam",ids)
 
+    def test_alias_identity_does_not_conflict_with_missing_canonical_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir); self.seed_memory(root)
+            canonical = self.run_script(root, "--id", "l13-workforce-identity-access", "--name", "IAM full", "--owner", "FDE-A")
+            alias = self.run_script(root, "--id", "l13-iam", "--name", "IAM shell", "--owner", "TBD", "--business-owner", "陈康平")
+            canonical_record = Path(canonical["workstream_root"]) / "delivery-record.md"
+            alias_record = Path(alias["workstream_root"]) / "delivery-record.md"
+            canonical_before = canonical_record.read_bytes()
+            alias_before = alias_record.read_bytes()
+            command=[sys.executable,str(ALIAS_SCRIPT),str(root),"--canonical","l13-workforce-identity-access","--alias","l13-iam"]
+
+            preview=json.loads(subprocess.run([*command,"--dry-run"],check=True,capture_output=True,text=True).stdout)
+
+            self.assertTrue(preview["can_apply"])
+            self.assertEqual(preview["conflicts"], [])
+            applied=json.loads(subprocess.run([*command,"--token",preview["token"]],check=True,capture_output=True,text=True).stdout)
+            self.assertEqual(canonical_record.read_bytes(), canonical_before)
+            self.assertEqual(alias_record.read_bytes(), alias_before)
+            self.assertIn("- Business owner: 陈康平", alias_record.read_text(encoding="utf-8"))
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+
 if __name__ == "__main__":
     unittest.main()

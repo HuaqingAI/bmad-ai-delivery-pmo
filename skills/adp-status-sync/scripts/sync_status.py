@@ -4050,12 +4050,49 @@ def action_daily_log_lineage(memory_root: Path, action: ActionUpdate) -> dict[st
                 "action_id": action.action_id,
                 "status": action.status,
                 "source": source,
+                "workstream_id": safe_normalize_id(match.group(2)),
                 "observed_at": normalize_required_timestamp(match.group(1), "daily action timestamp"),
                 "paths": [path.relative_to(memory_root).as_posix()],
                 "fingerprint": sha256_bytes(path.read_bytes()),
                 "sequence": index,
             })
     return matches[-1] if matches else None
+
+
+def program_action_route_lineage(
+    action: ActionUpdate,
+    row: dict[str, str],
+    daily_lineage: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    requested_workstream = safe_normalize_id(str(action.workstream or ""))
+    current_workstream = safe_normalize_id(str(row.get("Workstream", "") or ""))
+    affected_workstreams = parse_workstream_cell(row.get("Affected Workstreams", ""))
+    daily_workstream = safe_normalize_id(str((daily_lineage or {}).get("workstream_id", "") or ""))
+    if (
+        not action.action_id
+        or row.get("Action ID") != action.action_id
+        or current_workstream != "program"
+        or not requested_workstream
+        or requested_workstream == "program"
+        or requested_workstream not in affected_workstreams
+        or not daily_lineage
+        or daily_lineage.get("type") != "ordered-daily-log-action-lineage"
+        or daily_workstream not in {requested_workstream, "program"}
+    ):
+        return None
+    return {
+        "type": "program-action-route-normalization",
+        "action_id": action.action_id,
+        "historical_workstream": requested_workstream,
+        "current_workstream": current_workstream,
+        "affected_workstreams": affected_workstreams,
+        "daily_log_workstream": daily_workstream,
+        "status": daily_lineage.get("status"),
+        "source": daily_lineage.get("source"),
+        "observed_at": daily_lineage.get("observed_at"),
+        "paths": list(daily_lineage.get("paths", [])),
+        "fingerprint": daily_lineage.get("fingerprint"),
+    }
 
 
 def reconcile_action_command(
@@ -4096,11 +4133,14 @@ def reconcile_action_command(
 
     matched: dict[str, str] | None = None
     source_lineage: dict[str, Any] | None = None
+    route_lineage: dict[str, Any] | None = None
     if action.action_id:
         matched = next((row for row in rows if row.get("Action ID") == action.action_id), None)
         result["match_method"] = "stable-action-id"
         if matched is not None:
-            source_lineage = action_source_lineage(action, matched) or action_daily_log_lineage(memory_root, action)
+            daily_lineage = action_daily_log_lineage(memory_root, action)
+            source_lineage = action_source_lineage(action, matched) or daily_lineage
+            route_lineage = program_action_route_lineage(action, matched, daily_lineage)
     else:
         composite = action_composite_key_from_update(action)
         if composite is None:
@@ -4147,6 +4187,8 @@ def reconcile_action_command(
         if requested != current:
             if field_name in {"source", "owning_workflow"} and source_lineage is not None:
                 continue
+            if field_name == "workstream" and route_lineage is not None:
+                continue
             discrepancies.append({"field": field_name, "requested": requested, "current": current})
     current_revision = action_revision(matched)
     result["current_action_revision"] = current_revision
@@ -4159,9 +4201,10 @@ def reconcile_action_command(
         result["discrepancies"] = discrepancies
         return result
     result["satisfied"] = True
-    if source_lineage is not None:
+    lineage_evidence = [item for item in (source_lineage, route_lineage) if item is not None]
+    if lineage_evidence:
         result["satisfied_by"] = "superseded-lineage"
-        result["lineage_evidence"] = [source_lineage]
+        result["lineage_evidence"] = lineage_evidence
     else:
         result["satisfied_by"] = "current-fact"
     return result
@@ -4302,6 +4345,18 @@ DAILY_LOG_FIELD_LABELS = {
     "next_actions": "Next actions",
 }
 
+CHANGE_NOTE_STRUCTURED_METADATA = (
+    re.compile(r"^(?:audit|checkpoint|risk|severity|likelihood|status|metadata|source|gate)\s*[:=]\s*\S(?:.*\S)?$", re.I),
+    re.compile(r"^risk_id\s*:\s*RISK-[A-Z0-9][A-Z0-9._-]*$", re.I),
+    re.compile(r"^baseline_revision\s*:\s*[1-9]\d*$", re.I),
+    re.compile(r"^related_plan_item_ids\s*:\s*[A-Z][A-Z0-9._-]*(?:\s*[+,]\s*[A-Z][A-Z0-9._-]*)*$", re.I),
+    re.compile(r"^Candidate\s+CHK-[A-Z0-9][A-Z0-9._-]*\s+from\s+(?:prd|architecture|epics?|stories?|artifact):\S.*$", re.I),
+)
+
+
+def is_structured_change_note_metadata(value: str) -> bool:
+    return any(pattern.fullmatch(value.strip()) for pattern in CHANGE_NOTE_STRUCTURED_METADATA)
+
 
 def daily_status_lineage_events(memory_root: Path, workstream_id: str, field_name: str) -> list[dict[str, Any]]:
     label = DAILY_LOG_FIELD_LABELS.get(field_name)
@@ -4360,6 +4415,7 @@ def status_superseded_lineage(
     requested_value: Any,
     current_value: Any,
     cache: dict[tuple[str, str], list[dict[str, Any]]],
+    current_wdr: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     key = (workstream_id, field_name)
     if key not in cache:
@@ -4394,21 +4450,27 @@ def status_superseded_lineage(
         for newer in current_events
         if is_later(old, newer)
     ]
-    if not pairs and field_name == "change_notes" and old_events:
+    if not pairs and field_name == "change_notes" and current_wdr:
         requested_parts = [part.strip() for part in str(requested_value or "").split(";") if part.strip()]
         current_parts = [part.strip() for part in str(current_value or "").split(";") if part.strip()]
         suffix = current_parts[len(requested_parts):] if current_parts[:len(requested_parts)] == requested_parts else []
-        metadata = re.compile(r"^(?:audit|checkpoint|risk|severity|likelihood|status|metadata|source|gate)\s*[:=]", re.I)
-        if suffix and all(metadata.match(part) for part in suffix):
-            old = old_events[-1]
-            later = [event for event in events if event.get("type") == "daily-log-status-lineage" and is_later(old, event)]
-            later_parts = [part.strip() for event in later for part in str(event.get("value") or "").split(";") if part.strip()]
-            cursor = 0
-            for part in later_parts:
-                if cursor < len(suffix) and part == suffix[cursor]:
-                    cursor += 1
-            if cursor == len(suffix):
-                return [old, *later]
+        daily_old_events = [event for event in old_events if event.get("type") == "daily-log-status-lineage"]
+        if suffix and daily_old_events and all(is_structured_change_note_metadata(part) for part in suffix):
+            old = daily_old_events[-1]
+            state = current_wdr["state"]
+            return [old, {
+                "type": "current-wdr-structured-append-lineage",
+                "workstream_id": workstream_id,
+                "field": field_name,
+                "appended_metadata": suffix,
+                "wdr_revision": state.get("wdr_revision"),
+                "file_generation": state.get("file_generation"),
+                "wdr_fingerprint": state.get("wdr_fingerprint"),
+                "paths": [
+                    current_wdr["record_path"].relative_to(memory_root).as_posix(),
+                    current_wdr["state_path"].relative_to(memory_root).as_posix(),
+                ],
+            }]
     if not pairs:
         return None
     old, newer = sorted(pairs, key=lambda pair: (pair[0]["observed_at"], pair[1]["observed_at"]))[-1]
@@ -4455,6 +4517,7 @@ def reconcile_status_field(
         requested_value,
         current,
         lineage_cache,
+        wdr,
     )
     if lineage:
         result["satisfied"] = True

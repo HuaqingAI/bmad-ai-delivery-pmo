@@ -79,7 +79,7 @@ Gap scan results include a directly consumable `repair_plan`. After reviewing th
 uv run "{skill-root}/scripts/repair_wdr_l0_reference.py" "{project-root}" --id <workstream-id> --l0-reference <reference> --memory-root <memory-root> --principal <operator-id> --dry-run
 ```
 
-Apply with the unchanged arguments and returned token. The repair changes only the `Cross-Workstream Links / L0 references` list and atomically updates WDR state, action projection, token state, and a durable receipt. It removes placeholder `TBD` only when real references are supplied.
+Apply with the unchanged arguments and returned token. The repair changes only the `Cross-Workstream Links / L0 references` surface and atomically updates WDR state, action projection, token state, and a durable receipt. If the label is absent it creates the canonical label and list; if the whole section is absent it inserts the schema-shaped `Depends on`, `Impacts`, and `L0 references` section after Project Status without rewriting other fields. It removes placeholder `TBD` only when real references are supplied.
 
 ## Output Contract
 

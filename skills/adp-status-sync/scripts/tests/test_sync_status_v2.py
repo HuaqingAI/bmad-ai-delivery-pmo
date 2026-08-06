@@ -1317,11 +1317,25 @@ class StatusSyncV2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root=Path(temp_dir); record=self.create_record(root,"l1-checkout")
             old=self.write_updates(root,"old-note.json",[{"id":"l1-checkout","change_notes":["Finance channel blocked"]}]); self.run_cli("update",str(root),"--updates-file",str(old))
-            meta=self.write_updates(root,"meta-note.json",[{"id":"l1-checkout","change_notes":["risk: high","checkpoint: reviewed"]}]); self.run_cli("update",str(root),"--updates-file",str(meta))
-            before=record.read_bytes(); text=record.read_text(encoding="utf-8").replace("- Scope or change notes: risk: high; checkpoint: reviewed","- Scope or change notes: Finance channel blocked; risk: high; checkpoint: reviewed"); record.write_text(text,encoding="utf-8"); module.update_wdr_state(record,before,record.read_bytes())
+            metadata="risk_id:RISK-ee2ec88fbe05163e; baseline_revision:4; related_plan_item_ids:MS-L3-ARCHITECTURE-READY+MS-L3-PRD-READY; Candidate CHK-FAB62877E4EC9CE4 from prd:D:/repo/prd.md"
+            before=record.read_bytes(); text=record.read_text(encoding="utf-8").replace("- Scope or change notes: Finance channel blocked",f"- Scope or change notes: Finance channel blocked; {metadata}"); record.write_text(text,encoding="utf-8"); module.update_wdr_state(record,before,record.read_bytes())
             historical=self.write_updates(root,"historical-note.json",[{"id":"l1-checkout","change_notes":["Finance channel blocked"]}])
             _,result=self.run_cli("reconcile-intake",str(root),"--updates-file",str(historical),"--dry-run")
-            self.assertTrue(result["all_satisfied"]); self.assertEqual(result["command_results"][0]["satisfied_by"],"superseded-lineage")
+            command=result["command_results"][0]
+            self.assertTrue(result["all_satisfied"]); self.assertEqual(command["satisfied_by"],"superseded-lineage")
+            self.assertEqual(command["lineage_evidence"][1]["type"],"current-wdr-structured-append-lineage")
+            self.assertEqual(command["lineage_evidence"][1]["appended_metadata"],metadata.split("; "))
+
+    def test_change_notes_superseded_lineage_rejects_unstructured_wdr_suffix(self) -> None:
+        module=load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); record=self.create_record(root,"l1-checkout")
+            old=self.write_updates(root,"old-note.json",[{"id":"l1-checkout","change_notes":["Finance channel blocked"]}]); self.run_cli("update",str(root),"--updates-file",str(old))
+            before=record.read_bytes(); text=record.read_text(encoding="utf-8").replace("- Scope or change notes: Finance channel blocked","- Scope or change notes: Finance channel blocked; follow up with the team when convenient"); record.write_text(text,encoding="utf-8"); module.update_wdr_state(record,before,record.read_bytes())
+            historical=self.write_updates(root,"historical-note.json",[{"id":"l1-checkout","change_notes":["Finance channel blocked"]}])
+            _,result=self.run_cli("reconcile-intake",str(root),"--updates-file",str(historical),"--dry-run")
+            self.assertFalse(result["all_satisfied"])
+            self.assertEqual(result["command_results"][0]["reason"],"current canonical WDR fact differs and no durable superseded lineage proves the historical value")
 
     def test_stable_action_id_uses_exact_ordered_daily_log_source_and_status(self) -> None:
         module=load_module()
@@ -1336,6 +1350,28 @@ class StatusSyncV2Tests(unittest.TestCase):
             historical=self.write_updates(root,"legacy-block.json",[{"id":"l3-payment","source":"owner update 2026-07-16 following prior finance meeting","actions":[{"action_id":"ACT-LEGACY-1","status":"blocked","source":"owner update 2026-07-16 following prior finance meeting","owning_workflow":"legacy-owner-sync"}]}])
             _,result=self.run_cli("reconcile-intake",str(root),"--updates-file",str(historical),"--dry-run")
             command=result["command_results"][0]; self.assertTrue(result["all_satisfied"]); self.assertEqual(command["satisfied_by"],"superseded-lineage"); self.assertEqual(command["lineage_evidence"][0]["type"],"ordered-daily-log-action-lineage")
+
+    def test_legacy_physical_action_route_normalizes_to_program_with_exact_provenance(self) -> None:
+        module=load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root=Path(temp_dir); self.create_record(root,"l3-payment")
+            self.create_action(root,"l3-payment","ACT-LEGACY-ROUTE")
+            self.patch_action(root,"l3-payment","ACT-LEGACY-ROUTE","CMD-BLOCK-ROUTE",1,{"status":"blocked"})
+            memory=root/MEMORY_REL; ledger=memory/module.ACTION_LEDGER_REL; rows=module.parse_action_ledger(ledger); row=next(x for x in rows if x["Action ID"]=="ACT-LEGACY-ROUTE")
+            row["Workstream"]="program"; row["Affected Workstreams"]="l1-checkout; l3-payment"; row["Source"]="sha256:"+"b"*64; row["Owning Workflow"]="adp-status-sync"; module.write_action_ledger(ledger,rows,False); module.write_action_ledger_state(memory,ledger,rows,[])
+            daily=memory/"daily/2026-07-16.md"; daily.parent.mkdir(parents=True,exist_ok=True); daily.write_text("# Daily Log - 2026-07-16\n\n## 2026-07-16T10:00:00Z Status sync - l3-payment\n\n- Source: owner update 2026-07-16 following prior finance meeting\n- Changed fields: no reliable field change\n- Actions:\n  - blocked: ACT-LEGACY-ROUTE\n",encoding="utf-8")
+            action={"action_id":"ACT-LEGACY-ROUTE","status":"blocked","owner":"FDE-A","workstream":"l3-payment","affected_workstreams":["l1-checkout","l3-payment"],"action":"Publish evidence for l3-payment","source":"owner update 2026-07-16 following prior finance meeting","due":"Friday","closure_criteria":"Evidence link is reviewed","owning_workflow":"adp-meeting-sync"}
+            historical=self.write_updates(root,"legacy-route.json",[{"id":"l3-payment","source":"owner update 2026-07-16 following prior finance meeting","actions":[action]}])
+
+            _,result=self.run_cli("reconcile-intake",str(root),"--updates-file",str(historical),"--dry-run")
+
+            command=result["command_results"][0]
+            self.assertTrue(result["all_satisfied"]); self.assertEqual(command["satisfied_by"],"superseded-lineage")
+            self.assertIn("program-action-route-normalization",{item["type"] for item in command["lineage_evidence"]})
+            rows=module.parse_action_ledger(ledger); row=next(x for x in rows if x["Action ID"]=="ACT-LEGACY-ROUTE"); row["Affected Workstreams"]="l1-checkout"; module.write_action_ledger(ledger,rows,False); module.write_action_ledger_state(memory,ledger,rows,[])
+            _,blocked=self.run_cli("reconcile-intake",str(root),"--updates-file",str(historical),"--dry-run")
+            self.assertFalse(blocked["all_satisfied"])
+            self.assertIn("workstream",{item["field"] for item in blocked["command_results"][0]["discrepancies"]})
 
     def test_repair_wdr_field_requires_review_only_for_conflicting_values(self) -> None:
         module = load_module()
