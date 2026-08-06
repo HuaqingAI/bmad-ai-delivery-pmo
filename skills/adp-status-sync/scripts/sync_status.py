@@ -70,6 +70,8 @@ REPAIR_RECEIPT_INDEX_REL = Path("state") / "repair-receipt-index.json"
 AUTHORITY_MIGRATION_TOKEN_REL = Path("state") / "authority-migration-tokens"
 AUTHORITY_MIGRATION_RECEIPT_REL = Path("receipts") / "authority-state-migration"
 INTAKE_RECONCILIATION_TOKEN_REL = Path("state") / "intake-reconciliation-tokens"
+WDR_FIELD_REPAIR_TOKEN_REL = Path("state") / "wdr-field-repair-tokens"
+WDR_FIELD_REPAIR_RECEIPT_REL = Path("receipts") / "wdr-field-repair"
 TRANSACTION_REL = Path("state") / "transactions"
 FACT_LOCK_REL = Path("state") / "fact-write.lock"
 WINDOWS_LOCK_RETRY_SECONDS = 0.05
@@ -377,6 +379,27 @@ def parse_args() -> argparse.Namespace:
     authority_migration.add_argument("--verbose", action="store_true", help="Write diagnostics to stderr.")
     authority_migration.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
     authority_migration.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
+
+    field_repair = subparsers.add_parser(
+        "repair-wdr-field",
+        help="Deduplicate one reviewed canonical WDR field without guessing conflicting values.",
+    )
+    field_repair.add_argument("project_root", help="Project root containing ADP memory.")
+    field_repair.add_argument("--id", required=True, help="Physical workstream ID.")
+    field_repair.add_argument("--section", required=True, help="Canonical WDR section name.")
+    field_repair.add_argument("--field", required=True, help="Canonical WDR bullet field name.")
+    field_repair.add_argument(
+        "--canonical-value-file",
+        help="Reviewed UTF-8 single-line canonical value; required when duplicate values conflict.",
+    )
+    field_repair.add_argument("--dry-run", action="store_true", help="Validate and issue a single-use token.")
+    field_repair.add_argument("--token", help="Single-use token returned by a successful dry-run.")
+    field_repair.add_argument("--principal", default="adp-status-sync", help="Stable operator principal.")
+    field_repair.add_argument(
+        "--memory-root", default="_bmad-output/adp/memory", help="ADP memory root."
+    )
+    field_repair.add_argument("--fail-after-stage", action="store_true", help=argparse.SUPPRESS)
+    field_repair.add_argument("-o", "--output", help="Write JSON result to this file instead of stdout.")
 
     reconcile = subparsers.add_parser(
         "reconcile-intake",
@@ -3566,7 +3589,10 @@ def recover_status_transactions(memory_root: Path) -> list[str]:
     recovered: list[str] = []
     if not root.is_dir():
         return recovered
-    supported = {"status-mutation", "repair-business", "repair-attempt", "intake-reconciliation"}
+    supported = {
+        "status-mutation", "repair-business", "repair-attempt",
+        "intake-reconciliation", "wdr-field-repair",
+    }
     for manifest_path in sorted(root.glob("*/manifest.json")):
         manifest = load_json_object(manifest_path)
         if manifest.get("kind") not in supported or manifest.get("status") != "prepared":
@@ -3929,6 +3955,69 @@ def action_composite_key_from_row(row: dict[str, str]) -> tuple[str, ...]:
     )
 
 
+def action_composite_without_source_from_update(action: ActionUpdate) -> tuple[str, ...] | None:
+    values = (action.action, action.owner, action.due_or_trigger, action.closure_criteria)
+    if any(is_missing_action_value(str(value or "")) for value in values):
+        return None
+    return tuple(normalize_text_key(str(value)) for value in values)
+
+
+def action_composite_without_source_from_row(row: dict[str, str]) -> tuple[str, ...]:
+    return tuple(
+        normalize_text_key(row.get(field, ""))
+        for field in ("Action", "Owner", "Due / Trigger", "Closure Criteria")
+    )
+
+
+def source_provenance_bindings(raw_source: str) -> set[str]:
+    bindings = {normalize_text_key(raw_source)} if raw_source.strip() else set()
+    try:
+        payload = json.loads(raw_source)
+    except (TypeError, json.JSONDecodeError):
+        return bindings
+    recognized = {
+        "source", "original_source", "legacy_source", "meeting_source", "source_path",
+        "path", "reference", "uri", "source_bindings", "provenance",
+        "migration_provenance", "original", "binding",
+    }
+
+    def collect(value: Any, trusted: bool = False) -> None:
+        if isinstance(value, str):
+            if trusted and value.strip():
+                bindings.add(normalize_text_key(value))
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item, trusted)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            normalized_key = str(key).strip().lower().replace("-", "_")
+            collect(item, trusted or normalized_key in recognized)
+
+    collect(payload)
+    return bindings
+
+
+def action_source_lineage(action: ActionUpdate, row: dict[str, str]) -> dict[str, Any] | None:
+    requested = normalize_text_key(str(action.source or ""))
+    if not requested or requested == normalize_text_key(row.get("Source", "")):
+        return None
+    bindings = source_provenance_bindings(row.get("Source", ""))
+    if requested not in bindings:
+        return None
+    return {
+        "type": "action-source-provenance",
+        "action_id": row.get("Action ID", ""),
+        "requested_source": action.source,
+        "current_source": row.get("Source", ""),
+        "binding": requested,
+        "action_revision": action_revision(row),
+        "row_fingerprint": content_id({field: row.get(field, "") for field in ACTION_FIELDS}),
+    }
+
+
 def reconcile_action_command(
     action: ActionUpdate,
     rows: list[dict[str, str]],
@@ -3943,6 +4032,9 @@ def reconcile_action_command(
         "requested_action_id": action.action_id,
         "satisfied": False,
     }
+    if action.workstream == "program" and not action.affected_workstreams:
+        result["reason"] = "program action reconciliation requires explicit affected_workstreams provenance"
+        return result
     if action.command_id and action.command_id in applied_commands:
         applied = applied_commands[action.command_id]
         if applied.get("command_fingerprint") != action_command_fingerprint(action):
@@ -3952,25 +4044,53 @@ def reconcile_action_command(
         if not any(row.get("Action ID") == matched_id for row in rows):
             result["reason"] = "canonical command ledger points to a missing action"
             return result
-        result.update({"satisfied": True, "match_method": "command-ledger", "matched_action_id": matched_id})
+        result.update({
+            "satisfied": True,
+            "satisfied_by": "superseded-lineage",
+            "match_method": "command-ledger",
+            "matched_action_id": matched_id,
+            "lineage_evidence": [{"type": "action-command-history", "command_id": action.command_id}],
+        })
         return result
 
     matched: dict[str, str] | None = None
+    source_lineage: dict[str, Any] | None = None
     if action.action_id:
         matched = next((row for row in rows if row.get("Action ID") == action.action_id), None)
         result["match_method"] = "stable-action-id"
+        if matched is not None:
+            source_lineage = action_source_lineage(action, matched)
     else:
         composite = action_composite_key_from_update(action)
         if composite is None:
             result["reason"] = "action lacks a stable action_id and the full action+owner+source+due+closure composite"
             return result
         candidates = [row for row in rows if action_composite_key_from_row(row) == composite]
-        if len(candidates) != 1:
-            result["reason"] = "action composite did not resolve exactly once"
-            result["candidate_action_ids"] = sorted(row.get("Action ID", "") for row in candidates)
-            return result
-        matched = candidates[0]
-        result["match_method"] = "action-owner-source-due-closure"
+        if len(candidates) == 1:
+            matched = candidates[0]
+            result["match_method"] = "action-owner-source-due-closure"
+        else:
+            base = action_composite_without_source_from_update(action)
+            provenance_candidates = [] if base is None else [
+                (row, action_source_lineage(action, row))
+                for row in rows
+                if action_composite_without_source_from_row(row) == base
+            ]
+            provenance_candidates = [(row, lineage) for row, lineage in provenance_candidates if lineage is not None]
+            if action.affected_workstreams:
+                requested_targets = sorted(action.affected_workstreams)
+                provenance_candidates = [
+                    (row, lineage)
+                    for row, lineage in provenance_candidates
+                    if sorted(parse_workstream_cell(row.get("Affected Workstreams", ""))) == requested_targets
+                ]
+            if len(provenance_candidates) == 1:
+                matched, source_lineage = provenance_candidates[0]
+                result["match_method"] = "action-owner-due-closure-plus-provenance"
+            else:
+                result["reason"] = "action composite did not resolve exactly once"
+                result["candidate_action_ids"] = sorted(row.get("Action ID", "") for row, _ in provenance_candidates)
+                return result
     if matched is None:
         result["reason"] = "canonical ledger action was not found"
         return result
@@ -3984,6 +4104,8 @@ def reconcile_action_command(
         requested = normalized_reconciliation_value(field_name, requested_action_value(action, field_name))
         current = normalized_reconciliation_value(field_name, matched.get(ACTION_RECONCILIATION_ROW_FIELDS[field_name], ""))
         if requested != current:
+            if field_name == "source" and source_lineage is not None:
+                continue
             discrepancies.append({"field": field_name, "requested": requested, "current": current})
     current_revision = action_revision(matched)
     result["current_action_revision"] = current_revision
@@ -3996,6 +4118,11 @@ def reconcile_action_command(
         result["discrepancies"] = discrepancies
         return result
     result["satisfied"] = True
+    if source_lineage is not None:
+        result["satisfied_by"] = "superseded-lineage"
+        result["lineage_evidence"] = [source_lineage]
+    else:
+        result["satisfied_by"] = "current-fact"
     return result
 
 
@@ -4032,12 +4159,214 @@ def canonical_wdr_field_value(markdown: str, section_title: str, label: str) -> 
     return matches[0], None
 
 
+def resolve_receipt_input_path(memory_root: Path, raw_path: Any) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    direct = Path(raw_path).expanduser()
+    if direct.is_file():
+        return direct.resolve()
+    parts = [part for part in raw_path.replace("\\", "/").split("/") if part]
+    anchor = ["_bmad-output", "adp", "memory"]
+    folded = [part.casefold() for part in parts]
+    for index in range(len(parts) - len(anchor) + 1):
+        if folded[index:index + len(anchor)] == anchor:
+            candidate = memory_root.joinpath(*parts[index + len(anchor):])
+            return candidate.resolve() if candidate.is_file() else None
+    return None
+
+
+def update_reconciliation_field_value(update: StatusUpdate, field_name: str) -> str | None:
+    if field_name in update.current_fields_present:
+        value = getattr(update, field_name)
+        return "; ".join(value) if isinstance(value, list) else str(value or "")
+    if field_name == "next_actions" and update.next_actions_provided:
+        return "; ".join(update.next_actions)
+    return None
+
+
+def durable_status_receipt_events(memory_root: Path, workstream_id: str, field_name: str) -> list[dict[str, Any]]:
+    root = memory_root / STATUS_SYNC_RECEIPT_REL
+    events: list[dict[str, Any]] = []
+    for receipt_path in sorted(root.glob("ssr-*.json")):
+        receipt = load_json_object(receipt_path)
+        if (
+            receipt.get("receipt_type") not in {"execution", "migration"}
+            or receipt.get("ok") is not True
+            or receipt.get("status") != "applied"
+            or receipt.get("durable") is not True
+            or receipt.get("dry_run") is not False
+            or receipt.get("mode") != "update"
+        ):
+            continue
+        try:
+            applied_at = normalize_required_timestamp(receipt.get("applied_at"), "receipt applied_at")
+        except ValueError:
+            continue
+        input_path = resolve_receipt_input_path(memory_root, receipt.get("input_path"))
+        if input_path is None:
+            continue
+        if receipt.get("input_hash") != sha256_bytes(input_path.read_bytes()):
+            continue
+        if receipt.get("receipt_type") == "migration":
+            migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
+            evidence_path = resolve_receipt_input_path(memory_root, migration.get("evidence_path"))
+            if evidence_path is None:
+                continue
+            try:
+                evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+                historical_evidence(
+                    evidence_payload,
+                    evidence_path,
+                    input_path,
+                    str(receipt.get("input_hash")),
+                    int(receipt.get("update_count")),
+                )
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
+        try:
+            _, updates = load_updates_payload(input_path, "status sync")
+        except (ValueError, TypeError):
+            continue
+        if len(updates) != receipt.get("update_count"):
+            continue
+        for update in updates:
+            if update.workstream_id != workstream_id:
+                continue
+            value = update_reconciliation_field_value(update, field_name)
+            if value is None:
+                continue
+            paths = [receipt_path]
+            try:
+                input_path.relative_to(memory_root)
+                paths.append(input_path)
+            except ValueError:
+                pass
+            events.append({
+                "type": "status-execution-receipt",
+                "observed_at": applied_at,
+                "value": value,
+                "paths": [path.relative_to(memory_root).as_posix() for path in paths],
+                "receipt": receipt_path.relative_to(memory_root).as_posix(),
+                "input_hash": receipt.get("input_hash"),
+            })
+    return events
+
+
+DAILY_LOG_FIELD_LABELS = {
+    "progress": "Progress",
+    "blockers": "Blockers",
+    "risks": "Risks",
+    "dependencies": "Dependencies",
+    "change_notes": "Change notes",
+    "next_actions": "Next actions",
+}
+
+
+def daily_status_lineage_events(memory_root: Path, workstream_id: str, field_name: str) -> list[dict[str, Any]]:
+    label = DAILY_LOG_FIELD_LABELS.get(field_name)
+    if not label:
+        return []
+    canonical_label = VOLATILE_FIELDS[field_name][1]
+    events: list[dict[str, Any]] = []
+    heading = re.compile(r"^##\s+(\S+)\s+Status sync - (.+?)\s*$")
+    for path in sorted((memory_root / "daily").glob("*.md")):
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        for index, line in enumerate(lines):
+            match = heading.match(line)
+            if not match or normalize_id(match.group(2)) != workstream_id:
+                continue
+            try:
+                observed_at = normalize_required_timestamp(match.group(1), "daily log timestamp")
+            except ValueError:
+                continue
+            end = next((i for i in range(index + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+            block = lines[index + 1:end]
+            changed_line = next((item for item in block if item.startswith("- Changed fields:")), "")
+            changed = [item.strip().casefold() for item in changed_line.partition(":")[2].split(",")]
+            if canonical_label.casefold() not in changed:
+                continue
+            marker = f"- {label}:"
+            field_index = next((i for i, item in enumerate(block) if item.startswith(marker)), None)
+            if field_index is None:
+                continue
+            suffix = block[field_index].partition(":")[2].strip()
+            if suffix:
+                value = suffix
+            else:
+                items: list[str] = []
+                for item in block[field_index + 1:]:
+                    if item.startswith("  - "):
+                        items.append(item[4:].strip())
+                    elif item.strip():
+                        break
+                value = "; ".join(items)
+            events.append({
+                "type": "daily-log-status-lineage",
+                "observed_at": observed_at,
+                "value": value,
+                "paths": [path.relative_to(memory_root).as_posix()],
+                "daily_log": path.relative_to(memory_root).as_posix(),
+                "sequence": index,
+                "fingerprint": sha256_bytes(path.read_bytes()),
+            })
+    return events
+
+
+def status_superseded_lineage(
+    memory_root: Path,
+    workstream_id: str,
+    field_name: str,
+    requested_value: Any,
+    current_value: Any,
+    cache: dict[tuple[str, str], list[dict[str, Any]]],
+) -> list[dict[str, Any]] | None:
+    key = (workstream_id, field_name)
+    if key not in cache:
+        cache[key] = [
+            *durable_status_receipt_events(memory_root, workstream_id, field_name),
+            *daily_status_lineage_events(memory_root, workstream_id, field_name),
+        ]
+    events = cache[key]
+    requested = normalized_reconciliation_value(field_name, requested_value)
+    current = normalized_reconciliation_value(field_name, current_value)
+    old_events = sorted(
+        (event for event in events if normalized_reconciliation_value(field_name, event["value"]) == requested),
+        key=lambda event: event["observed_at"],
+    )
+    current_events = sorted(
+        (event for event in events if normalized_reconciliation_value(field_name, event["value"]) == current),
+        key=lambda event: event["observed_at"],
+    )
+    def is_later(old: dict[str, Any], newer: dict[str, Any]) -> bool:
+        if newer["observed_at"] > old["observed_at"]:
+            return True
+        return bool(
+            newer["observed_at"] == old["observed_at"]
+            and newer.get("type") == old.get("type") == "daily-log-status-lineage"
+            and newer.get("daily_log") == old.get("daily_log")
+            and int(newer.get("sequence", -1)) > int(old.get("sequence", -1))
+        )
+
+    pairs = [
+        (old, newer)
+        for old in old_events
+        for newer in current_events
+        if is_later(old, newer)
+    ]
+    if not pairs:
+        return None
+    old, newer = sorted(pairs, key=lambda pair: (pair[0]["observed_at"], pair[1]["observed_at"]))[-1]
+    return [old, newer]
+
+
 def reconcile_status_field(
+    memory_root: Path,
     update: StatusUpdate,
     field_name: str,
     requested_value: Any,
     wdr: dict[str, Any],
     ordinal: int,
+    lineage_cache: dict[tuple[str, str], list[dict[str, Any]]],
 ) -> dict[str, Any]:
     section_title, label = VOLATILE_FIELDS[field_name]
     current, error = canonical_wdr_field_value(wdr["text"], section_title, label)
@@ -4060,8 +4389,23 @@ def reconcile_status_field(
     actual = normalized_reconciliation_value(field_name, current)
     result["current"] = current
     result["satisfied"] = requested == actual
-    if not result["satisfied"]:
-        result["reason"] = "current canonical WDR fact differs from the historical status update"
+    if result["satisfied"]:
+        result["satisfied_by"] = "current-fact"
+        return result
+    lineage = status_superseded_lineage(
+        memory_root,
+        update.workstream_id,
+        field_name,
+        requested_value,
+        current,
+        lineage_cache,
+    )
+    if lineage:
+        result["satisfied"] = True
+        result["satisfied_by"] = "superseded-lineage"
+        result["lineage_evidence"] = lineage
+        return result
+    result["reason"] = "current canonical WDR fact differs and no durable superseded lineage proves the historical value"
     return result
 
 
@@ -4291,26 +4635,56 @@ def reconciliation_snapshot(
         outbox_rows = {str(row.get("intent_id")): row for row in raw_rows if isinstance(row, dict)}
         read_paths.add(outbox_path)
     wdr_cache: dict[str, dict[str, Any]] = {}
+    lineage_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
     command_results: list[dict[str, Any]] = []
     ordinal = 0
     for action in action_updates:
         ordinal += 1
         command_results.append(reconcile_action_command(action, rows, applied_commands, ordinal))
     for update in updates:
-        needs_wdr = bool(update.current_fields_present or update.next_actions_provided or update.refresh_actions or update.milestones)
+        virtual_scope = scope_contract_module().is_virtual_cli_scope_id(update.workstream_id)
+        virtual_wdr_command = bool(
+            update.current_fields_present
+            or update.next_actions
+            or update.refresh_actions
+            or update.milestones
+        )
+        if virtual_scope and virtual_wdr_command:
+            raise StatusSyncContractError(
+                "ADP-VIRTUAL-SCOPE-NOT-WDR-TARGET",
+                "program is a virtual scope and cannot receive status fields, milestone updates, or action refresh",
+            )
+        needs_wdr = bool(
+            update.current_fields_present
+            or (update.next_actions_provided and not virtual_scope)
+            or update.refresh_actions
+            or update.milestones
+        )
         wdr = None
         if needs_wdr:
-            wdr = wdr_cache.setdefault(update.workstream_id, load_reconciliation_wdr(memory_root, update.workstream_id))
+            if update.workstream_id not in wdr_cache:
+                wdr_cache[update.workstream_id] = load_reconciliation_wdr(memory_root, update.workstream_id)
+            wdr = wdr_cache[update.workstream_id]
             read_paths.update({wdr["record_path"], wdr["state_path"]})
         for field_name in sorted(update.current_fields_present):
             ordinal += 1
             value = getattr(update, field_name)
             requested = "; ".join(value) if isinstance(value, list) else value
-            command_results.append(reconcile_status_field(update, field_name, requested, wdr, ordinal))
-        if update.next_actions_provided:
+            command_results.append(
+                reconcile_status_field(memory_root, update, field_name, requested, wdr, ordinal, lineage_cache)
+            )
+        if update.next_actions_provided and not (virtual_scope and not update.next_actions):
             ordinal += 1
             command_results.append(
-                reconcile_status_field(update, "next_actions", "; ".join(update.next_actions), wdr, ordinal)
+                reconcile_status_field(
+                    memory_root,
+                    update,
+                    "next_actions",
+                    "; ".join(update.next_actions),
+                    wdr,
+                    ordinal,
+                    lineage_cache,
+                )
             )
         if update.refresh_actions:
             ordinal += 1
@@ -4326,6 +4700,14 @@ def reconciliation_snapshot(
             command_results.append(reconcile_consumed_intent(update, intent_id, input_hash, outbox_rows, ordinal))
     if not command_results:
         raise ValueError("updates-file contains no action, status, milestone, refresh, or intent-consumption commands")
+    for result in command_results:
+        for evidence in result.get("lineage_evidence", []):
+            if not isinstance(evidence, dict):
+                continue
+            for relative in evidence.get("paths", []):
+                candidate = memory_root / str(relative)
+                if candidate.is_file():
+                    read_paths.add(candidate)
     read_set = [
         {"path": path.relative_to(memory_root).as_posix(), "fingerprint": optional_sha256_file(path)}
         for path in sorted(read_paths)
@@ -4596,6 +4978,266 @@ def run_reconcile_intake(args: argparse.Namespace) -> int:
         },
         args.output,
     )
+    return 0
+
+
+def canonical_wdr_field_spec(section_title: str, label: str) -> tuple[str, str]:
+    matches = {
+        (section.casefold(), field_label.casefold()): (section, field_label)
+        for section, field_label in VOLATILE_FIELDS.values()
+    }
+    resolved = matches.get((section_title.strip().casefold(), label.strip().casefold()))
+    if not resolved:
+        raise StatusSyncContractError(
+            "WDR_FIELD_REPAIR_TARGET_INVALID",
+            f"{section_title}.{label} is not a supported canonical WDR field",
+        )
+    return resolved
+
+
+def canonical_field_occurrences(markdown: str, section_title: str, label: str) -> list[dict[str, Any]]:
+    lines = markdown.splitlines()
+    start, end = find_section(lines, section_title)
+    if start is None:
+        return []
+    pattern = re.compile(rf"^\s*-\s*{re.escape(label)}\s*:\s*(.*)$", re.IGNORECASE)
+    return [
+        {"index": index, "line": index + 1, "value": pattern.match(lines[index]).group(1).strip()}
+        for index in range(start + 1, end)
+        if pattern.match(lines[index])
+    ]
+
+
+def repaired_canonical_field(markdown: str, section_title: str, label: str, value: str) -> str:
+    lines = markdown.splitlines()
+    occurrences = canonical_field_occurrences(markdown, section_title, label)
+    if len(occurrences) < 2:
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_NOT_NEEDED", "canonical field is not duplicated")
+    first = occurrences[0]["index"]
+    for occurrence in reversed(occurrences):
+        del lines[occurrence["index"]]
+    lines.insert(first, f"- {label}: {value}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def reviewed_canonical_value(raw_path: str | None) -> tuple[Path | None, str | None, str | None]:
+    if not raw_path:
+        return None, None, None
+    path = require_file(raw_path, "canonical-value-file")
+    content = path.read_text(encoding="utf-8-sig").strip()
+    if not content or "\n" in content or "\r" in content:
+        raise StatusSyncContractError(
+            "WDR_FIELD_REPAIR_VALUE_INVALID",
+            "canonical-value-file must contain exactly one non-empty line",
+        )
+    return path, content, sha256_bytes(path.read_bytes())
+
+
+def wdr_field_repair_token_path(memory_root: Path, token: str) -> Path:
+    digest = sha256_bytes(token.encode("utf-8")).removeprefix("sha256:")
+    return memory_root / WDR_FIELD_REPAIR_TOKEN_REL / f"{digest}.json"
+
+
+def wdr_field_repair_snapshot(
+    memory_root: Path,
+    workstream_id: str,
+    section_title: str,
+    label: str,
+    value_file: str | None,
+) -> dict[str, Any]:
+    workstream_id = normalize_id(workstream_id)
+    if scope_contract_module().is_virtual_cli_scope_id(workstream_id):
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_TARGET_INVALID", "virtual program has no WDR")
+    section_title, label = canonical_wdr_field_spec(section_title, label)
+    wdr = load_reconciliation_wdr(memory_root, workstream_id)
+    occurrences = canonical_field_occurrences(wdr["text"], section_title, label)
+    if len(occurrences) < 2:
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_NOT_NEEDED", "canonical field is not duplicated")
+    value_path, reviewed_value, value_hash = reviewed_canonical_value(value_file)
+    distinct = sorted({item["value"] for item in occurrences})
+    if len(distinct) == 1:
+        canonical_value = reviewed_value if reviewed_value is not None else distinct[0]
+    elif reviewed_value is not None:
+        canonical_value = reviewed_value
+    else:
+        return {
+            "verification_status": "blocked",
+            "can_apply": False,
+            "workstream_id": workstream_id,
+            "section": section_title,
+            "field": label,
+            "occurrences": [{"line": item["line"], "value": item["value"]} for item in occurrences],
+            "reason": "conflicting duplicate values require --canonical-value-file",
+        }
+    ledger_path = memory_root / ACTION_LEDGER_REL
+    ledger_state_path = memory_root / ACTION_LEDGER_STATE_REL
+    if not ledger_path.is_file() or not ledger_state_path.is_file():
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_LINEAGE_MISSING", "action ledger lineage is required")
+    ledger_state = load_existing_json_object(ledger_state_path, "WDR_FIELD_REPAIR_LINEAGE_INVALID", "action ledger state")
+    validate_action_ledger_state(ledger_path, ledger_state)
+    desired = repaired_canonical_field(wdr["text"], section_title, label, canonical_value)
+    read_set = {
+        "wdr_fingerprint": sha256_bytes(wdr["record_path"].read_bytes()),
+        "wdr_state_fingerprint": sha256_bytes(wdr["state_path"].read_bytes()),
+        "ledger_fingerprint": sha256_bytes(ledger_path.read_bytes()),
+        "ledger_state_fingerprint": sha256_bytes(ledger_state_path.read_bytes()),
+        "projection_fingerprint": optional_sha256_file(wdr["record_path"].with_name(ACTION_PROJECTION_REL)),
+        "value_path": str(value_path) if value_path else None,
+        "value_hash": value_hash,
+    }
+    body = {
+        "workstream_id": workstream_id, "section": section_title, "field": label,
+        "canonical_value": canonical_value, "read_set": read_set,
+        "desired_wdr_fingerprint": sha256_bytes(desired.encode("utf-8")),
+    }
+    return {
+        **body, "snapshot_id": content_id(body), "verification_status": "verified", "can_apply": True,
+        "occurrences": [{"line": item["line"], "value": item["value"]} for item in occurrences],
+        "desired_wdr": desired, "wdr": wdr, "ledger_state": ledger_state,
+        "rows": parse_action_ledger(ledger_path),
+    }
+
+
+def wdr_field_repair_binding(snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+    return {
+        "snapshot_id": snapshot["snapshot_id"],
+        "principal": principal,
+        "workstream_id": snapshot["workstream_id"],
+        "section": snapshot["section"],
+        "field": snapshot["field"],
+        "canonical_value": snapshot["canonical_value"],
+        "read_set": snapshot["read_set"],
+    }
+
+
+def issue_wdr_field_repair_token(memory_root: Path, snapshot: dict[str, Any], principal: str) -> str:
+    issued = datetime.now(timezone.utc)
+    token = f"wdrfield_{secrets.token_urlsafe(32)}"
+    binding = wdr_field_repair_binding(snapshot, principal)
+    state = {
+        "schema_version": "1.0.0", "token_hash": sha256_bytes(token.encode("utf-8")),
+        "principal": principal, "binding": binding, "binding_digest": content_id(binding),
+        "status": "unused", "issued_at": issued.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "expires_at": (issued + timedelta(minutes=15)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "previous_state_id": None,
+    }
+    state["state_id"] = content_id(state)
+    write_json_atomic(wdr_field_repair_token_path(memory_root, token), state)
+    return token
+
+
+def apply_wdr_field_repair(
+    memory_root: Path,
+    snapshot: dict[str, Any],
+    principal: str,
+    token_path: Path,
+    token_state: dict[str, Any],
+    fail_after_stage: bool,
+) -> tuple[dict[str, Any], Path, dict[str, Any], list[str]]:
+    receipt_id_seed = content_id({
+        "snapshot_id": snapshot["snapshot_id"], "principal": principal,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    })
+    receipt_rel = WDR_FIELD_REPAIR_RECEIPT_REL / f"{receipt_id_seed.removeprefix('sha256:')}.json"
+    token_rel = token_path.relative_to(memory_root)
+    record_rel = Path("workstreams") / snapshot["workstream_id"] / "delivery-record.md"
+    state_rel = record_rel.with_name("delivery-record.state.json")
+    projection_rel = record_rel.with_name(ACTION_PROJECTION_REL)
+    with tempfile.TemporaryDirectory(prefix=".wdr-field-repair-", dir=memory_root.parent) as temp_dir:
+        staged_root = Path(temp_dir) / "memory"
+        copy_memory_tree(memory_root, staged_root)
+        staged_record = staged_root / record_rel
+        before = staged_record.read_bytes()
+        staged_record.write_text(snapshot["desired_wdr"], encoding="utf-8", newline="\n")
+        wdr_state = update_wdr_state(staged_record, before, snapshot["desired_wdr"].encode("utf-8"))
+        write_action_projection_sidecar(
+            staged_root, snapshot["workstream_id"], snapshot["rows"], snapshot["ledger_state"], wdr_state=wdr_state
+        )
+        receipt = {
+            "schema_version": "1.0.0", "receipt_type": "wdr-field-repair",
+            "outcome": "committed", "principal": principal, "snapshot_id": snapshot["snapshot_id"],
+            "workstream_id": snapshot["workstream_id"], "section": snapshot["section"],
+            "field": snapshot["field"], "canonical_value": snapshot["canonical_value"],
+            "occurrences": snapshot["occurrences"], "read_set": snapshot["read_set"],
+            "before_wdr_fingerprint": snapshot["read_set"]["wdr_fingerprint"],
+            "after_wdr_fingerprint": sha256_bytes(staged_record.read_bytes()),
+            "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        }
+        receipt["receipt_id"] = content_id(receipt)
+        write_json_atomic(staged_root / receipt_rel, receipt)
+        consumed = dict(token_state)
+        consumed["previous_state_id"] = token_state["state_id"]
+        consumed["status"] = "consumed"
+        consumed["receipt_id"] = receipt["receipt_id"]
+        consumed["receipt_path"] = str(memory_root / receipt_rel)
+        consumed.pop("state_id", None)
+        consumed["state_id"] = content_id(consumed)
+        write_json_atomic(staged_root / token_rel, consumed)
+        changed = changed_staged_files(memory_root, staged_root)
+        allowed = {record_rel, state_rel, projection_rel, receipt_rel, token_rel}
+        unexpected = [path.as_posix() for path in changed if path not in allowed]
+        if unexpected:
+            raise StatusSyncContractError("WDR_FIELD_REPAIR_TARGET_INVALID", "unexpected repair targets: " + ", ".join(unexpected))
+        if fail_after_stage:
+            raise StatusSyncContractError("WDR_FIELD_REPAIR_INJECTED_FAILURE", "injected failure after repair staging")
+        publication = publish_staged_files(memory_root, staged_root, changed, transaction_kind="wdr-field-repair")
+    return receipt, memory_root / receipt_rel, publication, [path.as_posix() for path in changed]
+
+
+def run_wdr_field_repair(args: argparse.Namespace) -> int:
+    project_root = require_project_root(args.project_root)
+    memory_root = resolve_memory_root(project_root, args.memory_root)
+    principal = " ".join(args.principal.split())
+    if not principal:
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_PRINCIPAL_INVALID", "principal must not be empty")
+    snapshot = wdr_field_repair_snapshot(
+        memory_root, args.id, args.section, args.field, args.canonical_value_file
+    )
+    if args.dry_run:
+        if args.token:
+            raise StatusSyncContractError("WDR_FIELD_REPAIR_TOKEN_INVALID", "--token is not accepted with --dry-run")
+        token = issue_wdr_field_repair_token(memory_root, snapshot, principal) if snapshot.get("can_apply") else None
+        emit({
+            "ok": True, "mode": "repair-wdr-field", "dry_run": True,
+            "verification_status": snapshot["verification_status"], "can_apply": snapshot.get("can_apply", False),
+            "workstream_id": snapshot["workstream_id"], "section": snapshot["section"],
+            "field": snapshot["field"], "occurrences": snapshot["occurrences"],
+            "canonical_value": snapshot.get("canonical_value"), "reason": snapshot.get("reason"),
+            "token": token, "receipt": None, "receipt_path": None,
+        }, args.output)
+        return 0
+    if not snapshot.get("can_apply"):
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_REVIEW_REQUIRED", snapshot["reason"])
+    if not args.token:
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_TOKEN_REQUIRED", "apply requires the token from dry-run")
+    token_path = wdr_field_repair_token_path(memory_root, args.token)
+    token_state = load_json_object(token_path)
+    if not token_state:
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_TOKEN_INVALID", "repair token is unknown")
+    claimed = token_state.get("state_id")
+    body = dict(token_state); body.pop("state_id", None)
+    if claimed != content_id(body) or token_state.get("token_hash") != sha256_bytes(args.token.encode("utf-8")):
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_TOKEN_INVALID", "repair token identity is invalid")
+    if token_state.get("principal") != principal or token_state.get("status") != "unused":
+        code = "WDR_FIELD_REPAIR_TOKEN_USED" if token_state.get("status") == "consumed" else "WDR_FIELD_REPAIR_TOKEN_INVALID"
+        raise StatusSyncContractError(code, "repair token is unavailable for this principal")
+    expires = datetime.fromisoformat(str(token_state.get("expires_at", "")).replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) > expires:
+        update_token_state(token_path, token_state, "invalidated", terminal_error_code="WDR_FIELD_REPAIR_TOKEN_EXPIRED")
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_TOKEN_EXPIRED", "repair token expired")
+    binding = wdr_field_repair_binding(snapshot, principal)
+    if token_state.get("binding") != binding or token_state.get("binding_digest") != content_id(binding):
+        update_token_state(token_path, token_state, "invalidated", terminal_error_code="WDR_FIELD_REPAIR_READ_SET_STALE")
+        raise StatusSyncContractError("WDR_FIELD_REPAIR_READ_SET_STALE", "WDR or lineage changed after dry-run")
+    receipt, receipt_path, publication, changed = apply_wdr_field_repair(
+        memory_root, snapshot, principal, token_path, token_state, args.fail_after_stage
+    )
+    emit({
+        "ok": True, "mode": "repair-wdr-field", "dry_run": False,
+        "verification_status": "verified", "outcome": "committed",
+        "receipt": receipt, "receipt_path": str(receipt_path),
+        "publication": publication, "changed_paths": changed,
+    }, args.output)
     return 0
 
 
@@ -5579,6 +6221,12 @@ def main() -> int:
             return run_stale(args)
         if args.command == "migrate-receipt":
             return run_migrate_receipt(args)
+        if args.command == "repair-wdr-field":
+            project_root = require_project_root(args.project_root)
+            memory_root = resolve_memory_root(project_root, args.memory_root)
+            with fact_write_lock(memory_root):
+                recover_status_transactions(memory_root)
+                return run_wdr_field_repair(args)
         if args.command == "reconcile-intake":
             project_root = require_project_root(args.project_root)
             memory_root = resolve_memory_root(project_root, args.memory_root)
@@ -5601,10 +6249,16 @@ def main() -> int:
     except StatusSyncContractError as exc:
         payload = {"ok": False, "error_code": exc.error_code, "error": str(exc)}
         payload.update(exc.details)
+        if getattr(args, "command", None) == "reconcile-intake":
+            payload.setdefault("verification_status", "blocked")
+            payload.setdefault("missing_commands", [])
+            payload.setdefault("token", None)
         emit(payload, getattr(args, "output", None))
         return 2
     except Exception as exc:
         payload = {"ok": False, "error": str(exc)}
+        if getattr(args, "command", None) == "reconcile-intake":
+            payload.update({"verification_status": "blocked", "missing_commands": [], "token": None})
         emit(payload, getattr(args, "output", None))
         return 2
 

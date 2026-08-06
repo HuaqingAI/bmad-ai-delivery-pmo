@@ -1235,6 +1235,138 @@ class StatusSyncV2Tests(unittest.TestCase):
             self.assertEqual(replay.returncode, 0, error)
             self.assertTrue(error["reused"])
 
+    def test_program_action_only_reconciliation_does_not_require_virtual_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            applied = self.write_updates(root, "program-action.json", [{
+                "id": "program", "next_actions": [], "actions": [{
+                    "operation": "create", "command_id": "CMD-PROGRAM-1", "action_id": "ACT-PROGRAM-1",
+                    "owner": "PMO", "workstream": "program", "affected_workstreams": ["l1-checkout"],
+                    "action": "Coordinate cross-line rollout", "source": "meeting#program", "due": "Friday",
+                    "closure_criteria": "Rollout note linked", "evidence": [{"source": "meeting#program"}],
+                }],
+            }])
+            self.run_cli("update", str(root), "--updates-file", str(applied))
+            intake = self.write_updates(root, "historical-program.json", [{
+                "id": "program", "next_actions": [], "actions": [{
+                    "action_id": "ACT-PROGRAM-1", "owner": "PMO", "workstream": "program",
+                    "affected_workstreams": ["l1-checkout"], "action": "Coordinate cross-line rollout",
+                    "source": "meeting#program", "due": "Friday", "closure_criteria": "Rollout note linked",
+                }],
+            }])
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(intake), "--dry-run")
+            self.assertTrue(result["all_satisfied"])
+            self.assertTrue(result["token"])
+            self.assertFalse((root / MEMORY_REL / "workstreams/program/delivery-record.md").exists())
+
+    def test_reconciliation_blocked_error_has_stable_verification_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            intake = self.write_updates(root, "missing-lineage.json", [{"id": "l1-checkout", "progress": "Old"}])
+            completed, result = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--dry-run", check=False
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["verification_status"], "blocked")
+            self.assertEqual(result["missing_commands"], [])
+            self.assertIsNone(result["token"])
+
+    def test_status_reconciliation_accepts_durable_superseded_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            old = self.write_updates(root, "old-status.json", [{"id": "l1-checkout", "progress": "Drafting"}])
+            self.run_cli("update", str(root), "--updates-file", str(old))
+            newer = self.write_updates(root, "new-status.json", [{"id": "l1-checkout", "progress": "In progress"}])
+            self.run_cli("update", str(root), "--updates-file", str(newer))
+            historical = self.write_updates(root, "historical-old-status.json", [{"id": "l1-checkout", "progress": "Drafting"}])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+            command = result["command_results"][0]
+            self.assertTrue(result["all_satisfied"])
+            self.assertEqual(command["satisfied_by"], "superseded-lineage")
+            self.assertEqual(len(command["lineage_evidence"]), 2)
+
+    def test_action_reconciliation_uses_exact_migration_provenance_source_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            provenance = json.dumps({"migration_provenance": {"original_source": "meeting#legacy"}}, sort_keys=True)
+            current = self.write_updates(root, "provenance-action.json", [{"id": "l1-checkout", "actions": [{
+                "operation": "create", "command_id": "CMD-PROV-1", "action_id": "ACT-PROV-1",
+                "owner": "FDE-A", "action": "Publish migration proof", "source": provenance,
+                "due": "Friday", "closure_criteria": "Proof linked", "evidence": [{"source": "migration"}],
+            }]}])
+            self.run_cli("update", str(root), "--updates-file", str(current))
+            historical = self.write_updates(root, "legacy-source.json", [{"id": "l1-checkout", "actions": [{
+                "owner": "FDE-A", "action": "Publish migration proof", "source": "meeting#legacy",
+                "due": "Friday", "closure_criteria": "Proof linked",
+            }]}])
+
+            _, result = self.run_cli("reconcile-intake", str(root), "--updates-file", str(historical), "--dry-run")
+            command = result["command_results"][0]
+            self.assertTrue(result["all_satisfied"])
+            self.assertEqual(command["matched_action_id"], "ACT-PROV-1")
+            self.assertEqual(command["satisfied_by"], "superseded-lineage")
+            self.assertEqual(command["lineage_evidence"][0]["type"], "action-source-provenance")
+
+    def test_repair_wdr_field_requires_review_only_for_conflicting_values(self) -> None:
+        module = load_module()
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                record = self.create_record(root, "l1-checkout")
+                self.create_action(root, "l1-checkout", "ACT-WDR-AUTO")
+                before = record.read_bytes()
+                second = "other" if conflict else "TBD"
+                record.write_text(
+                    record.read_text(encoding="utf-8").replace("- Blockers: TBD", f"- Blockers: TBD\n- Blockers: {second}"),
+                    encoding="utf-8",
+                )
+                module.update_wdr_state(record, before, record.read_bytes())
+                command = [
+                    "repair-wdr-field", str(root), "--id", "l1-checkout", "--section", "Project Status",
+                    "--field", "Blockers", "--dry-run",
+                ]
+                _, preview = self.run_cli(*command)
+                if conflict:
+                    self.assertEqual(preview["verification_status"], "blocked")
+                    self.assertIsNone(preview["token"])
+                else:
+                    self.assertEqual(preview["verification_status"], "verified")
+                    self.assertTrue(preview["token"])
+
+    def test_repair_wdr_field_applies_reviewed_conflict_atomically(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            record = self.create_record(root, "l1-checkout")
+            self.create_action(root, "l1-checkout", "ACT-WDR-001")
+            before = record.read_bytes()
+            duplicate = record.read_text(encoding="utf-8").replace(
+                "- Next actions:", "- Scope or change notes: old\n- Scope or change notes: newer\n- Next actions:", 1
+            )
+            record.write_text(duplicate, encoding="utf-8")
+            module.update_wdr_state(record, before, record.read_bytes())
+            value = root / "reviewed.txt"
+            value.write_text("reviewed canonical note\n", encoding="utf-8")
+            command = [
+                "repair-wdr-field", str(root), "--id", "l1-checkout", "--section", "Project Status",
+                "--field", "Scope or change notes", "--canonical-value-file", str(value),
+            ]
+            _, preview = self.run_cli(*command, "--dry-run")
+            self.assertEqual(preview["verification_status"], "verified")
+            _, applied = self.run_cli(*command, "--token", preview["token"])
+            text = record.read_text(encoding="utf-8")
+            self.assertEqual(text.count("- Scope or change notes:"), 1)
+            self.assertIn("- Scope or change notes: reviewed canonical note", text)
+            self.assertTrue(Path(applied["receipt_path"]).is_file())
+            state = json.loads(record.with_name("delivery-record.state.json").read_text(encoding="utf-8"))
+            projection = json.loads(record.with_name("action-projection.json").read_text(encoding="utf-8"))
+            self.assertEqual(projection["wdr_revision"], state["wdr_revision"])
+
     def test_reconcile_intake_apply_is_atomic_after_staging_failure(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1301,7 +1433,7 @@ class StatusSyncV2Tests(unittest.TestCase):
                 "reconcile-intake", str(root), "--updates-file", str(intake), "--token", preview["token"], check=False
             )
             self.assertEqual(completed.returncode, 2)
-            self.assertEqual(result["error_code"], "INTAKE_RECONCILIATION_FACTS_STALE")
+            self.assertEqual(result["error_code"], "INTAKE_RECONCILIATION_READ_SET_STALE")
             text = record.read_text(encoding="utf-8")
             self.assertIn("- Progress: Newer fact", text)
             self.assertNotIn("- Progress: Ready", text)

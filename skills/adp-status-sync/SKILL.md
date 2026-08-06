@@ -80,6 +80,10 @@ uv run "{skill-root}/scripts/sync_status.py" stale "{project-root}" --max-age-da
 
 Add `--as-of YYYY-MM-DD` when a reproducible age calculation must use a caller-owned date instead of today. Treat missing `Last status sync` as stale unless the user is still registering the workstream. Staleness creates follow-up candidates; it does not prove delivery risk by itself.
 
+## Canonical WDR Field Repair
+
+When the writer reports `WDR_DUPLICATE_CANONICAL_FIELD`, do not edit the WDR manually. Load `references/batch-status-updates.md` and use `repair-wdr-field`; conflicting values require a caller-reviewed single-line canonical value file, while identical duplicates may be merged without one.
+
 ## Projection Repair
 
 Use only a repair batch emitted by `adp-state-audit`. Dry-run one exact batch to revalidate ledger/WDR/sidecar fingerprints and revisions and issue a 15-minute single-use token:

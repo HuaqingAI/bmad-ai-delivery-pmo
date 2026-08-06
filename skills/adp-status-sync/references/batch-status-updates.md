@@ -118,6 +118,16 @@ uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --
 
 Process historical inputs one at a time. A set with a different number of reports and intakes must be paired from declared path/hash bindings, never filenames; only `verification_status: verified` entries receive versioned receipts. `attested_by` is receipt attribution only: it proves neither execution nor authorization and cannot repair a report missing either direct binding.
 
+## Canonical WDR Field Deduplication
+
+Do not delete duplicate canonical WDR lines manually. Dry-run the supported repair against the exact physical workstream and reviewed value:
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" repair-wdr-field "{project-root}" --memory-root "{memory-root}" --id <workstream-id> --section "Project Status" --field "<canonical-field>" --canonical-value-file <reviewed-single-line.txt> --principal <operator-id> --dry-run
+```
+
+Omit `--canonical-value-file` only when every duplicate value is identical. Conflicting values never auto-merge. Apply with the unchanged arguments and returned 15-minute token, replacing `--dry-run` with `--token <single-use-token>`. The operation binds the original WDR and authority fingerprints, then atomically publishes `delivery-record.md`, `delivery-record.state.json`, the action projection, consumed token state, and a durable receipt under `receipts/wdr-field-repair/`.
+
 ## Receipt-less Intake Fact Reconciliation
 
 Use `reconcile-intake` only when the original successful execution report is absent and replay could duplicate facts. Reconcile one exact intake at a time; never batch replay a receipt-less backlog.
@@ -128,7 +138,9 @@ uv run "{skill-root}/scripts/sync_status.py" reconcile-intake "{project-root}" -
 
 The dry-run compares every action command to the canonical ledger by exact stable action ID or by the full normalized `action + owner + source + due/trigger + closure criteria` composite. It also compares status fields to the unique canonical WDR field, validates WDR revision/fingerprint lineage, checks milestone ID plus current baseline revision and roadmap facts, and verifies refresh/intent-consumption sidecars when requested. Filename similarity and operator attestation are never evidence.
 
-A partial result returns `verification_status: partial` and an exact `missing_commands` list; it issues no token and writes no success receipt. Only an all-satisfied result issues a 15-minute, principal-bound, single-use token:
+A historical value may be `satisfied_by: superseded-lineage` only when durable execution receipts or ordered daily-log entries prove the old value and a later current value, or when exact action command/provenance bindings uniquely map a normalized source to the current action ID. Missing history remains partial; source comparison is never dropped and fuzzy text matching or attestation is never accepted.
+
+A partial result returns `verification_status: partial` and an exact `missing_commands` list; blocked errors always return `verification_status: blocked`, `missing_commands`, and `token: null`. Neither state issues a success receipt. Only an all-satisfied result issues a 15-minute, principal-bound, single-use token:
 
 ```bash
 uv run "{skill-root}/scripts/sync_status.py" reconcile-intake "{project-root}" --updates-file <intake.json> --memory-root "{memory-root}" --principal <operator-id> --token <single-use-token>
