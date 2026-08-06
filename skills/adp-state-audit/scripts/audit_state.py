@@ -3230,6 +3230,114 @@ def has_valid_intake_retirement(
     )
 
 
+def normalized_receipt_timestamp(value: Any) -> str | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def resolved_touched_paths(memory_root: Path, raw_paths: Any) -> list[Path] | None:
+    if not isinstance(raw_paths, list) or not raw_paths or not all(isinstance(item, str) for item in raw_paths):
+        return None
+    resolved = [resolve_portable_memory_path(item, memory_root) for item in raw_paths]
+    return None if any(not path.is_file() for path in resolved) else resolved
+
+
+def valid_meeting_sync_retirement_successor(
+    binding: dict[str, Any],
+    receipt_path: Path,
+    memory_root: Path,
+    intake_path: Path,
+) -> bool:
+    try:
+        receipt = load_json(receipt_path)
+        intake_payload = load_json(intake_path)
+    except (OSError, json.JSONDecodeError):
+        return False
+    result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
+    meeting = result.get("meeting") if isinstance(result.get("meeting"), dict) else {}
+    touched = result.get("touched") if isinstance(result.get("touched"), dict) else {}
+    payload_meeting = (
+        intake_payload.get("meeting")
+        if isinstance(intake_payload, dict) and isinstance(intake_payload.get("meeting"), dict)
+        else {}
+    )
+    meeting_instance_id = str(receipt.get("meeting_instance_id") or "").strip()
+    plan_fingerprint = str(receipt.get("plan_fingerprint") or "").strip().lower()
+    applied_at = normalized_receipt_timestamp(receipt.get("applied_at"))
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("status") != "applied"
+        or result.get("ok") is not True
+        or result.get("dry_run") is not False
+        or not meeting_instance_id
+        or receipt_path.name != f"{meeting_instance_id}.json"
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", plan_fingerprint) is None
+        or applied_at is None
+        or meeting.get("meeting_instance_id") != meeting_instance_id
+        or str(meeting.get("plan_fingerprint") or "").strip().lower() != plan_fingerprint
+        or not isinstance(intake_payload, dict)
+        or intake_payload.get("generated_by") != "adp-meeting-sync"
+        or payload_meeting.get("meeting_instance_id") != meeting_instance_id
+        or str(payload_meeting.get("plan_fingerprint") or "").strip().lower() != plan_fingerprint
+    ):
+        return False
+    intake_paths = resolved_touched_paths(memory_root, touched.get("status_sync_intake_files"))
+    daily_paths = resolved_touched_paths(memory_root, touched.get("daily_logs"))
+    workstream_paths = resolved_touched_paths(memory_root, touched.get("workstream_records"))
+    archive = resolve_portable_memory_path(str(receipt.get("archive") or ""), memory_root)
+    updates = intake_payload.get("updates")
+    if (
+        intake_paths is None
+        or len(intake_paths) != 1
+        or intake_paths[0].resolve() != intake_path.resolve()
+        or daily_paths is None
+        or workstream_paths is None
+        or not archive.is_file()
+        or not isinstance(updates, list)
+        or not updates
+    ):
+        return False
+    expected = {
+        "binding_type": "meeting-sync-receipt",
+        "path": receipt_path.resolve().relative_to(memory_root.resolve()).as_posix(),
+        "fingerprint": "sha256:" + hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+        "schema_version": 1,
+        "meeting_instance_id": meeting_instance_id,
+        "plan_fingerprint": plan_fingerprint,
+        "applied_at": applied_at,
+        "generated_intake": {
+            "path": intake_path.resolve().relative_to(memory_root.resolve()).as_posix(),
+            "fingerprint": "sha256:" + hashlib.sha256(intake_path.read_bytes()).hexdigest(),
+            "payload_id": receipt_content_id(intake_payload),
+            "update_count": len(updates),
+        },
+        "write_lineage": {
+            "archive": archive.resolve().relative_to(memory_root.resolve()).as_posix(),
+            "daily_logs": sorted(path.resolve().relative_to(memory_root.resolve()).as_posix() for path in daily_paths),
+            "workstream_records": sorted(
+                path.resolve().relative_to(memory_root.resolve()).as_posix() for path in workstream_paths
+            ),
+        },
+    }
+    return all(binding.get(key) == value for key, value in expected.items())
+
+
+def meeting_successor_lineage_binding(scan: dict[str, Any]) -> dict[str, Any]:
+    satisfied = scan.get("satisfied_commands") if isinstance(scan.get("satisfied_commands"), list) else []
+    return {
+        "verification_status": scan.get("verification_status"),
+        "snapshot_id": scan.get("snapshot_id"),
+        "command_count": len(satisfied),
+        "command_results_digest": receipt_content_id(satisfied),
+        "read_set": scan.get("read_set", []),
+    }
+
+
 def valid_retirement_successor(binding: Any, memory_root: Path, intake_path: Path) -> bool:
     if not isinstance(binding, dict):
         return False
@@ -3301,6 +3409,10 @@ def valid_retirement_successor(binding: Any, memory_root: Path, intake_path: Pat
         except (OSError, json.JSONDecodeError):
             return False
         return successful_receipt_payload(durable_receipt, target_input, target_payload)
+    if binding_type == "meeting-sync-receipt":
+        if relative.parts[:2] != ("meetings", "receipts"):
+            return False
+        return valid_meeting_sync_retirement_successor(binding, path, memory_root, intake_path)
     return False
 
 
@@ -3349,8 +3461,18 @@ def valid_intake_retirement_receipt(
         if receipt.get("superseded_by") is not None:
             return False
     elif reason == "superseded-by":
-        if not valid_retirement_successor(receipt.get("superseded_by"), memory_root, intake_path):
+        successor = receipt.get("superseded_by")
+        if not valid_retirement_successor(successor, memory_root, intake_path):
             return False
+        if isinstance(successor, dict) and successor.get("binding_type") == "meeting-sync-receipt":
+            if (
+                evidence_scan.get("verification_status") != "verified"
+                or evidence_scan.get("missing_commands") != []
+                or not isinstance(evidence_scan.get("satisfied_commands"), list)
+                or not evidence_scan.get("satisfied_commands")
+                or successor.get("lineage_verification") != meeting_successor_lineage_binding(evidence_scan)
+            ):
+                return False
     read_set = receipt.get("read_set")
     if not isinstance(read_set, list) or not all(
         isinstance(item, dict)
@@ -3416,7 +3538,12 @@ def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intak
     updates = intake_payload.get("updates")
     if not isinstance(updates, list) or receipt.get("update_count") != len(updates):
         return False
-    if receipt.get("receipt_type") == "migration" and not valid_migration_receipt(receipt, memory_root):
+    if receipt.get("receipt_type") == "migration" and not valid_migration_receipt(
+        receipt,
+        memory_root,
+        intake_path,
+        intake_payload,
+    ):
         return False
     if receipt.get("receipt_type") == "reconciliation" and not valid_reconciliation_receipt(receipt):
         return False
@@ -3446,20 +3573,31 @@ def portable_memory_relative_path(value: str) -> Path | None:
 
 
 def resolve_portable_memory_path(value: str, memory_root: Path) -> Path:
-    direct = Path(value).expanduser().resolve()
+    raw = Path(value).expanduser()
     relative = portable_memory_relative_path(value)
-    if relative is None:
-        return direct
-    resolved = (memory_root.resolve() / relative).resolve()
-    try:
-        resolved.relative_to(memory_root.resolve())
-    except ValueError:
-        return direct
-    return resolved
+    if relative is not None:
+        resolved = (memory_root.resolve() / relative).resolve()
+        try:
+            resolved.relative_to(memory_root.resolve())
+        except ValueError:
+            pass
+        else:
+            return resolved
+    if not raw.is_absolute():
+        candidate = (memory_root.resolve() / raw).resolve()
+        try:
+            candidate.relative_to(memory_root.resolve())
+        except ValueError:
+            pass
+        else:
+            return candidate
+    direct = raw.resolve()
+    return direct
 
 
 def portable_memory_path_matches(value: str, expected: Path, memory_root: Path) -> bool:
-    direct = Path(value).expanduser().resolve()
+    raw = Path(value).expanduser()
+    direct = raw.resolve()
     if direct == expected.resolve():
         return True
     return resolve_portable_memory_path(value, memory_root) == expected.resolve()
@@ -3468,6 +3606,50 @@ def portable_memory_path_matches(value: str, expected: Path, memory_root: Path) 
 def receipt_content_id(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def canonical_executable_payload_from_raw(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    executable_keys = (
+        "baseline_revision",
+        "refresh_actions",
+        "status_intents",
+        "action_commands",
+        "updates",
+    )
+    projection = {key: payload[key] for key in executable_keys if key in payload}
+    if not any(key in projection for key in ("updates", "status_intents", "action_commands")):
+        return None
+    return projection
+
+
+def json_pointer_segment(value: Any) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def json_diff_paths(left: Any, right: Any, path: str = "") -> list[str]:
+    if type(left) is not type(right):
+        return [path or "/"]
+    if isinstance(left, dict):
+        differences: list[str] = []
+        for key in sorted(set(left) | set(right), key=str):
+            child = f"{path}/{json_pointer_segment(key)}"
+            if key not in left or key not in right:
+                differences.append(child)
+            else:
+                differences.extend(json_diff_paths(left[key], right[key], child))
+        return differences
+    if isinstance(left, list):
+        differences = []
+        for index in range(max(len(left), len(right))):
+            child = f"{path}/{index}"
+            if index >= len(left) or index >= len(right):
+                differences.append(child)
+            else:
+                differences.extend(json_diff_paths(left[index], right[index], child))
+        return differences
+    return [] if left == right else [path or "/"]
 
 
 def valid_reconciliation_receipt(receipt: dict[str, Any]) -> bool:
@@ -3501,8 +3683,130 @@ def valid_reconciliation_receipt(receipt: dict[str, Any]) -> bool:
     return receipt_id == receipt_content_id(receipt_body)
 
 
-def valid_migration_receipt(receipt: dict[str, Any], memory_root: Path) -> bool:
+def valid_historical_input_change_migration(
+    receipt: dict[str, Any],
+    memory_root: Path,
+    intake_path: Path,
+    current_payload: dict[str, Any],
+) -> bool:
     migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
+    original_hash = str(migration.get("original_input_hash") or "").strip().lower()
+    current_hash = str(migration.get("current_input_hash") or "").strip().lower()
+    snapshot_raw = migration.get("original_input_snapshot_path")
+    evidence_raw = migration.get("evidence_path")
+    if (
+        migration.get("migration_kind") != "historical-input-change"
+        or migration.get("verification_status") != "verified"
+        or not isinstance(snapshot_raw, str)
+        or not isinstance(evidence_raw, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", original_hash)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", current_hash)
+        or original_hash == current_hash
+        or current_hash != receipt.get("input_hash")
+        or not str(migration.get("attested_by") or "").strip()
+    ):
+        return False
+    snapshot = resolve_portable_memory_path(snapshot_raw, memory_root)
+    evidence = resolve_portable_memory_path(evidence_raw, memory_root)
+    try:
+        snapshot_relative = snapshot.resolve().relative_to(memory_root.resolve())
+    except ValueError:
+        return False
+    if snapshot_relative.parts[:3] != ("receipts", "status-sync-input-migration", "originals"):
+        return False
+    try:
+        original_bytes = snapshot.read_bytes()
+        evidence_bytes = evidence.read_bytes()
+        original_payload = json.loads(original_bytes.decode("utf-8-sig"))
+        evidence_payload = json.loads(evidence_bytes.decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if (
+        "sha256:" + hashlib.sha256(original_bytes).hexdigest() != original_hash
+        or migration.get("original_input_snapshot_hash") != original_hash
+        or not fingerprints_equal(migration.get("evidence_hash"), hashlib.sha256(evidence_bytes).hexdigest())
+        or not valid_original_historical_execution_report(
+            evidence_payload,
+            intake_path,
+            original_hash,
+            original_payload,
+            memory_root,
+        )
+    ):
+        return False
+    original_canonical = canonical_executable_payload_from_raw(original_payload)
+    current_canonical = canonical_executable_payload_from_raw(current_payload)
+    if original_canonical is None or current_canonical is None:
+        return False
+    executable_changed_paths = json_diff_paths(original_canonical, current_canonical)
+    diff_body = {
+        "equal": not executable_changed_paths,
+        "changed_paths": executable_changed_paths,
+        "non_executable_changed_paths": json_diff_paths(original_payload, current_payload),
+    }
+    expected_diff = {**diff_body, "diff_id": receipt_content_id(diff_body)}
+    return bool(
+        not executable_changed_paths
+        and migration.get("evidence_mode") == "update"
+        and isinstance(migration.get("evidence_input_path"), str)
+        and portable_memory_path_matches(migration["evidence_input_path"], intake_path, memory_root)
+        and migration.get("evidence_input_hash") == original_hash
+        and isinstance(migration.get("original_input_path"), str)
+        and portable_memory_path_matches(migration["original_input_path"], intake_path, memory_root)
+        and migration.get("original_payload_id") == receipt_content_id(original_payload)
+        and migration.get("current_payload_id") == receipt_content_id(current_payload)
+        and migration.get("canonical_executable_payload_id") == receipt_content_id(original_canonical)
+        and migration.get("executable_diff") == expected_diff
+    )
+
+
+def valid_original_historical_execution_report(
+    payload: Any,
+    logical_input_path: Path,
+    original_hash: str,
+    original_payload: Any,
+    memory_root: Path,
+) -> bool:
+    if not isinstance(payload, dict) or ATTESTATION_WRAPPER_FIELDS.intersection(payload):
+        return False
+    if payload.get("ok") is not True or payload.get("dry_run") is not False:
+        return False
+    if str(payload.get("mode") or "").strip().lower() != "update":
+        return False
+    status = normalize_status(payload.get("status") or payload.get("lifecycle_status"))
+    if status and status != "applied":
+        return False
+    updates = payload.get("updates")
+    original_updates = original_payload.get("updates") if isinstance(original_payload, dict) else None
+    if (
+        not isinstance(updates, list)
+        or not updates
+        or not isinstance(original_updates, list)
+        or len(updates) != len(original_updates)
+        or not fingerprints_equal(payload.get("input_hash"), original_hash)
+    ):
+        return False
+    declared_path = payload.get("input_path")
+    return bool(
+        isinstance(declared_path, str)
+        and portable_memory_path_matches(declared_path, logical_input_path, memory_root)
+    )
+
+
+def valid_migration_receipt(
+    receipt: dict[str, Any],
+    memory_root: Path,
+    intake_path: Path,
+    intake_payload: dict[str, Any],
+) -> bool:
+    migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
+    if migration.get("migration_kind") == "historical-input-change":
+        return valid_historical_input_change_migration(
+            receipt,
+            memory_root,
+            intake_path,
+            intake_payload,
+        )
     evidence_path = migration.get("evidence_path")
     evidence_hash = str(migration.get("evidence_hash") or "").strip().lower()
     attested_by = str(migration.get("attested_by") or "").strip()

@@ -74,6 +74,8 @@ INTAKE_RECONCILIATION_TOKEN_REL = Path("state") / "intake-reconciliation-tokens"
 INTAKE_RETIREMENT_TOKEN_REL = Path("state") / "intake-retirement-tokens"
 INTAKE_RETIREMENT_RECEIPT_REL = Path("receipts") / "status-sync-retirement"
 INTAKE_RETIREMENT_REASONS = {"never-applied", "superseded-by", "invalid-proposal"}
+MEETING_SYNC_RECEIPT_REL = Path("meetings") / "receipts"
+HISTORICAL_INPUT_MIGRATION_EVIDENCE_REL = Path("receipts") / "status-sync-input-migration" / "originals"
 WDR_FIELD_REPAIR_TOKEN_REL = Path("state") / "wdr-field-repair-tokens"
 WDR_FIELD_REPAIR_RECEIPT_REL = Path("receipts") / "wdr-field-repair"
 TRANSACTION_REL = Path("state") / "transactions"
@@ -466,6 +468,13 @@ def parse_args() -> argparse.Namespace:
     migrate.add_argument("project_root", help="Project root containing ADP memory.")
     migrate.add_argument("--updates-file", required=True, help="Exact historical updates file to attest.")
     migrate.add_argument(
+        "--original-updates-file",
+        help=(
+            "Restored original updates bytes for a governed historical-input-change migration. "
+            "The original and current canonical executable payloads must be identical."
+        ),
+    )
+    migrate.add_argument(
         "--evidence-file",
         required=True,
         help="Original historical non-dry-run status-sync result JSON with direct input_path/input_hash fields.",
@@ -567,7 +576,12 @@ def normalize_required_timestamp(raw: str, label: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def updates_from_payload(payload: Any, default_source: str) -> list[StatusUpdate]:
+def updates_from_payload(
+    payload: Any,
+    default_source: str,
+    *,
+    allow_legacy_terminal_without_id: bool = False,
+) -> list[StatusUpdate]:
     items = payload.get("updates", payload) if isinstance(payload, dict) else payload
     if isinstance(payload, dict) and not isinstance(items, list):
         items = status_batch_updates(payload)
@@ -593,6 +607,7 @@ def updates_from_payload(payload: Any, default_source: str) -> list[StatusUpdate
                 default_source=default_source,
                 default_revision=payload_revision,
                 default_refresh_actions=payload_refresh_actions,
+                allow_legacy_terminal_without_id=allow_legacy_terminal_without_id,
             )
         )
     if isinstance(payload, dict):
@@ -602,12 +617,21 @@ def updates_from_payload(payload: Any, default_source: str) -> list[StatusUpdate
     return updates
 
 
-def load_updates_payload(path: Path, default_source: str) -> tuple[Any, list[StatusUpdate]]:
+def load_updates_payload(
+    path: Path,
+    default_source: str,
+    *,
+    allow_legacy_terminal_without_id: bool = False,
+) -> tuple[Any, list[StatusUpdate]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"updates-file must contain valid JSON: {exc}") from exc
-    return payload, updates_from_payload(payload, default_source)
+    return payload, updates_from_payload(
+        payload,
+        default_source,
+        allow_legacy_terminal_without_id=allow_legacy_terminal_without_id,
+    )
 
 
 def updates_from_args(args: argparse.Namespace) -> list[StatusUpdate]:
@@ -782,6 +806,7 @@ def update_from_mapping(
     default_source: str,
     default_revision: int | None = None,
     default_refresh_actions: bool = False,
+    allow_legacy_terminal_without_id: bool = False,
 ) -> StatusUpdate:
     raw_id = item.get("id") or item.get("workstream_id")
     if not raw_id:
@@ -806,6 +831,7 @@ def update_from_mapping(
             default_workstream=normalize_id(str(raw_id)),
             default_source=default_source,
             default_revision=parse_optional_revision(item.get("baseline_revision"), "baseline_revision") or default_revision,
+            allow_legacy_terminal_without_id=allow_legacy_terminal_without_id,
         ),
         milestones=milestones_from_mapping(
             item,
@@ -931,6 +957,7 @@ def actions_from_mapping(
     default_workstream: str,
     default_source: str,
     default_revision: int | None = None,
+    allow_legacy_terminal_without_id: bool = False,
 ) -> list[ActionUpdate]:
     raw_actions = item.get("actions", [])
     if raw_actions is None:
@@ -959,7 +986,7 @@ def actions_from_mapping(
         status = normalize_action_status(raw_action.get("status")) if "status" in raw_action else None
         if operation == "create" and status is None:
             status = "open"
-        if status in {"done", "cancelled"} and not action_id:
+        if status in {"done", "cancelled"} and not action_id and not allow_legacy_terminal_without_id:
             raise ValueError(f"{status} action update requires action_id")
         action_text = clean_optional(first_present(raw_action, "action", "text", "next_action"))
         if operation == "create" and not action_text:
@@ -3838,11 +3865,9 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def historical_evidence(
+def historical_report_claims(
     payload: Any,
     evidence_path: Path,
-    input_path: Path,
-    input_hash: str,
     update_count: int,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
@@ -3868,21 +3893,112 @@ def historical_evidence(
     evidence_input_hash = str(payload.get("input_hash") or "").strip().lower()
     if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", evidence_input_hash):
         raise ValueError("original evidence report must directly declare the exact updates-file input_hash")
-    if evidence_input_hash.removeprefix("sha256:") != input_hash.removeprefix("sha256:"):
-        raise ValueError("evidence-file input_hash does not match updates-file raw bytes")
     evidence_input_path = payload.get("input_path")
     if not isinstance(evidence_input_path, str) or not evidence_input_path.strip():
         raise ValueError("original evidence report must directly declare the exact updates-file input_path")
-    if Path(evidence_input_path).expanduser().resolve() != input_path:
-        raise ValueError("evidence-file input_path does not match the exact updates-file path")
-    if evidence_path == input_path:
-        raise ValueError("evidence-file must be distinct from updates-file")
     return {
         "evidence_path": str(evidence_path),
         "evidence_hash": sha256_bytes(evidence_path.read_bytes()),
         "evidence_mode": "update",
+        "declared_input_path": evidence_input_path,
+        "declared_input_hash": "sha256:" + evidence_input_hash.removeprefix("sha256:"),
+    }
+
+
+def historical_path_matches(memory_root: Path | None, raw_path: str, expected: Path) -> bool:
+    if Path(raw_path).expanduser().resolve() == expected.resolve():
+        return True
+    return bool(memory_root and resolve_receipt_input_path(memory_root, raw_path) == expected.resolve())
+
+
+def historical_evidence(
+    payload: Any,
+    evidence_path: Path,
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+    memory_root: Path | None = None,
+) -> dict[str, Any]:
+    claims = historical_report_claims(payload, evidence_path, update_count)
+    evidence_input_hash = str(claims["declared_input_hash"])
+    if evidence_input_hash.removeprefix("sha256:") != input_hash.removeprefix("sha256:"):
+        raise ValueError("evidence-file input_hash does not match updates-file raw bytes")
+    evidence_input_path = str(claims["declared_input_path"])
+    if not historical_path_matches(memory_root, evidence_input_path, input_path):
+        raise ValueError("evidence-file input_path does not match the exact updates-file path")
+    if evidence_path == input_path:
+        raise ValueError("evidence-file must be distinct from updates-file")
+    return {
+        **{key: claims[key] for key in ("evidence_path", "evidence_hash", "evidence_mode")},
         "evidence_input_path": str(input_path),
         "evidence_input_hash": input_hash,
+        "verification_status": "verified",
+    }
+
+
+def canonical_executable_payload_from_raw(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("status-sync payload root must be a JSON object")
+    executable_keys = (
+        "baseline_revision",
+        "refresh_actions",
+        "status_intents",
+        "action_commands",
+        "updates",
+    )
+    projection = {key: payload[key] for key in executable_keys if key in payload}
+    if not any(key in projection for key in ("updates", "status_intents", "action_commands")):
+        raise ValueError("status-sync payload contains no executable command envelope")
+    return projection
+
+
+def json_pointer_segment(value: Any) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def json_diff_paths(left: Any, right: Any, path: str = "") -> list[str]:
+    if type(left) is not type(right):
+        return [path or "/"]
+    if isinstance(left, dict):
+        differences: list[str] = []
+        for key in sorted(set(left) | set(right), key=str):
+            child = f"{path}/{json_pointer_segment(key)}"
+            if key not in left or key not in right:
+                differences.append(child)
+            else:
+                differences.extend(json_diff_paths(left[key], right[key], child))
+        return differences
+    if isinstance(left, list):
+        differences = []
+        for index in range(max(len(left), len(right))):
+            child = f"{path}/{index}"
+            if index >= len(left) or index >= len(right):
+                differences.append(child)
+            else:
+                differences.extend(json_diff_paths(left[index], right[index], child))
+        return differences
+    return [] if left == right else [path or "/"]
+
+
+def historical_input_change_evidence(
+    payload: Any,
+    evidence_path: Path,
+    logical_input_path: Path,
+    original_input_hash: str,
+    update_count: int,
+    memory_root: Path,
+) -> dict[str, Any]:
+    claims = historical_report_claims(payload, evidence_path, update_count)
+    if str(claims["declared_input_hash"]) != original_input_hash:
+        raise ValueError("evidence-file input_hash does not match restored original updates bytes")
+    if not historical_path_matches(memory_root, str(claims["declared_input_path"]), logical_input_path):
+        raise ValueError("evidence-file input_path does not match the governed logical updates-file path")
+    if evidence_path.resolve() == logical_input_path.resolve():
+        raise ValueError("evidence-file must be distinct from updates-file")
+    return {
+        **{key: claims[key] for key in ("evidence_path", "evidence_hash", "evidence_mode")},
+        "evidence_input_path": str(logical_input_path),
+        "evidence_input_hash": original_input_hash,
         "verification_status": "verified",
     }
 
@@ -3894,6 +4010,7 @@ def migration_plan_token(
     evidence_hash: str,
     applied_at: str,
     attested_by: str,
+    historical_input_change: dict[str, Any] | None = None,
 ) -> str:
     identity = {
         "input_path": str(input_path),
@@ -3902,6 +4019,7 @@ def migration_plan_token(
         "evidence_hash": evidence_hash,
         "applied_at": applied_at,
         "attested_by": attested_by,
+        "historical_input_change": historical_input_change,
         "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
     }
     digest = hashlib.sha256(
@@ -4484,6 +4602,14 @@ def resolve_receipt_input_path(memory_root: Path, raw_path: Any) -> Path | None:
     direct = Path(raw_path).expanduser()
     if direct.is_file():
         return direct.resolve()
+    if not direct.is_absolute():
+        relative_candidate = (memory_root / direct).resolve()
+        try:
+            relative_candidate.relative_to(memory_root.resolve())
+        except ValueError:
+            relative_candidate = memory_root / "__invalid__"
+        if relative_candidate.is_file():
+            return relative_candidate
     parts = [part for part in raw_path.replace("\\", "/").split("/") if part]
     anchor = ["_bmad-output", "adp", "memory"]
     folded = [part.casefold() for part in parts]
@@ -4492,6 +4618,76 @@ def resolve_receipt_input_path(memory_root: Path, raw_path: Any) -> Path | None:
             candidate = memory_root.joinpath(*parts[index + len(anchor):])
             return candidate.resolve() if candidate.is_file() else None
     return None
+
+
+def historical_input_change_migration_valid(
+    memory_root: Path,
+    receipt: dict[str, Any],
+    input_path: Path,
+    current_payload: Any,
+    current_updates: list[StatusUpdate],
+) -> bool:
+    migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
+    original_hash = str(migration.get("original_input_hash") or "").strip().lower()
+    current_hash = str(migration.get("current_input_hash") or "").strip().lower()
+    snapshot_path = resolve_receipt_input_path(memory_root, migration.get("original_input_snapshot_path"))
+    evidence_path = resolve_receipt_input_path(memory_root, migration.get("evidence_path"))
+    if (
+        migration.get("migration_kind") != "historical-input-change"
+        or migration.get("verification_status") != "verified"
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", original_hash)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", current_hash)
+        or original_hash == current_hash
+        or current_hash != receipt.get("input_hash")
+        or snapshot_path is None
+        or evidence_path is None
+    ):
+        return False
+    try:
+        snapshot_relative = snapshot_path.resolve().relative_to(memory_root.resolve())
+    except ValueError:
+        return False
+    if snapshot_relative.parts[:3] != HISTORICAL_INPUT_MIGRATION_EVIDENCE_REL.parts:
+        return False
+    original_bytes = snapshot_path.read_bytes()
+    if sha256_bytes(original_bytes) != original_hash:
+        return False
+    try:
+        original_payload, original_updates = load_updates_payload(snapshot_path, "status sync")
+        evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+        evidence = historical_input_change_evidence(
+            evidence_payload,
+            evidence_path,
+            input_path,
+            original_hash,
+            len(original_updates),
+            memory_root,
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    original_canonical = canonical_executable_payload_from_raw(original_payload)
+    current_canonical = canonical_executable_payload_from_raw(current_payload)
+    executable_changed_paths = json_diff_paths(original_canonical, current_canonical)
+    diff_body = {
+        "equal": not executable_changed_paths,
+        "changed_paths": executable_changed_paths,
+        "non_executable_changed_paths": json_diff_paths(original_payload, current_payload),
+    }
+    expected_diff = {**diff_body, "diff_id": content_id(diff_body)}
+    expected_evidence = {
+        **evidence,
+        "attested_by": str(migration.get("attested_by") or "").strip(),
+    }
+    return bool(
+        not executable_changed_paths
+        and expected_evidence["attested_by"]
+        and migration.get("original_input_snapshot_hash") == original_hash
+        and migration.get("original_payload_id") == content_id(original_payload)
+        and migration.get("current_payload_id") == content_id(current_payload)
+        and migration.get("canonical_executable_payload_id") == content_id(original_canonical)
+        and migration.get("executable_diff") == expected_diff
+        and all(migration.get(key) == value for key, value in expected_evidence.items())
+    )
 
 
 def durable_status_receipt_record(memory_root: Path, receipt_path: Path) -> dict[str, Any] | None:
@@ -4524,20 +4720,25 @@ def durable_status_receipt_record(memory_root: Path, receipt_path: Path) -> dict
         return None
     if receipt.get("receipt_type") == "migration":
         migration = receipt.get("migration") if isinstance(receipt.get("migration"), dict) else {}
-        evidence_path = resolve_receipt_input_path(memory_root, migration.get("evidence_path"))
-        if evidence_path is None:
-            return None
-        try:
-            evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
-            historical_evidence(
-                evidence_payload,
-                evidence_path,
-                input_path,
-                input_hash,
-                len(updates),
-            )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return None
+        if migration.get("migration_kind") == "historical-input-change":
+            if not historical_input_change_migration_valid(memory_root, receipt, input_path, payload, updates):
+                return None
+        else:
+            evidence_path = resolve_receipt_input_path(memory_root, migration.get("evidence_path"))
+            if evidence_path is None:
+                return None
+            try:
+                evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+                historical_evidence(
+                    evidence_payload,
+                    evidence_path,
+                    input_path,
+                    input_hash,
+                    len(updates),
+                    memory_root,
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return None
     if receipt.get("receipt_type") == "reconciliation":
         raw_input_path = Path(str(receipt.get("input_path")))
         if not reconciliation_receipt_valid(receipt, raw_input_path, input_hash, len(updates)):
@@ -5747,6 +5948,170 @@ def intake_retirement_token_path(memory_root: Path, token: str) -> Path:
     return memory_root / INTAKE_RETIREMENT_TOKEN_REL / f"{digest}.json"
 
 
+def load_retirement_updates_payload(path: Path) -> tuple[Any, list[StatusUpdate], str]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_LEGACY_SCAN_BLOCKED",
+            f"retirement cannot safely parse the historical intake JSON: {exc}",
+            {
+                "verification_status": "blocked",
+                "evidence_scan": {
+                    "verification_status": "blocked",
+                    "error_code": "INTAKE_RETIREMENT_LEGACY_SCAN_BLOCKED",
+                    "error": str(exc),
+                    "satisfied_commands": [],
+                    "missing_commands": [],
+                    "read_set": [],
+                },
+            },
+        ) from exc
+    try:
+        return payload, updates_from_payload(payload, "status sync"), "current-writer-schema"
+    except (ValueError, TypeError) as modern_exc:
+        try:
+            updates = updates_from_payload(
+                payload,
+                "status sync",
+                allow_legacy_terminal_without_id=True,
+            )
+        except (ValueError, TypeError) as legacy_exc:
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_LEGACY_SCAN_BLOCKED",
+                "retirement cannot safely normalize the legacy executable payload for evidence scanning",
+                {
+                    "verification_status": "blocked",
+                    "evidence_scan": {
+                        "verification_status": "blocked",
+                        "error_code": "INTAKE_RETIREMENT_LEGACY_SCAN_BLOCKED",
+                        "error": str(legacy_exc),
+                        "legacy_parser_error": str(modern_exc),
+                        "satisfied_commands": [],
+                        "missing_commands": [],
+                        "read_set": [],
+                    },
+                },
+            ) from legacy_exc
+        return payload, updates, "legacy-terminal-action-scan"
+
+
+def resolved_touched_paths(memory_root: Path, raw_paths: Any) -> list[Path] | None:
+    if not isinstance(raw_paths, list) or not raw_paths or not all(isinstance(item, str) for item in raw_paths):
+        return None
+    resolved = [resolve_receipt_input_path(memory_root, item) for item in raw_paths]
+    return None if any(path is None for path in resolved) else [path for path in resolved if path is not None]
+
+
+def meeting_sync_successor_binding(
+    memory_root: Path,
+    receipt_path: Path,
+    input_path: Path,
+) -> dict[str, Any]:
+    receipt = load_json_object(receipt_path)
+    result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
+    result_meeting = result.get("meeting") if isinstance(result.get("meeting"), dict) else {}
+    touched = result.get("touched") if isinstance(result.get("touched"), dict) else {}
+    meeting_instance_id = str(receipt.get("meeting_instance_id") or "").strip()
+    plan_fingerprint = str(receipt.get("plan_fingerprint") or "").strip().lower()
+    try:
+        applied_at = normalize_required_timestamp(receipt.get("applied_at"), "meeting receipt applied_at")
+    except ValueError as exc:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "meeting-sync successor receipt has an invalid applied_at timestamp",
+        ) from exc
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("status") != "applied"
+        or result.get("ok") is not True
+        or result.get("dry_run") is not False
+        or not meeting_instance_id
+        or receipt_path.name != f"{meeting_instance_id}.json"
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", plan_fingerprint) is None
+        or result_meeting.get("meeting_instance_id") != meeting_instance_id
+        or str(result_meeting.get("plan_fingerprint") or "").strip().lower() != plan_fingerprint
+    ):
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "meeting-sync successor must be an applied non-dry-run receipt with stable meeting and plan identity",
+        )
+    payload, updates, _ = load_retirement_updates_payload(input_path)
+    payload_meeting = payload.get("meeting") if isinstance(payload, dict) and isinstance(payload.get("meeting"), dict) else {}
+    if (
+        not isinstance(payload, dict)
+        or payload.get("generated_by") != "adp-meeting-sync"
+        or payload_meeting.get("meeting_instance_id") != meeting_instance_id
+        or str(payload_meeting.get("plan_fingerprint") or "").strip().lower() != plan_fingerprint
+    ):
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "meeting-sync receipt is not bound to this generated status-sync intake identity",
+        )
+    intake_paths = resolved_touched_paths(memory_root, touched.get("status_sync_intake_files"))
+    if intake_paths is None or len(intake_paths) != 1 or intake_paths[0].resolve() != input_path.resolve():
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "meeting-sync receipt must touch exactly the intake being retired",
+        )
+    daily_paths = resolved_touched_paths(memory_root, touched.get("daily_logs"))
+    workstream_paths = resolved_touched_paths(memory_root, touched.get("workstream_records"))
+    if daily_paths is None or workstream_paths is None:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "meeting-sync receipt lacks durable daily-log or WDR write lineage",
+        )
+    archive = resolve_receipt_input_path(memory_root, receipt.get("archive"))
+    if archive is None:
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+            "meeting-sync successor receipt is missing its durable meeting archive",
+        )
+    return {
+        "binding_type": "meeting-sync-receipt",
+        "path": receipt_path.relative_to(memory_root).as_posix(),
+        "fingerprint": sha256_bytes(receipt_path.read_bytes()),
+        "schema_version": 1,
+        "meeting_instance_id": meeting_instance_id,
+        "plan_fingerprint": plan_fingerprint,
+        "applied_at": applied_at,
+        "generated_intake": {
+            "path": input_path.relative_to(memory_root).as_posix(),
+            "fingerprint": sha256_bytes(input_path.read_bytes()),
+            "payload_id": content_id(payload),
+            "update_count": len(updates),
+        },
+        "write_lineage": {
+            "archive": archive.relative_to(memory_root).as_posix(),
+            "daily_logs": sorted(path.relative_to(memory_root).as_posix() for path in daily_paths),
+            "workstream_records": sorted(path.relative_to(memory_root).as_posix() for path in workstream_paths),
+        },
+    }
+
+
+def meeting_successor_lineage_binding(scan: dict[str, Any]) -> dict[str, Any]:
+    satisfied = scan.get("satisfied_commands") if isinstance(scan.get("satisfied_commands"), list) else []
+    return {
+        "verification_status": scan.get("verification_status"),
+        "snapshot_id": scan.get("snapshot_id"),
+        "command_count": len(satisfied),
+        "command_results_digest": content_id(satisfied),
+        "read_set": scan.get("read_set", []),
+    }
+
+
+def meeting_successor_lineage_valid(binding: Any, scan: dict[str, Any]) -> bool:
+    if not isinstance(binding, dict) or binding.get("binding_type") != "meeting-sync-receipt":
+        return True
+    return bool(
+        scan.get("verification_status") == "verified"
+        and scan.get("missing_commands") == []
+        and isinstance(scan.get("satisfied_commands"), list)
+        and bool(scan.get("satisfied_commands"))
+        and binding.get("lineage_verification") == meeting_successor_lineage_binding(scan)
+    )
+
+
 def retirement_successor_binding(
     project_root: Path,
     memory_root: Path,
@@ -5816,9 +6181,11 @@ def retirement_successor_binding(
             "input_hash": record["input_hash"],
             "applied_at": record["applied_at"],
         }
+    if relative.parts[:2] == MEETING_SYNC_RECEIPT_REL.parts:
+        return meeting_sync_successor_binding(memory_root, target, input_path)
     raise StatusSyncContractError(
         "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
-        "superseded-by must reference a status-sync intake or durable status-sync receipt",
+        "superseded-by must reference a status-sync intake, durable status-sync receipt, or strictly bound meeting-sync receipt",
     )
 
 
@@ -5870,6 +6237,18 @@ def retirement_successor_binding_valid(memory_root: Path, binding: Any, input_pa
             and record["input_hash"] == binding.get("input_hash")
             and record["input_path"].resolve() != input_path.resolve()
         )
+    if binding.get("binding_type") == "meeting-sync-receipt":
+        if relative.parts[:2] != MEETING_SYNC_RECEIPT_REL.parts:
+            return False
+        try:
+            expected = meeting_sync_successor_binding(memory_root, path, input_path)
+        except StatusSyncContractError:
+            return False
+        lineage = binding.get("lineage_verification")
+        return bool(
+            isinstance(lineage, dict)
+            and all(binding.get(key) == value for key, value in expected.items())
+        )
     return False
 
 
@@ -5899,6 +6278,113 @@ def retirement_execution_scan(
     }
 
 
+def meeting_successor_execution_scan(
+    memory_root: Path,
+    updates: list[StatusUpdate],
+    scan: dict[str, Any],
+    successor: dict[str, Any],
+) -> dict[str, Any]:
+    if scan.get("verification_status") == "blocked":
+        return scan
+    missing = list(scan.get("missing_commands", []))
+    missing_by_index = {
+        item.get("command_index"): item
+        for item in missing
+        if isinstance(item, dict) and item.get("command_type") == "action"
+    }
+    if not missing_by_index:
+        return scan
+    try:
+        rows = parse_action_ledger(memory_root / ACTION_LEDGER_REL)
+    except (OSError, ValueError, TypeError):
+        return scan
+    receipt_daily_logs = set(successor.get("write_lineage", {}).get("daily_logs", []))
+    upgraded: list[dict[str, Any]] = []
+    action_ordinal = 0
+    for update in updates:
+        for action in update.actions:
+            action_ordinal += 1
+            missing_result = missing_by_index.get(action_ordinal)
+            if missing_result is None or not action.action_id:
+                continue
+            candidates = [row for row in rows if row.get("Action ID") == action.action_id]
+            if len(candidates) != 1:
+                continue
+            row = candidates[0]
+            if (
+                normalized_reconciliation_value("action", action.action)
+                != normalized_reconciliation_value("action", row.get("Action", ""))
+                or normalized_reconciliation_value("owner", action.owner)
+                != normalized_reconciliation_value("owner", row.get("Owner", ""))
+                or normalized_reconciliation_value("workstream", action.workstream)
+                != normalized_reconciliation_value("workstream", row.get("Workstream", ""))
+                or normalized_reconciliation_value("closure_criteria", action.closure_criteria)
+                != normalized_reconciliation_value("closure_criteria", row.get("Closure Criteria", ""))
+            ):
+                continue
+            if (
+                "affected_workstreams" in action.declared_fields
+                and sorted(action.affected_workstreams or [])
+                != sorted(parse_workstream_cell(row.get("Affected Workstreams", "")))
+            ):
+                continue
+            daily = action_daily_log_lineage(memory_root, action, action.action_id)
+            daily_paths = set(daily.get("paths", [])) if isinstance(daily, dict) else set()
+            if daily is None or not daily_paths or not daily_paths.issubset(receipt_daily_logs):
+                continue
+            upgraded.append(
+                {
+                    **missing_result,
+                    "satisfied": True,
+                    "satisfied_by": "meeting-sync-receipt-lineage",
+                    "reason": None,
+                    "discrepancies": missing_result.get("discrepancies", []),
+                    "lineage_evidence": [
+                        {
+                            "type": "applied-meeting-sync-receipt",
+                            "path": successor.get("path"),
+                            "meeting_instance_id": successor.get("meeting_instance_id"),
+                            "plan_fingerprint": successor.get("plan_fingerprint"),
+                            "generated_intake": successor.get("generated_intake"),
+                        },
+                        daily,
+                    ],
+                }
+            )
+    if not upgraded:
+        return scan
+    upgraded_indexes = {item.get("command_index") for item in upgraded}
+    remaining = [item for item in missing if item.get("command_index") not in upgraded_indexes]
+    satisfied = sorted(
+        [*scan.get("satisfied_commands", []), *upgraded],
+        key=lambda item: int(item.get("command_index") or 0),
+    )
+    read_set = list(scan.get("read_set", []))
+    known_paths = {str(item.get("path")) for item in read_set if isinstance(item, dict)}
+    for item in upgraded:
+        for evidence in item.get("lineage_evidence", []):
+            for relative in evidence.get("paths", []) if isinstance(evidence, dict) else []:
+                path = memory_root / str(relative)
+                if path.is_file() and str(relative) not in known_paths:
+                    read_set.append({"path": str(relative), "fingerprint": sha256_bytes(path.read_bytes())})
+                    known_paths.add(str(relative))
+    body = {
+        "base_snapshot_id": scan.get("snapshot_id"),
+        "successor_fingerprint": successor.get("fingerprint"),
+        "satisfied_commands": satisfied,
+        "missing_commands": remaining,
+        "read_set": read_set,
+    }
+    return {
+        "verification_status": "verified" if not remaining else "partial",
+        "snapshot_id": content_id(body),
+        "base_snapshot_id": scan.get("snapshot_id"),
+        "satisfied_commands": satisfied,
+        "missing_commands": remaining,
+        "read_set": read_set,
+    }
+
+
 def intake_retirement_snapshot(
     project_root: Path,
     memory_root: Path,
@@ -5921,7 +6407,7 @@ def intake_retirement_snapshot(
             "INTAKE_RETIREMENT_TARGET_INVALID",
             "updates-file must be one direct JSON intake under memory/intake/status-sync",
         )
-    payload, updates = load_updates_payload(input_path, "status sync")
+    payload, updates, parser_mode = load_retirement_updates_payload(input_path)
     if not isinstance(payload, dict):
         raise StatusSyncContractError(
             "INTAKE_RETIREMENT_TARGET_INVALID",
@@ -5952,6 +6438,21 @@ def intake_retirement_snapshot(
         )
     successor = retirement_successor_binding(project_root, memory_root, input_path, superseded_by)
     scan = retirement_execution_scan(memory_root, input_path, input_hash, updates)
+    scan["payload_parser"] = parser_mode
+    if successor and successor.get("binding_type") == "meeting-sync-receipt":
+        scan = meeting_successor_execution_scan(memory_root, updates, scan, successor)
+        scan["payload_parser"] = parser_mode
+        if (
+            scan.get("verification_status") != "verified"
+            or scan.get("missing_commands") != []
+            or not scan.get("satisfied_commands")
+        ):
+            raise StatusSyncContractError(
+                "INTAKE_RETIREMENT_SUCCESSOR_INVALID",
+                "meeting-sync successor is bound to the intake but canonical action/fact lineage is not fully verified",
+                {"evidence_scan": scan},
+            )
+        successor["lineage_verification"] = meeting_successor_lineage_binding(scan)
     if reason in {"never-applied", "invalid-proposal"}:
         if scan["verification_status"] == "blocked":
             raise StatusSyncContractError(
@@ -6075,7 +6576,7 @@ def intake_retirement_receipt_valid(
     reason = receipt.get("reason")
     try:
         normalize_required_timestamp(receipt.get("retired_at"), "retirement receipt retired_at")
-        payload, _ = load_updates_payload(input_path, "status sync")
+        payload, _, _ = load_retirement_updates_payload(input_path)
     except (ValueError, TypeError, json.JSONDecodeError):
         return False
     read_set = receipt.get("read_set")
@@ -6103,6 +6604,7 @@ def intake_retirement_receipt_valid(
         and (
             reason == "superseded-by"
             and retirement_successor_binding_valid(memory_root, receipt.get("superseded_by"), input_path)
+            and meeting_successor_lineage_valid(receipt.get("superseded_by"), evidence_scan)
             or reason in {"never-applied", "invalid-proposal"}
             and bool(str(governance.get("justification") or "").strip())
             and receipt.get("superseded_by") is None
@@ -6215,7 +6717,7 @@ def run_retire_intake(args: argparse.Namespace) -> int:
     memory_root = resolve_memory_root(project_root, args.memory_root)
     input_path = require_file(args.updates_file, "updates-file")
     input_hash = sha256_bytes(input_path.read_bytes())
-    _, updates = load_updates_payload(input_path, "status sync")
+    _, updates, _ = load_retirement_updates_payload(input_path)
     existing = existing_intake_retirement_receipt(memory_root, input_path, input_hash, len(updates))
     if existing:
         receipt_path, receipt = existing
@@ -6861,14 +7363,17 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
     memory_root = resolve_memory_root(project_root, args.memory_root)
     input_path = require_file(args.updates_file, "updates-file")
     evidence_path = require_file(args.evidence_file, "evidence-file")
+    original_input_path = (
+        require_file(args.original_updates_file, "original-updates-file")
+        if args.original_updates_file
+        else None
+    )
     input_bytes = input_path.read_bytes()
     input_hash = sha256_bytes(input_bytes)
     try:
-        input_payload = json.loads(input_bytes.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"updates-file must contain valid JSON: {exc}") from exc
-    if not isinstance(input_payload, dict) or not isinstance(input_payload.get("updates"), list) or not input_payload["updates"]:
-        raise ValueError("updates-file must contain a non-empty 'updates' list")
+        input_payload, input_updates = load_updates_payload(input_path, "status sync")
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise ValueError(f"updates-file must contain a valid executable status-sync payload: {exc}") from exc
     try:
         evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
@@ -6877,14 +7382,84 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
     if not attested_by:
         raise ValueError("attested-by must not be empty")
     applied_at = normalize_required_timestamp(args.applied_at, "applied-at")
+    original_bytes: bytes | None = None
+    historical_binding: dict[str, Any] | None = None
     try:
-        migration = historical_evidence(
-            evidence_payload,
-            evidence_path,
-            input_path,
-            input_hash,
-            len(input_payload["updates"]),
-        )
+        if original_input_path is None:
+            migration = historical_evidence(
+                evidence_payload,
+                evidence_path,
+                input_path,
+                input_hash,
+                len(input_updates),
+                memory_root,
+            )
+        else:
+            if original_input_path.resolve() in {input_path.resolve(), evidence_path.resolve()}:
+                raise ValueError("original-updates-file must be distinct from updates-file and evidence-file")
+            original_bytes = original_input_path.read_bytes()
+            original_hash = sha256_bytes(original_bytes)
+            if original_hash == input_hash:
+                raise ValueError(
+                    "historical-input-change migration requires different original and current raw-byte hashes"
+                )
+            try:
+                original_payload, original_updates = load_updates_payload(original_input_path, "status sync")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"original-updates-file must contain a valid executable status-sync payload: {exc}"
+                ) from exc
+            original_canonical = canonical_executable_payload_from_raw(original_payload)
+            current_canonical = canonical_executable_payload_from_raw(input_payload)
+            executable_changed_paths = json_diff_paths(original_canonical, current_canonical)
+            if executable_changed_paths:
+                raise ValueError(
+                    "historical-input-change executable payload differs at: "
+                    + ", ".join(executable_changed_paths)
+                )
+            evidence = historical_input_change_evidence(
+                evidence_payload,
+                evidence_path,
+                input_path,
+                original_hash,
+                len(original_updates),
+                memory_root,
+            )
+            digest = original_hash.removeprefix("sha256:")
+            snapshot_relative = HISTORICAL_INPUT_MIGRATION_EVIDENCE_REL / f"original-{digest}.json"
+            diff_body = {
+                "equal": True,
+                "changed_paths": [],
+                "non_executable_changed_paths": json_diff_paths(original_payload, input_payload),
+            }
+            executable_diff = {**diff_body, "diff_id": content_id(diff_body)}
+            migration = {
+                **evidence,
+                "migration_kind": "historical-input-change",
+                "original_input_path": str(input_path),
+                "original_input_hash": original_hash,
+                "original_input_source_path": str(original_input_path),
+                "original_input_snapshot_path": snapshot_relative.as_posix(),
+                "original_input_snapshot_hash": original_hash,
+                "current_input_hash": input_hash,
+                "original_payload_id": content_id(original_payload),
+                "current_payload_id": content_id(input_payload),
+                "canonical_executable_payload_id": content_id(original_canonical),
+                "executable_diff": executable_diff,
+            }
+            historical_binding = {
+                key: migration[key]
+                for key in (
+                    "migration_kind",
+                    "original_input_hash",
+                    "original_input_snapshot_path",
+                    "original_payload_id",
+                    "current_input_hash",
+                    "current_payload_id",
+                    "canonical_executable_payload_id",
+                    "executable_diff",
+                )
+            }
     except ValueError as exc:
         if not args.dry_run:
             raise
@@ -6899,7 +7474,9 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
                 "memory_root": str(memory_root),
                 "input_path": str(input_path),
                 "input_hash": input_hash,
+                "original_input_path": str(original_input_path) if original_input_path else None,
                 "evidence_path": str(evidence_path),
+                "verified_plan_token": None,
                 "receipt": None,
                 "receipt_path": None,
             },
@@ -6914,6 +7491,7 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
         str(migration["evidence_hash"]),
         applied_at,
         attested_by,
+        historical_binding,
     )
     if not args.dry_run and args.verified_plan_token != plan_token:
         raise ValueError("durable migration requires the verified-plan-token from an unchanged dry-run")
@@ -6921,14 +7499,22 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
         receipt_type="migration",
         input_path=input_path,
         input_hash=input_hash,
-        update_count=len(input_payload["updates"]),
+        update_count=len(input_updates),
         applied_at=None if args.dry_run else applied_at,
         dry_run=args.dry_run,
         migration=migration,
     )
     receipt_path = None if args.dry_run else memory_root / receipt_relative_path(receipt)
     if receipt_path is not None:
+        if original_bytes is not None:
+            snapshot_path = memory_root / str(migration["original_input_snapshot_path"])
+            if snapshot_path.is_file() and snapshot_path.read_bytes() != original_bytes:
+                raise ValueError("historical input snapshot path already contains different bytes")
+            write_bytes_atomic(snapshot_path, original_bytes)
         write_json_atomic(receipt_path, receipt)
+        if durable_status_receipt_record(memory_root, receipt_path) is None:
+            receipt_path.unlink(missing_ok=True)
+            raise ValueError("written migration receipt failed durable self-validation")
     if args.verbose and receipt_path is not None:
         print(f"Wrote migration receipt: {receipt_path}", file=sys.stderr)
     emit(
@@ -7551,7 +8137,10 @@ def main() -> int:
         if args.command == "stale":
             return run_stale(args)
         if args.command == "migrate-receipt":
-            return run_migrate_receipt(args)
+            project_root = require_project_root(args.project_root)
+            memory_root = resolve_memory_root(project_root, args.memory_root)
+            with fact_write_lock(memory_root):
+                return run_migrate_receipt(args)
         if args.command == "repair-wdr-field":
             project_root = require_project_root(args.project_root)
             memory_root = resolve_memory_root(project_root, args.memory_root)
@@ -7590,12 +8179,40 @@ def main() -> int:
             payload.setdefault("verification_status", "blocked")
             payload.setdefault("missing_commands", [])
             payload.setdefault("token", None)
+        if getattr(args, "command", None) == "retire-intake":
+            payload.setdefault("verification_status", "blocked")
+            payload.setdefault("evidence_scan", {
+                "verification_status": "blocked",
+                "error_code": exc.error_code,
+                "error": str(exc),
+                "satisfied_commands": [],
+                "missing_commands": [],
+                "read_set": [],
+            })
+            payload.setdefault("token", None)
+            payload.setdefault("receipt", None)
+            payload.setdefault("receipt_path", None)
         emit(payload, getattr(args, "output", None))
         return 2
     except Exception as exc:
         payload = {"ok": False, "error": str(exc)}
         if getattr(args, "command", None) == "reconcile-intake":
             payload.update({"verification_status": "blocked", "missing_commands": [], "token": None})
+        if getattr(args, "command", None) == "retire-intake":
+            payload.update({
+                "verification_status": "blocked",
+                "evidence_scan": {
+                    "verification_status": "blocked",
+                    "error_code": "INTAKE_RETIREMENT_EVIDENCE_UNAVAILABLE",
+                    "error": str(exc),
+                    "satisfied_commands": [],
+                    "missing_commands": [],
+                    "read_set": [],
+                },
+                "token": None,
+                "receipt": None,
+                "receipt_path": None,
+            })
         emit(payload, getattr(args, "output", None))
         return 2
 

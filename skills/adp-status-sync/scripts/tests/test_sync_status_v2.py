@@ -1737,7 +1737,421 @@ class StatusSyncV2Tests(unittest.TestCase):
             self.assertEqual(applied["receipt"]["receipt_type"], "intake-retirement")
             self.assertEqual(applied["receipt"]["mode"], "retire-intake")
             self.assertTrue(Path(applied["receipt_path"]).is_file())
-            self.assertIn(module.INTAKE_RETIREMENT_RECEIPT_REL.as_posix(), applied["receipt_path"])
+            receipt_relative = Path(applied["receipt_path"]).resolve().relative_to((root / MEMORY_REL).resolve())
+            self.assertEqual(
+                receipt_relative.parts[: len(module.INTAKE_RETIREMENT_RECEIPT_REL.parts)],
+                module.INTAKE_RETIREMENT_RECEIPT_REL.parts,
+            )
+
+    def test_retirement_accepts_strictly_bound_applied_meeting_sync_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-MEETING-001")
+            memory_root = root / MEMORY_REL
+            ledger = memory_root / "actions/action-ledger.md"
+            revision = int(self.action_row(ledger, "ACT-MEETING-001")["Action Revision"])
+            self.patch_action(
+                root,
+                "l1-checkout",
+                "ACT-MEETING-001",
+                "CMD-PATCH-ACT-MEETING-001",
+                revision,
+                {"due_or_trigger": "Monday"},
+            )
+            intake_root = memory_root / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            meeting_instance_id = "meeting-successor-20260806-100000"
+            plan_fingerprint = "sha256:" + "a" * 64
+            intake = intake_root / "meeting-actions.json"
+            intake.write_text(
+                json.dumps(
+                    {
+                        "generated_by": "adp-meeting-sync",
+                        "meeting": {
+                            "meeting_instance_id": meeting_instance_id,
+                            "plan_fingerprint": plan_fingerprint,
+                        },
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "source": "status sync",
+                                "actions": [
+                                    {
+                                        "action_id": "ACT-MEETING-001",
+                                        "status": "open",
+                                        "owner": "FDE-A",
+                                        "workstream": "l1-checkout",
+                                        "action": "Publish evidence for l1-checkout",
+                                        "source": "meeting#1",
+                                        "due": "Friday",
+                                        "closure_criteria": "Evidence link is reviewed",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            archive = memory_root / "meetings/2026-08-06-meeting-successor.md"
+            daily = Path(created["updates"][0]["daily_log"])
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            archive.write_text("# Meeting\n", encoding="utf-8")
+
+            def portable(path: Path) -> str:
+                relative = path.resolve().relative_to(memory_root.resolve()).as_posix().replace("/", "\\")
+                return rf"D:\portable\project\_bmad-output\adp\memory\{relative}"
+
+            receipt_root = memory_root / "meetings/receipts"
+            receipt_root.mkdir(parents=True, exist_ok=True)
+            meeting_receipt = receipt_root / f"{meeting_instance_id}.json"
+            meeting_receipt.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "meeting_instance_id": meeting_instance_id,
+                        "plan_fingerprint": plan_fingerprint,
+                        "status": "applied",
+                        "applied_at": "2026-08-06T10:01:00+08:00",
+                        "archive": "meetings/2026-08-06-meeting-successor.md",
+                        "result": {
+                            "ok": True,
+                            "dry_run": False,
+                            "meeting": {
+                                "meeting_instance_id": meeting_instance_id,
+                                "plan_fingerprint": plan_fingerprint,
+                            },
+                            "touched": {
+                                "status_sync_intake_files": [portable(intake)],
+                                "daily_logs": [portable(daily)],
+                                "workstream_records": [
+                                    portable(memory_root / "workstreams/l1-checkout/delivery-record.md")
+                                ],
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            _, preview = self.run_cli(
+                "retire-intake",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--reason",
+                "superseded-by",
+                "--superseded-by",
+                str(meeting_receipt),
+                "--principal",
+                "PMO-A",
+                "--dry-run",
+            )
+            self.assertEqual(preview["verification_status"], "verified")
+            self.assertEqual(preview["superseded_by"]["binding_type"], "meeting-sync-receipt")
+            self.assertEqual(preview["superseded_by"]["generated_intake"]["path"], "intake/status-sync/meeting-actions.json")
+            self.assertEqual(preview["superseded_by"]["lineage_verification"]["command_count"], 1)
+            self.assertEqual(
+                preview["evidence_scan"]["satisfied_commands"][0]["satisfied_by"],
+                "meeting-sync-receipt-lineage",
+            )
+
+            _, applied = self.run_cli(
+                "retire-intake",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--reason",
+                "superseded-by",
+                "--superseded-by",
+                str(meeting_receipt),
+                "--principal",
+                "PMO-A",
+                "--token",
+                preview["token"],
+            )
+            self.assertEqual(applied["receipt"]["status"], "retired")
+
+    def test_meeting_sync_successor_rejects_unbound_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory_root = root / MEMORY_REL
+            intake_root = memory_root / "intake/status-sync"
+            receipt_root = memory_root / "meetings/receipts"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            receipt_root.mkdir(parents=True, exist_ok=True)
+            intake = intake_root / "target.json"
+            other = intake_root / "other.json"
+            payload = {
+                "generated_by": "adp-meeting-sync",
+                "meeting": {"meeting_instance_id": "m-1", "plan_fingerprint": "sha256:" + "b" * 64},
+                "updates": [{"id": "l1-checkout", "progress": "planned"}],
+            }
+            intake.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            other.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            archive = memory_root / "meetings/archive.md"
+            daily = memory_root / "daily/2026-08-06.md"
+            record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+            for path in (archive, daily, record):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x\n", encoding="utf-8")
+            receipt = receipt_root / "m-1.json"
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "meeting_instance_id": "m-1",
+                        "plan_fingerprint": "sha256:" + "b" * 64,
+                        "status": "applied",
+                        "applied_at": "2026-08-06T10:01:00Z",
+                        "archive": "meetings/archive.md",
+                        "result": {
+                            "ok": True,
+                            "dry_run": False,
+                            "meeting": {"meeting_instance_id": "m-1", "plan_fingerprint": "sha256:" + "b" * 64},
+                            "touched": {
+                                "status_sync_intake_files": [str(other)],
+                                "daily_logs": [str(daily)],
+                                "workstream_records": [str(record)],
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            completed, result = self.run_cli(
+                "retire-intake",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--reason",
+                "superseded-by",
+                "--superseded-by",
+                str(receipt),
+                "--principal",
+                "PMO-A",
+                "--dry-run",
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["error_code"], "INTAKE_RETIREMENT_SUCCESSOR_INVALID")
+            self.assertEqual(result["verification_status"], "blocked")
+
+    def test_invalid_proposal_retirement_scans_legacy_terminal_actions_without_action_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            self.create_action(root, "l1-checkout", "ACT-UNRELATED-001")
+            intake_root = root / MEMORY_REL / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            intake = intake_root / "legacy-invalid-proposal.json"
+            intake.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "status": "done",
+                                        "owner": "Legacy Owner",
+                                        "workstream": "l1-checkout",
+                                        "action": "Legacy misclassified fact",
+                                        "source": "meeting#legacy",
+                                        "due": "historical",
+                                        "closure_criteria": "Legacy note exists",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _, preview = self.run_cli(
+                "retire-intake",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--reason",
+                "invalid-proposal",
+                "--justification",
+                "Meeting items were reclassified as facts and this proposal must not be replayed",
+                "--principal",
+                "PMO-A",
+                "--dry-run",
+            )
+            self.assertEqual(preview["verification_status"], "verified")
+            self.assertEqual(preview["evidence_scan"]["payload_parser"], "legacy-terminal-action-scan")
+            self.assertEqual(preview["evidence_scan"]["satisfied_commands"], [])
+            self.assertTrue(preview["evidence_scan"]["missing_commands"])
+
+    def test_unscannable_legacy_retirement_returns_dedicated_blocked_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            intake_root = root / MEMORY_REL / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            intake = intake_root / "unscannable.json"
+            intake.write_text(
+                json.dumps({"updates": [{"id": "l1-checkout", "actions": [{"status": "done"}]}]}) + "\n",
+                encoding="utf-8",
+            )
+            completed, result = self.run_cli(
+                "retire-intake",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--reason",
+                "invalid-proposal",
+                "--justification",
+                "Legacy proposal was invalid",
+                "--principal",
+                "PMO-A",
+                "--dry-run",
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(result["error_code"], "INTAKE_RETIREMENT_LEGACY_SCAN_BLOCKED")
+            self.assertEqual(result["verification_status"], "blocked")
+            self.assertEqual(result["evidence_scan"]["verification_status"], "blocked")
+            self.assertIsNone(result["token"])
+
+    def test_historical_input_change_migration_binds_original_current_payload_and_diff(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory_root = root / MEMORY_REL
+            current = memory_root / "intake/status-sync/changed.json"
+            original = root / "recovered/original-changed.json"
+            evidence = root / "historical-execute-report.json"
+            current.parent.mkdir(parents=True, exist_ok=True)
+            original.parent.mkdir(parents=True, exist_ok=True)
+            executable = [{"id": "l1-checkout", "progress": "Applied", "source": "meeting#1"}]
+            original_payload = {
+                "generated_by": "adp-meeting-sync",
+                "meeting": {"title": "Original title"},
+                "updates": executable,
+            }
+            current_payload = {
+                "generated_by": "adp-meeting-sync",
+                "meeting": {"title": "Corrected title", "classification": "fact-reviewed"},
+                "updates": executable,
+            }
+            original.write_text(json.dumps(original_payload, indent=2) + "\n", encoding="utf-8")
+            current.write_text(json.dumps(current_payload, indent=2) + "\n", encoding="utf-8")
+            original_hash = file_id(original)
+            current_hash = file_id(current)
+            portable_input_path = (
+                r"D:\portable\project\_bmad-output\adp\memory\intake\status-sync\changed.json"
+            )
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_path": portable_input_path,
+                        "input_hash": original_hash,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            command = [
+                "migrate-receipt",
+                str(root),
+                "--updates-file",
+                str(current),
+                "--original-updates-file",
+                str(original),
+                "--evidence-file",
+                str(evidence),
+                "--applied-at",
+                "2026-07-20T10:00:00+08:00",
+                "--attested-by",
+                "PMO-A",
+            ]
+            _, preview = self.run_cli(*command, "--dry-run")
+            self.assertEqual(preview["verification_status"], "verified")
+            migration = preview["receipt"]["migration"]
+            self.assertEqual(migration["migration_kind"], "historical-input-change")
+            self.assertEqual(migration["original_input_hash"], original_hash)
+            self.assertEqual(migration["current_input_hash"], current_hash)
+            self.assertTrue(migration["executable_diff"]["equal"])
+            self.assertEqual(migration["executable_diff"]["changed_paths"], [])
+            self.assertIn("/meeting/title", migration["executable_diff"]["non_executable_changed_paths"])
+
+            _, applied = self.run_cli(*command, "--verified-plan-token", preview["verified_plan_token"])
+            receipt_path = Path(applied["receipt_path"])
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            snapshot = memory_root / receipt["migration"]["original_input_snapshot_path"]
+            self.assertEqual(snapshot.read_bytes(), original.read_bytes())
+            self.assertEqual(receipt["input_hash"], current_hash)
+            self.assertEqual(receipt["migration"]["original_payload_id"], canonical_id(original_payload))
+            self.assertEqual(receipt["migration"]["current_payload_id"], canonical_id(current_payload))
+            self.assertIsNotNone(module.durable_status_receipt_record(memory_root, receipt_path))
+
+    def test_historical_input_change_migration_fails_closed_on_executable_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory_root = root / MEMORY_REL
+            current = memory_root / "intake/status-sync/changed-owner.json"
+            original = root / "recovered/original-owner.json"
+            evidence = root / "historical-owner-execute-report.json"
+            current.parent.mkdir(parents=True, exist_ok=True)
+            original.parent.mkdir(parents=True, exist_ok=True)
+            base_action = {
+                "action": "Confirm governed migration",
+                "status": "open",
+                "owner": "Owner A",
+                "source": "meeting#1",
+                "due": "Friday",
+                "closure_criteria": "Receipt is reviewed",
+            }
+            original_payload = {"updates": [{"id": "l1-checkout", "actions": [base_action]}]}
+            changed_action = {**base_action, "owner": "Owner B"}
+            current_payload = {"updates": [{"id": "l1-checkout", "actions": [changed_action]}]}
+            original.write_text(json.dumps(original_payload) + "\n", encoding="utf-8")
+            current.write_text(json.dumps(current_payload) + "\n", encoding="utf-8")
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_path": str(current.resolve()),
+                        "input_hash": file_id(original),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _, preview = self.run_cli(
+                "migrate-receipt",
+                str(root),
+                "--updates-file",
+                str(current),
+                "--original-updates-file",
+                str(original),
+                "--evidence-file",
+                str(evidence),
+                "--applied-at",
+                "2026-07-20T10:00:00+08:00",
+                "--attested-by",
+                "PMO-A",
+                "--dry-run",
+            )
+            self.assertEqual(preview["verification_status"], "unverified")
+            self.assertIn("/updates/0/actions/0/owner", preview["reason"])
+            self.assertIsNone(preview["verified_plan_token"])
+            self.assertIsNone(preview["receipt"])
 
     def test_never_applied_retirement_rejects_canonical_execution_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1580,6 +1580,145 @@ class AdpStateAuditTests(unittest.TestCase):
             reopened = {item["path"] for item in PENDING_STATUS_SYNC_INTAKES(memory_root)}
             self.assertIn("intake/status-sync/old.json", reopened)
 
+    def test_meeting_sync_successor_retirement_is_auditable_and_receipt_tamper_reopens_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "_bmad-output/adp/memory"
+            record = memory_root / "workstreams/l1-checkout/delivery-record.md"
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_text(RECORD, encoding="utf-8")
+            create = project_root / "create-action.json"
+            create.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "operation": "create",
+                                        "command_id": "CMD-MEETING-AUDIT-001",
+                                        "action_id": "ACT-MEETING-AUDIT-001",
+                                        "status": "open",
+                                        "owner": "FDE-A",
+                                        "action": "Publish meeting audit evidence",
+                                        "source": "meeting#audit",
+                                        "due": "Friday",
+                                        "closure_criteria": "Evidence is reviewed",
+                                        "evidence": [{"source": "meeting#audit"}],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [sys.executable, str(STATUS_SYNC_SCRIPT), "update", str(project_root), "--updates-file", str(create)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            meeting_instance_id = "meeting-audit-20260806-100000"
+            plan_fingerprint = "sha256:" + "c" * 64
+            intake = memory_root / "intake/status-sync/meeting-audit.json"
+            intake.parent.mkdir(parents=True, exist_ok=True)
+            intake_payload = {
+                "generated_by": "adp-meeting-sync",
+                "meeting": {
+                    "meeting_instance_id": meeting_instance_id,
+                    "plan_fingerprint": plan_fingerprint,
+                },
+                "updates": [
+                    {
+                        "id": "l1-checkout",
+                        "actions": [
+                            {
+                                "action_id": "ACT-MEETING-AUDIT-001",
+                                "status": "open",
+                                "owner": "FDE-A",
+                                "workstream": "l1-checkout",
+                                "action": "Publish meeting audit evidence",
+                                "source": "meeting#audit",
+                                "due": "Friday",
+                                "closure_criteria": "Evidence is reviewed",
+                            }
+                        ],
+                    }
+                ],
+            }
+            intake.write_text(json.dumps(intake_payload) + "\n", encoding="utf-8")
+            archive = memory_root / "meetings/meeting-audit.md"
+            daily = memory_root / "daily/2026-08-06.md"
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            daily.parent.mkdir(parents=True, exist_ok=True)
+            archive.write_text("# Meeting\n", encoding="utf-8")
+            daily.write_text("# Daily\n", encoding="utf-8")
+            meeting_receipt = memory_root / f"meetings/receipts/{meeting_instance_id}.json"
+            meeting_receipt.parent.mkdir(parents=True, exist_ok=True)
+            meeting_receipt.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "meeting_instance_id": meeting_instance_id,
+                        "plan_fingerprint": plan_fingerprint,
+                        "status": "applied",
+                        "applied_at": "2026-08-06T10:01:00Z",
+                        "archive": "meetings/meeting-audit.md",
+                        "result": {
+                            "ok": True,
+                            "dry_run": False,
+                            "meeting": {
+                                "meeting_instance_id": meeting_instance_id,
+                                "plan_fingerprint": plan_fingerprint,
+                            },
+                            "touched": {
+                                "status_sync_intake_files": [str(intake)],
+                                "daily_logs": [str(daily)],
+                                "workstream_records": [str(record)],
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(STATUS_SYNC_SCRIPT),
+                "retire-intake",
+                str(project_root),
+                "--updates-file",
+                str(intake),
+                "--reason",
+                "superseded-by",
+                "--superseded-by",
+                str(meeting_receipt),
+                "--principal",
+                "PMO-A",
+            ]
+            preview = json.loads(subprocess.run(
+                [*command, "--dry-run"], check=True, capture_output=True, text=True, encoding="utf-8"
+            ).stdout)
+            applied = json.loads(subprocess.run(
+                [*command, "--token", preview["token"]],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            ).stdout)
+            self.assertTrue(
+                VALID_INTAKE_RETIREMENT_RECEIPT(applied["receipt"], intake, intake_payload, memory_root)
+            )
+
+            meeting_receipt.write_text(meeting_receipt.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            self.assertFalse(
+                VALID_INTAKE_RETIREMENT_RECEIPT(applied["receipt"], intake, intake_payload, memory_root)
+            )
+
     def test_noncanonical_cross_link_warning_keeps_wdr_path_and_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -1722,6 +1861,86 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertEqual(first_audit["findings"]["closure"]["unconsumed_intake_files"], [])
 
             evidence.write_text(evidence.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            second = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
+            second_audit = json.loads(Path(second["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["path"] for item in second_audit["findings"]["closure"]["unconsumed_intake_files"]],
+                ["intake/status-sync/pending-actions.json"],
+            )
+
+    def test_historical_input_change_migration_consumes_current_intake_until_snapshot_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            intake = memory_root / "intake/status-sync/pending-actions.json"
+            original = project_root / "recovered/pending-actions-original.json"
+            evidence = project_root / "pending-actions-execute-report.json"
+            original.parent.mkdir(parents=True, exist_ok=True)
+            executable_updates = [{"id": "l1-checkout", "next_actions": ["Confirm payment owner"]}]
+            original_payload = {
+                "status": "pending",
+                "generated_by": "adp-meeting-sync",
+                "meeting": {"title": "Original meeting title"},
+                "updates": executable_updates,
+            }
+            current_payload = {
+                "status": "pending",
+                "generated_by": "adp-meeting-sync",
+                "meeting": {"title": "Corrected meeting title", "classification": "fact-reviewed"},
+                "updates": executable_updates,
+            }
+            original.write_text(json.dumps(original_payload) + "\n", encoding="utf-8")
+            intake.write_text(json.dumps(current_payload) + "\n", encoding="utf-8")
+            original_hash = f"sha256:{hashlib.sha256(original.read_bytes()).hexdigest()}"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "update",
+                        "dry_run": False,
+                        "updates": [{"ok": True}],
+                        "input_path": str(intake.resolve()),
+                        "input_hash": original_hash,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(STATUS_SYNC_SCRIPT),
+                "migrate-receipt",
+                str(project_root),
+                "--updates-file",
+                str(intake),
+                "--original-updates-file",
+                str(original),
+                "--evidence-file",
+                str(evidence),
+                "--applied-at",
+                "2026-07-10T10:00:00+08:00",
+                "--attested-by",
+                "PMO-A",
+            ]
+            preview = json.loads(subprocess.run(
+                [*command, "--dry-run"], check=True, capture_output=True, text=True, encoding="utf-8"
+            ).stdout)
+            applied = json.loads(subprocess.run(
+                [*command, "--verified-plan-token", preview["verified_plan_token"]],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            ).stdout)
+            receipt = applied["receipt"]
+            self.assertTrue(SUCCESSFUL_RECEIPT_PAYLOAD(receipt, intake, current_payload))
+
+            first = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
+            first_audit = json.loads(Path(first["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(first_audit["findings"]["closure"]["unconsumed_intake_files"], [])
+
+            snapshot = memory_root / receipt["migration"]["original_input_snapshot_path"]
+            snapshot.write_text(snapshot.read_text(encoding="utf-8") + " ", encoding="utf-8")
             second = json.loads(self.run_script(project_root, "--as-of", "2026-07-10").stdout)
             second_audit = json.loads(Path(second["outputs"]["json"]).read_text(encoding="utf-8"))
             self.assertEqual(
