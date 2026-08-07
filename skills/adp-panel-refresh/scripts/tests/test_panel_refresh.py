@@ -1575,6 +1575,256 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(rebound["status"], "planned")
             self.assertEqual(rebound["selection_policy_id"], validated["selection_policy_id"])
 
+    def test_resume_revalidates_policy_against_plan_staged_flow_graph(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            live_graph = self.scaffold_policy_sources(memory)
+            live_graph_path = memory / "views/flow-graph.json"
+            live_graph["flow_graph_id"] = "sha256:" + "a" * 64
+            module.atomic_json(live_graph_path, live_graph)
+            staged_graph = {
+                "flow_graph_id": "sha256:" + "b" * 64,
+                "topology": {
+                    "nodes": [{"node_id": "N-1"}, {"node_id": "N-2"}],
+                    "edges": [{"edge_id": "E-1", "predecessor": "N-1", "target": "N-2"}],
+                },
+                "overlays": {"scopes": [{"scope_id": "S-1", "allocations": []}]},
+            }
+            plan_args = module.parse_args(
+                ["plan", str(root), "--force-full", "--as-of", "2026-07-30"]
+            )
+            planned = module.plan_refresh(plan_args, root, memory)
+            plan_path = Path(planned["plan_path"])
+            executed: list[str] = []
+
+            def fake_execute(node, args, plan, project_root, staged_root, workspace, results):
+                executed.append(node)
+                result: dict = {"ok": True, "status": "completed", "node": node}
+                if node == "flow-graph":
+                    path = staged_root / "views/flow-graph.json"
+                    module.atomic_json(path, staged_graph)
+                    result.update(
+                        {
+                            "flow_graph_id": staged_graph["flow_graph_id"],
+                            "outputs": {"current": str(path)},
+                        }
+                    )
+                if node == "management-panel":
+                    result["panel_id"] = "panel-staged-policy"
+                result_path = workspace / "results" / (node.replace(":", "-") + ".json")
+                module.atomic_json(result_path, result)
+                return result
+
+            first_args = module.parse_args(
+                ["apply", str(root), "--plan", str(plan_path)]
+            )
+            with patch.object(module, "execute_node", side_effect=fake_execute):
+                waiting = module.apply_refresh(first_args, root, memory)
+
+            self.assertEqual(waiting["status"], "awaiting-policy")
+            self.assertEqual(
+                ["state-audit", "program-status", "roadmap", "flow-graph"],
+                executed,
+            )
+            self.assertEqual(live_graph, json.loads(live_graph_path.read_text(encoding="utf-8")))
+
+            policy_args = module.parse_args(
+                [
+                    "policy",
+                    str(root),
+                    "--selection-policy",
+                    waiting["candidate_policy_path"],
+                ]
+            )
+            validated = module.prepare_policy(policy_args, root, memory)
+            self.assertEqual(validated["flow_graph_id"], staged_graph["flow_graph_id"])
+            durable_policy_path = Path(validated["selection_policy"])
+            durable_policy_before = durable_policy_path.read_bytes()
+            executed.clear()
+            original_atomic_publish = module.atomic_publish
+            publication_observations: list[str] = []
+
+            def assert_live_graph_then_publish(*publish_args, **publish_kwargs):
+                current = json.loads(live_graph_path.read_text(encoding="utf-8"))
+                publication_observations.append(str(current["flow_graph_id"]))
+                self.assertEqual(live_graph["flow_graph_id"], current["flow_graph_id"])
+                return original_atomic_publish(*publish_args, **publish_kwargs)
+
+            resume_args = module.parse_args(
+                ["apply", str(root), "--plan", str(plan_path)]
+            )
+            with (
+                patch.object(module, "execute_node", side_effect=fake_execute),
+                patch.object(
+                    module,
+                    "validate_staged_publication",
+                    return_value={"ok": True, "status": "validated"},
+                ),
+                patch.object(module, "atomic_publish", side_effect=assert_live_graph_then_publish),
+                patch.object(
+                    module,
+                    "inspect_refresh",
+                    return_value={
+                        "artifact_integrity": "pass",
+                        "business_freshness": "fresh",
+                        "publication_eligibility": "eligible",
+                    },
+                ),
+            ):
+                published = module.apply_refresh(resume_args, root, memory)
+                reused = module.apply_refresh(resume_args, root, memory)
+
+            self.assertEqual(published["status"], "published")
+            self.assertTrue(reused["reused"])
+            self.assertEqual(published["receipt_id"], reused["receipt_id"])
+            self.assertEqual(
+                ["meeting-pack:fde-morning", "meeting-pack:business-biweekly", "management-panel"],
+                executed,
+            )
+            self.assertEqual([live_graph["flow_graph_id"]], publication_observations)
+            self.assertEqual(durable_policy_before, durable_policy_path.read_bytes())
+            self.assertEqual(
+                staged_graph["flow_graph_id"],
+                json.loads(live_graph_path.read_text(encoding="utf-8"))["flow_graph_id"],
+            )
+
+    def test_staged_policy_revalidation_is_plan_bound_and_fails_closed(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            live_graph = self.scaffold_policy_sources(memory)
+            live_graph["flow_graph_id"] = "sha256:" + "1" * 64
+            module.atomic_json(memory / "views/flow-graph.json", live_graph)
+            plan = {
+                "refresh_id": "refresh-" + "a" * 24,
+                "plan_id": "sha256:" + "b" * 64,
+                "nodes": [
+                    {
+                        "instance_key": "flow-graph",
+                        "status": "completed",
+                        "output": None,
+                        "error": None,
+                    }
+                ],
+            }
+            workspace = module.workspace_for(memory, plan["refresh_id"])
+            staged_root = module.prepare_staging(memory, workspace, plan)
+            staged_graph = json.loads(json.dumps(live_graph))
+            staged_graph["flow_graph_id"] = "sha256:" + "2" * 64
+            staged_graph_path = staged_root / "views/flow-graph.json"
+            module.atomic_json(staged_graph_path, staged_graph)
+            result_path = workspace / "results/flow-graph.json"
+            flow_result = {
+                "ok": True,
+                "status": "generated",
+                "flow_graph_id": staged_graph["flow_graph_id"],
+                "outputs": {"current": str(staged_graph_path)},
+            }
+            module.atomic_json(result_path, flow_result)
+            plan["nodes"][0]["output"] = str(result_path)
+            policy = module.policy_candidates(staged_root)["candidate_policy"]
+            policy_path = root / "policy.json"
+
+            def bind_policy(candidate: dict) -> None:
+                module.atomic_json(policy_path, candidate)
+                plan["selection_policy"] = str(policy_path)
+                plan["selection_policy_id"] = module.content_id(candidate)
+
+            bind_policy(policy)
+            context = module.validate_plan_selection_policy(root, memory, plan)
+            self.assertEqual(staged_graph["flow_graph_id"], context["flow_graph_id"])
+
+            for wrong_graph_id in (
+                live_graph["flow_graph_id"],
+                "sha256:" + "3" * 64,
+            ):
+                with self.subTest(wrong_graph_id=wrong_graph_id):
+                    wrong_policy = json.loads(json.dumps(policy))
+                    wrong_policy["flow_graph_id"] = wrong_graph_id
+                    bind_policy(wrong_policy)
+                    with self.assertRaises(module.RefreshError) as raised:
+                        module.validate_plan_selection_policy(root, memory, plan)
+                    self.assertEqual("SELECTION_POLICY_INVALID", raised.exception.code)
+
+            bind_policy(policy)
+            expected_policy_id = plan["selection_policy_id"]
+            changed_policy = json.loads(json.dumps(policy))
+            changed_policy["shareable"] = {"visible_node_ids": [], "visible_edge_ids": []}
+            module.atomic_json(policy_path, changed_policy)
+            with self.assertRaises(module.RefreshError) as changed:
+                module.validate_plan_selection_policy(root, memory, plan)
+            self.assertEqual("SELECTION_POLICY_CHANGED_SINCE_PLAN", changed.exception.code)
+            self.assertEqual(expected_policy_id, plan["selection_policy_id"])
+
+            bind_policy(policy)
+            (workspace / "plan-id").write_text("sha256:" + "c" * 64 + "\n", encoding="utf-8")
+            with self.assertRaises(module.RefreshError) as wrong_plan:
+                module.validate_plan_selection_policy(root, memory, plan)
+            self.assertEqual("REFRESH_STAGING_CONFLICT", wrong_plan.exception.code)
+            (workspace / "plan-id").write_text(plan["plan_id"] + "\n", encoding="utf-8")
+
+            original_refresh_id = plan["refresh_id"]
+            plan["refresh_id"] = "refresh-" + "d" * 24
+            with self.assertRaises(module.RefreshError) as wrong_refresh:
+                module.validate_plan_selection_policy(root, memory, plan)
+            self.assertEqual("REFRESH_STAGING_INVALID", wrong_refresh.exception.code)
+            plan["refresh_id"] = original_refresh_id
+
+            original_node_output = plan["nodes"][0]["output"]
+            plan["nodes"][0]["output"] = str(root / "foreign-flow-result.json")
+            with self.assertRaises(module.RefreshError) as wrong_node_result:
+                module.validate_plan_selection_policy(root, memory, plan)
+            self.assertEqual("REFRESH_RESULT_INVALID", wrong_node_result.exception.code)
+            plan["nodes"][0]["output"] = original_node_output
+
+            invalid_result = dict(flow_result)
+            invalid_result["flow_graph_id"] = "sha256:" + "3" * 64
+            module.atomic_json(result_path, invalid_result)
+            with self.assertRaises(module.RefreshError) as wrong_result:
+                module.validate_plan_selection_policy(root, memory, plan)
+            self.assertEqual("REFRESH_RESULT_INVALID", wrong_result.exception.code)
+
+            module.atomic_json(result_path, flow_result)
+            invalid_graph = dict(staged_graph)
+            invalid_graph["flow_graph_id"] = "sha256:" + "4" * 64
+            module.atomic_json(staged_graph_path, invalid_graph)
+            with self.assertRaises(module.RefreshError) as wrong_staged_graph:
+                module.validate_plan_selection_policy(root, memory, plan)
+            self.assertEqual("REFRESH_RESULT_INVALID", wrong_staged_graph.exception.code)
+
+    def test_policy_only_plan_revalidates_against_live_flow_graph(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            live_graph = self.scaffold_policy_sources(memory)
+            live_graph["flow_graph_id"] = "sha256:" + "a" * 64
+            module.atomic_json(memory / "views/flow-graph.json", live_graph)
+            policy = module.policy_candidates(memory)["candidate_policy"]
+            policy_path = root / "live-policy.json"
+            module.atomic_json(policy_path, policy)
+            plan = {
+                "refresh_id": "refresh-" + "a" * 24,
+                "plan_id": "sha256:" + "b" * 64,
+                "nodes": [
+                    {
+                        "instance_key": "management-panel",
+                        "status": "pending",
+                        "output": None,
+                        "error": None,
+                    }
+                ],
+                "selection_policy": str(policy_path),
+                "selection_policy_id": module.content_id(policy),
+            }
+
+            context = module.validate_plan_selection_policy(root, memory, plan)
+
+            self.assertEqual(live_graph["flow_graph_id"], context["flow_graph_id"])
+
     def test_policy_change_invalidates_panel_when_fact_fingerprints_are_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

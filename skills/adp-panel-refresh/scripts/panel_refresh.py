@@ -1580,6 +1580,138 @@ def validate_plan_freshness(memory_root: Path, plan: dict[str, Any], plan_path: 
         )
 
 
+def flow_graph_node_state(plan: dict[str, Any]) -> dict[str, Any] | None:
+    nodes = plan.get("nodes")
+    if not isinstance(nodes, list):
+        raise RefreshError("REFRESH_PLAN_INVALID", "refresh plan nodes must be an array")
+    matches = [
+        node
+        for node in nodes
+        if isinstance(node, dict) and node.get("instance_key") == "flow-graph"
+    ]
+    if len(matches) > 1:
+        raise RefreshError("REFRESH_PLAN_INVALID", "refresh plan contains duplicate flow-graph nodes")
+    return matches[0] if matches else None
+
+
+def selection_policy_validation_root(memory_root: Path, plan: dict[str, Any]) -> Path | None:
+    flow_node = flow_graph_node_state(plan)
+    if flow_node is None:
+        return memory_root
+    if flow_node.get("status") != "completed":
+        return None
+
+    workspace = workspace_for(memory_root, str(plan.get("refresh_id") or ""))
+    plan_id = plan.get("plan_id")
+    if not workspace.is_dir():
+        publication = (
+            committed_publication_for_plan(memory_root, plan_id)
+            if isinstance(plan_id, str) and plan_id
+            else None
+        )
+        if publication:
+            return memory_root
+        raise RefreshError(
+            "REFRESH_STAGING_INVALID",
+            "completed flow-graph node is missing its plan-bound staging workspace",
+        )
+    metadata = workspace / "plan-id"
+    if (
+        not isinstance(plan_id, str)
+        or not plan_id
+        or not metadata.is_file()
+        or metadata.is_symlink()
+    ):
+        raise RefreshError(
+            "REFRESH_STAGING_INVALID",
+            "completed flow-graph node is missing its workspace plan binding",
+        )
+    try:
+        workspace_plan_id = metadata.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RefreshError(
+            "REFRESH_STAGING_INVALID",
+            "cannot read the staged workspace plan binding",
+        ) from exc
+    if workspace_plan_id != plan_id:
+        raise RefreshError(
+            "REFRESH_STAGING_CONFLICT",
+            "completed flow-graph staging belongs to another refresh plan",
+        )
+
+    staged_root = workspace / "memory"
+    graph_path = staged_root / "views/flow-graph.json"
+    result_path = workspace / "results/flow-graph.json"
+    raw_node_output = flow_node.get("output")
+    if (
+        not staged_root.is_dir()
+        or staged_root.is_symlink()
+        or not graph_path.is_file()
+        or graph_path.is_symlink()
+        or not result_path.is_file()
+        or result_path.is_symlink()
+        or not isinstance(raw_node_output, str)
+        or not raw_node_output
+        or not Path(raw_node_output).is_absolute()
+        or Path(raw_node_output).resolve() != result_path.resolve()
+    ):
+        raise RefreshError(
+            "REFRESH_RESULT_INVALID",
+            "completed flow-graph node is not bound to the current staged graph result",
+            node="flow-graph",
+        )
+
+    result = load_json(result_path)
+    outputs = result.get("outputs")
+    raw_current = outputs.get("current") if isinstance(outputs, dict) else None
+    graph = load_json(graph_path)
+    staged_graph_id = graph.get("flow_graph_id")
+    if (
+        result.get("ok") is not True
+        or not isinstance(raw_current, str)
+        or not raw_current
+        or not Path(raw_current).is_absolute()
+        or Path(raw_current).resolve() != graph_path.resolve()
+        or not isinstance(staged_graph_id, str)
+        or not staged_graph_id
+        or result.get("flow_graph_id") != staged_graph_id
+    ):
+        raise RefreshError(
+            "REFRESH_RESULT_INVALID",
+            "completed flow-graph result identity does not match the current staged graph",
+            node="flow-graph",
+        )
+    return staged_root
+
+
+def validate_plan_selection_policy(
+    project_root: Path,
+    memory_root: Path,
+    plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    raw_policy_path = plan.get("selection_policy")
+    if not isinstance(raw_policy_path, str) or not raw_policy_path:
+        return None
+    policy_path = resolve_external_path(project_root, raw_policy_path)
+    policy = load_json(policy_path)
+    policy_id = content_id(policy)
+    if policy_id != plan.get("selection_policy_id"):
+        raise RefreshError(
+            "SELECTION_POLICY_CHANGED_SINCE_PLAN",
+            "selection policy changed after refresh planning; run plan again",
+        )
+    validation_root = selection_policy_validation_root(memory_root, plan)
+    if validation_root is None:
+        return None
+    _, validated_policy_id, context = validate_policy(validation_root, policy_path)
+    if validated_policy_id != policy_id:
+        raise RefreshError(
+            "SELECTION_POLICY_CHANGED_SINCE_PLAN",
+            "selection policy changed while it was being revalidated",
+        )
+    return context
+
+
 def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path) -> dict[str, Any]:
     plan, plan_path = load_or_create_plan(args, project_root, memory_root)
     validate_plan_freshness(memory_root, plan, plan_path)
@@ -1603,19 +1735,7 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
             next_status="planned",
         )
     if not plan.get("fixture"):
-        raw_policy_path = plan.get("selection_policy")
-        if isinstance(raw_policy_path, str) and raw_policy_path:
-            policy_path = resolve_external_path(project_root, raw_policy_path)
-            validation_root = memory_root
-            staged_candidate = workspace_for(memory_root, plan["refresh_id"]) / "memory"
-            if not (memory_root / "views/flow-graph.json").is_file() and staged_candidate.is_dir():
-                validation_root = staged_candidate
-            _, live_policy_id, _ = validate_policy(validation_root, policy_path)
-            if live_policy_id != plan.get("selection_policy_id"):
-                raise RefreshError(
-                    "SELECTION_POLICY_CHANGED_SINCE_PLAN",
-                    "selection policy changed after refresh planning; run plan again",
-                )
+        validate_plan_selection_policy(project_root, memory_root, plan)
     live = source_inventory(memory_root, project_root)
     if live != plan.get("source_fingerprints"):
         raise RefreshError("SOURCE_CHANGED_SINCE_PLAN", "bound sources changed after refresh planning; run plan again")
@@ -1672,6 +1792,20 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
             node_state["output"] = str(result_path)
             node_state["error"] = None
             atomic_json(plan_path, plan)
+            if node == "flow-graph" and plan.get("selection_policy") and not plan.get("fixture"):
+                try:
+                    validate_plan_selection_policy(project_root, memory_root, plan)
+                except Exception as exc:
+                    plan["status"] = "dirty"
+                    plan["retry_from_instance_key"] = "meeting-pack:fde-morning"
+                    atomic_json(plan_path, plan)
+                    update_failure_status(
+                        memory_root,
+                        plan,
+                        "meeting-pack:fde-morning",
+                        str(exc),
+                    )
+                    raise
             if node == "flow-graph" and not plan.get("selection_policy"):
                 if args.selection_policy:
                     bind_policy_to_plan(
