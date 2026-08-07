@@ -544,23 +544,47 @@ def interrupted_plan(memory_root: Path) -> dict[str, Any]:
     status = load_optional_json(memory_root / STATUS_REL)
     run_id = status.get("current_run_id")
     active_statuses = {"planned", "refreshing", "dirty", "awaiting-policy"}
-    path = memory_root / RUNS_REL / f"{run_id}.json" if isinstance(run_id, str) and run_id else None
-    plan = load_optional_json(path) if path else {}
-    if plan.get("status") not in active_statuses:
-        candidates = []
-        runs_root = memory_root / RUNS_REL
-        for candidate_path in sorted(runs_root.glob("*.json")) if runs_root.is_dir() else []:
-            candidate = load_optional_json(candidate_path)
-            if candidate.get("status") in active_statuses:
-                candidates.append((candidate_path, candidate))
-        if not candidates:
+    if isinstance(run_id, str) and run_id:
+        path = memory_root / RUNS_REL / f"{run_id}.json"
+        if not path.is_file():
+            raise RefreshError(
+                "REFRESH_PLAN_INVALID",
+                f"current refresh pointer has no durable plan: {path}",
+            )
+        plan = load_json(path)
+        if plan.get("refresh_id") not in (None, "", run_id):
+            raise RefreshError(
+                "REFRESH_PLAN_INVALID",
+                "current refresh pointer does not match its durable plan identity",
+            )
+        if plan.get("status") not in active_statuses:
             return {}
-        if len(candidates) > 1:
-            ids = ", ".join(str(item.get("refresh_id") or candidate_path.stem) for candidate_path, item in candidates)
-            raise RefreshError("REFRESH_RESUME_AMBIGUOUS", f"multiple nonterminal refresh plans require explicit --plan: {ids}")
-        path, plan = candidates[0]
-        run_id = str(plan.get("refresh_id") or path.stem)
-    assert path is not None
+        return {
+            "resume_plan_path": str(path),
+            "resume_refresh_id": run_id,
+            "retry_from_instance_key": plan.get("retry_from_instance_key"),
+            "resume_status": plan.get("status"),
+        }
+
+    candidates = []
+    runs_root = memory_root / RUNS_REL
+    for candidate_path in sorted(runs_root.glob("*.json")) if runs_root.is_dir() else []:
+        candidate = load_optional_json(candidate_path)
+        if candidate.get("status") in active_statuses:
+            candidates.append((candidate_path, candidate))
+    if not candidates:
+        return {}
+    if len(candidates) > 1:
+        ids = ", ".join(
+            str(item.get("refresh_id") or candidate_path.stem)
+            for candidate_path, item in candidates
+        )
+        raise RefreshError(
+            "REFRESH_RESUME_AMBIGUOUS",
+            f"multiple nonterminal refresh plans require explicit --plan: {ids}",
+        )
+    path, plan = candidates[0]
+    run_id = str(plan.get("refresh_id") or path.stem)
     return {
         "resume_plan_path": str(path),
         "resume_refresh_id": run_id,
@@ -2343,6 +2367,7 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
                     "current_status": "published",
                     "pending_invalidations": [],
                     "retry_from_instance_key": None,
+                    "last_error": None,
                     "metrics": metrics,
                 }
             )
@@ -2468,6 +2493,8 @@ def finalize_refresh_state(
             "last_successful_refresh_at": receipt["published_at"],
             "last_successful_receipt": receipt_path.relative_to(memory_root).as_posix(),
             "pending_invalidations": [],
+            "retry_from_instance_key": None,
+            "last_error": None,
             "selection_policy": plan.get("selection_policy"),
             "selection_policy_id": plan.get("selection_policy_id"),
             "metrics": metrics,

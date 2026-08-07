@@ -2500,6 +2500,114 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(detected["retry_from_instance_key"], "roadmap")
             self.assertEqual(detected["resume_status"], "dirty")
 
+    def test_terminal_current_pointer_suppresses_historical_dirty_discovery(self) -> None:
+        module = load_module()
+        for terminal_status in ("published", "superseded"):
+            with self.subTest(terminal_status=terminal_status), tempfile.TemporaryDirectory() as temp_dir:
+                memory = self.scaffold(Path(temp_dir))
+                runs = memory / module.RUNS_REL
+                runs.mkdir(parents=True)
+                current_id = f"refresh-current-{terminal_status}"
+                module.atomic_json(
+                    runs / f"{current_id}.json",
+                    {
+                        "refresh_id": current_id,
+                        "status": terminal_status,
+                        "retry_from_instance_key": None,
+                    },
+                )
+                module.atomic_json(
+                    runs / "refresh-historical-dirty.json",
+                    {
+                        "refresh_id": "refresh-historical-dirty",
+                        "status": "dirty",
+                        "retry_from_instance_key": "meeting-pack:fde-morning",
+                    },
+                )
+                module.atomic_json(
+                    memory / module.STATUS_REL,
+                    {
+                        "current_run_id": current_id,
+                        "current_status": terminal_status,
+                    },
+                )
+
+                self.assertEqual(module.interrupted_plan(memory), {})
+
+    def test_failed_node_then_publish_clears_error_and_never_resumes_historical_dirty(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            plan = module.plan_refresh(
+                module.parse_args(
+                    [
+                        "plan",
+                        str(root),
+                        "--fixture",
+                        "--force-full",
+                        "--as-of",
+                        "2026-08-07",
+                    ]
+                ),
+                root,
+                memory,
+            )
+            historical = memory / module.RUNS_REL / "refresh-historical-dirty.json"
+            module.atomic_json(
+                historical,
+                {
+                    "refresh_id": "refresh-historical-dirty",
+                    "status": "dirty",
+                    "retry_from_instance_key": "meeting-pack:fde-morning",
+                    "fde_period_start": None,
+                    "fde_period_end": None,
+                },
+            )
+            apply_args = module.parse_args(
+                ["apply", str(root), "--plan", plan["plan_path"]]
+            )
+            with (
+                patch.object(
+                    module,
+                    "execute_node",
+                    side_effect=module.RefreshError(
+                        "REFRESH_NODE_BLOCKED",
+                        "meeting-pack:fde-morning: simulated recurring-window failure",
+                        node="management-panel",
+                    ),
+                ),
+                self.assertRaises(module.RefreshError),
+            ):
+                module.apply_refresh(apply_args, root, memory)
+            failed_status = module.load_json(memory / module.STATUS_REL)
+            self.assertEqual(failed_status["current_status"], "dirty")
+            self.assertEqual(failed_status["retry_from_instance_key"], "management-panel")
+            self.assertIn("simulated recurring-window failure", failed_status["last_error"])
+
+            published = module.apply_refresh(apply_args, root, memory)
+            final_status = module.load_json(memory / module.STATUS_REL)
+            detected = module.detect(root, memory, fixture=True)
+            inspected = module.inspect_refresh(
+                module.parse_args(["inspect", str(root), "--fixture"]),
+                root,
+                memory,
+            )
+
+            self.assertEqual(published["status"], "published")
+            self.assertEqual(final_status["current_status"], "published")
+            self.assertIsNone(final_status["retry_from_instance_key"])
+            self.assertIsNone(final_status["last_error"])
+            self.assertEqual(final_status["pending_invalidations"], [])
+            self.assertNotIn("resume_plan_path", published["inspect"])
+            self.assertNotIn("resume_refresh_id", published["inspect"])
+            self.assertEqual(detected["changed_sources"], [])
+            self.assertEqual(detected["recommended_mode"], "reuse")
+            self.assertNotIn("resume_plan_path", detected)
+            self.assertNotIn("resume_refresh_id", detected)
+            self.assertNotIn("resume_plan_path", inspected)
+            self.assertNotIn("resume_refresh_id", inspected)
+
     def test_interrupted_plan_survives_missing_pointer_and_rejects_ambiguity(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
