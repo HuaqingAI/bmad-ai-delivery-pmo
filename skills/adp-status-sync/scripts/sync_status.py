@@ -71,6 +71,7 @@ REPAIR_RECEIPT_INDEX_REL = Path("state") / "repair-receipt-index.json"
 AUTHORITY_MIGRATION_TOKEN_REL = Path("state") / "authority-migration-tokens"
 AUTHORITY_MIGRATION_RECEIPT_REL = Path("receipts") / "authority-state-migration"
 INTAKE_RECONCILIATION_TOKEN_REL = Path("state") / "intake-reconciliation-tokens"
+INTAKE_PARTIAL_CLOSURE_RECEIPT_REL = Path("receipts") / "status-sync-partial-closure"
 INTAKE_RETIREMENT_TOKEN_REL = Path("state") / "intake-retirement-tokens"
 INTAKE_RETIREMENT_RECEIPT_REL = Path("receipts") / "status-sync-retirement"
 INTAKE_RETIREMENT_REASONS = {"never-applied", "superseded-by", "invalid-proposal"}
@@ -417,13 +418,30 @@ def parse_args() -> argparse.Namespace:
     reconcile.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compare every command to canonical facts and issue a single-use token only when all are satisfied.",
+        help=(
+            "Compare every command to canonical facts and issue a single-use token when all are satisfied, "
+            "or when --retire-missing governs a verified partial closure."
+        ),
     )
-    reconcile.add_argument("--token", help="Single-use token returned by a fully satisfied dry-run.")
+    reconcile.add_argument("--token", help="Single-use token returned by an eligible reconciliation dry-run.")
+    reconcile.add_argument(
+        "--retire-missing",
+        action="store_true",
+        help=(
+            "For one verified legacy non-atomic intake, reconcile satisfied commands and retire every remaining "
+            "missing command in one durable closure."
+        ),
+    )
+    reconcile.add_argument(
+        "--retirement-justification",
+        help="Governance rationale for retiring the exact missing-command partition; required with --retire-missing.",
+    )
     reconcile.add_argument(
         "--principal",
-        default="adp-status-sync",
-        help="Stable operator or automation principal bound to the token and receipt.",
+        help=(
+            "Stable operator or automation principal bound to the token and receipt. "
+            "Defaults to adp-status-sync for ordinary reconciliation and is required with --retire-missing."
+        ),
     )
     reconcile.add_argument("--source", default="status sync", help="Default source used by legacy intake parsing.")
     reconcile.add_argument(
@@ -477,9 +495,16 @@ def parse_args() -> argparse.Namespace:
     migrate.add_argument(
         "--evidence-file",
         required=True,
-        help="Original historical non-dry-run status-sync result JSON with direct input_path/input_hash fields.",
+        help=(
+            "Original historical non-dry-run status-sync result JSON, or its canonical durable "
+            "receipt_type=execution receipt, with direct input_path/input_hash fields."
+        ),
     )
-    migrate.add_argument("--applied-at", required=True, help="Attested application time as timezone-aware ISO-8601.")
+    migrate.add_argument(
+        "--applied-at",
+        required=True,
+        help="Attested application time; must exactly match applied_at when evidence is a durable execution receipt.",
+    )
     migrate.add_argument(
         "--attested-by",
         required=True,
@@ -3650,7 +3675,8 @@ def recover_status_transactions(memory_root: Path) -> list[str]:
         return recovered
     supported = {
         "status-mutation", "repair-business", "repair-attempt",
-        "intake-reconciliation", "intake-retirement", "wdr-field-repair", "workstream-alias-retirement", "l0-reference-repair",
+        "intake-reconciliation", "intake-partial-closure", "intake-retirement", "wdr-field-repair",
+        "workstream-alias-retirement", "l0-reference-repair",
     }
     for manifest_path in sorted(root.glob("*/manifest.json")):
         manifest = load_json_object(manifest_path)
@@ -3744,6 +3770,15 @@ def completed_status_receipt(
     update_count: int,
     input_path: Path | None = None,
 ) -> tuple[Path, dict[str, Any]] | None:
+    if input_path is not None:
+        partial_closure = existing_partial_closure_receipt(
+            memory_root,
+            input_path,
+            input_hash,
+            update_count,
+        )
+        if partial_closure is not None:
+            return partial_closure
     root = memory_root / STATUS_SYNC_RECEIPT_REL
     if not root.is_dir():
         return None
@@ -3869,9 +3904,56 @@ def historical_report_claims(
     payload: Any,
     evidence_path: Path,
     update_count: int,
+    memory_root: Path | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("evidence-file root must be a JSON object")
+    if payload.get("receipt_type") is not None:
+        execution_id = str(payload.get("execution_id") or "").strip()
+        evidence_input_hash = str(payload.get("input_hash") or "").strip().lower()
+        evidence_input_path = payload.get("input_path")
+        try:
+            evidence_applied_at = normalize_required_timestamp(
+                payload.get("applied_at"),
+                "execution receipt applied_at",
+            )
+        except ValueError as exc:
+            raise ValueError("execution receipt has an invalid applied_at") from exc
+        expected_path = (
+            memory_root / STATUS_SYNC_RECEIPT_REL / f"{execution_id}.json"
+            if memory_root is not None and execution_id
+            else None
+        )
+        if (
+            payload.get("receipt_schema_version") != RECEIPT_SCHEMA_VERSION
+            or payload.get("receipt_type") != "execution"
+            or re.fullmatch(r"ssr-[0-9a-f]{32}", execution_id) is None
+            or expected_path is None
+            or evidence_path.resolve() != expected_path.resolve()
+            or payload.get("ok") is not True
+            or payload.get("status") != "applied"
+            or payload.get("durable") is not True
+            or payload.get("dry_run") is not False
+            or payload.get("mode") != "update"
+            or payload.get("update_count") != update_count
+            or not isinstance(evidence_input_path, str)
+            or not evidence_input_path.strip()
+            or re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", evidence_input_hash) is None
+        ):
+            raise ValueError(
+                "execution receipt evidence must be the canonical durable applied receipt with exact identity, "
+                "path, hash, and update_count"
+            )
+        return {
+            "evidence_path": str(evidence_path),
+            "evidence_hash": sha256_bytes(evidence_path.read_bytes()),
+            "evidence_mode": "update",
+            "evidence_kind": "execution-receipt",
+            "evidence_execution_id": execution_id,
+            "evidence_applied_at": evidence_applied_at,
+            "declared_input_path": evidence_input_path,
+            "declared_input_hash": "sha256:" + evidence_input_hash.removeprefix("sha256:"),
+        }
     wrapper_fields = sorted(ATTESTATION_WRAPPER_FIELDS.intersection(payload))
     if wrapper_fields:
         raise ValueError(
@@ -3900,6 +3982,7 @@ def historical_report_claims(
         "evidence_path": str(evidence_path),
         "evidence_hash": sha256_bytes(evidence_path.read_bytes()),
         "evidence_mode": "update",
+        "evidence_kind": "execution-report",
         "declared_input_path": evidence_input_path,
         "declared_input_hash": "sha256:" + evidence_input_hash.removeprefix("sha256:"),
     }
@@ -3919,7 +4002,7 @@ def historical_evidence(
     update_count: int,
     memory_root: Path | None = None,
 ) -> dict[str, Any]:
-    claims = historical_report_claims(payload, evidence_path, update_count)
+    claims = historical_report_claims(payload, evidence_path, update_count, memory_root)
     evidence_input_hash = str(claims["declared_input_hash"])
     if evidence_input_hash.removeprefix("sha256:") != input_hash.removeprefix("sha256:"):
         raise ValueError("evidence-file input_hash does not match updates-file raw bytes")
@@ -3929,7 +4012,18 @@ def historical_evidence(
     if evidence_path == input_path:
         raise ValueError("evidence-file must be distinct from updates-file")
     return {
-        **{key: claims[key] for key in ("evidence_path", "evidence_hash", "evidence_mode")},
+        **{
+            key: claims[key]
+            for key in (
+                "evidence_path",
+                "evidence_hash",
+                "evidence_mode",
+                "evidence_kind",
+                "evidence_execution_id",
+                "evidence_applied_at",
+            )
+            if key in claims
+        },
         "evidence_input_path": str(input_path),
         "evidence_input_hash": input_hash,
         "verification_status": "verified",
@@ -3988,7 +4082,7 @@ def historical_input_change_evidence(
     update_count: int,
     memory_root: Path,
 ) -> dict[str, Any]:
-    claims = historical_report_claims(payload, evidence_path, update_count)
+    claims = historical_report_claims(payload, evidence_path, update_count, memory_root)
     if str(claims["declared_input_hash"]) != original_input_hash:
         raise ValueError("evidence-file input_hash does not match restored original updates bytes")
     if not historical_path_matches(memory_root, str(claims["declared_input_path"]), logical_input_path):
@@ -3996,7 +4090,18 @@ def historical_input_change_evidence(
     if evidence_path.resolve() == logical_input_path.resolve():
         raise ValueError("evidence-file must be distinct from updates-file")
     return {
-        **{key: claims[key] for key in ("evidence_path", "evidence_hash", "evidence_mode")},
+        **{
+            key: claims[key]
+            for key in (
+                "evidence_path",
+                "evidence_hash",
+                "evidence_mode",
+                "evidence_kind",
+                "evidence_execution_id",
+                "evidence_applied_at",
+            )
+            if key in claims
+        },
         "evidence_input_path": str(logical_input_path),
         "evidence_input_hash": original_input_hash,
         "verification_status": "verified",
@@ -4681,6 +4786,10 @@ def historical_input_change_migration_valid(
     return bool(
         not executable_changed_paths
         and expected_evidence["attested_by"]
+        and (
+            expected_evidence.get("evidence_kind") != "execution-receipt"
+            or expected_evidence.get("evidence_applied_at") == receipt.get("applied_at")
+        )
         and migration.get("original_input_snapshot_hash") == original_hash
         and migration.get("original_payload_id") == content_id(original_payload)
         and migration.get("current_payload_id") == content_id(current_payload)
@@ -4729,7 +4838,7 @@ def durable_status_receipt_record(memory_root: Path, receipt_path: Path) -> dict
                 return None
             try:
                 evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
-                historical_evidence(
+                evidence = historical_evidence(
                     evidence_payload,
                     evidence_path,
                     input_path,
@@ -4737,6 +4846,11 @@ def durable_status_receipt_record(memory_root: Path, receipt_path: Path) -> dict
                     len(updates),
                     memory_root,
                 )
+                if (
+                    evidence.get("evidence_kind") == "execution-receipt"
+                    and evidence.get("evidence_applied_at") != applied_at
+                ):
+                    return None
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 return None
     if receipt.get("receipt_type") == "reconciliation":
@@ -4803,13 +4917,19 @@ def durable_status_receipt_events(memory_root: Path, workstream_id: str, field_n
                 continue
             try:
                 evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
-                historical_evidence(
+                evidence = historical_evidence(
                     evidence_payload,
                     evidence_path,
                     input_path,
                     str(receipt.get("input_hash")),
                     int(receipt.get("update_count")),
+                    memory_root,
                 )
+                if (
+                    evidence.get("evidence_kind") == "execution-receipt"
+                    and evidence.get("evidence_applied_at") != applied_at
+                ):
+                    continue
             except (ValueError, TypeError, json.JSONDecodeError):
                 continue
         try:
@@ -5511,8 +5631,41 @@ def reconciliation_token_path(memory_root: Path, token: str) -> Path:
     return memory_root / INTAKE_RECONCILIATION_TOKEN_REL / f"{sha256_bytes(token.encode('utf-8')).removeprefix('sha256:')}.json"
 
 
-def reconciliation_binding(snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
-    return {
+def load_reconciliation_updates_payload(
+    path: Path,
+    default_source: str,
+) -> tuple[Any, list[StatusUpdate], str]:
+    try:
+        payload, updates = load_updates_payload(path, default_source)
+        return payload, updates, "current-writer-schema"
+    except (ValueError, TypeError) as modern_exc:
+        try:
+            payload, updates = load_updates_payload(
+                path,
+                default_source,
+                allow_legacy_terminal_without_id=True,
+            )
+        except (ValueError, TypeError) as legacy_exc:
+            raise StatusSyncContractError(
+                "INTAKE_RECONCILIATION_LEGACY_SCAN_BLOCKED",
+                "reconciliation cannot safely normalize the legacy executable payload",
+                {
+                    "verification_status": "blocked",
+                    "error": str(legacy_exc),
+                    "legacy_parser_error": str(modern_exc),
+                    "missing_commands": [],
+                    "token": None,
+                },
+            ) from legacy_exc
+        return payload, updates, "legacy-terminal-action-scan"
+
+
+def reconciliation_binding(
+    snapshot: dict[str, Any],
+    principal: str,
+    partial_closure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    binding = {
         "input_path": snapshot["input_path"],
         "input_hash": snapshot["input_hash"],
         "principal": principal,
@@ -5520,12 +5673,20 @@ def reconciliation_binding(snapshot: dict[str, Any], principal: str) -> dict[str
         "read_set": snapshot["read_set"],
         "command_results_digest": content_id(snapshot["command_results"]),
     }
+    if partial_closure is not None:
+        binding["partial_closure"] = partial_closure
+    return binding
 
 
-def issue_reconciliation_token(memory_root: Path, snapshot: dict[str, Any], principal: str) -> dict[str, Any]:
+def issue_reconciliation_token(
+    memory_root: Path,
+    snapshot: dict[str, Any],
+    principal: str,
+    partial_closure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     issued = datetime.now(timezone.utc)
     token = f"reconcile_{secrets.token_urlsafe(32)}"
-    binding = reconciliation_binding(snapshot, principal)
+    binding = reconciliation_binding(snapshot, principal, partial_closure)
     state = {
         "schema_version": "1.0.0",
         "token_hash": sha256_bytes(token.encode("utf-8")),
@@ -5691,6 +5852,207 @@ def reconciliation_snapshot(
     }
 
 
+def validate_partial_closure_target(memory_root: Path, input_path: Path) -> None:
+    try:
+        relative = input_path.resolve().relative_to((memory_root / "intake/status-sync").resolve())
+    except ValueError as exc:
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_TARGET_INVALID",
+            "--retire-missing requires one direct JSON intake under memory/intake/status-sync",
+        ) from exc
+    if len(relative.parts) != 1 or input_path.suffix.lower() != ".json":
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_TARGET_INVALID",
+            "--retire-missing requires one direct JSON intake under memory/intake/status-sync",
+        )
+
+
+def partial_closure_plan(
+    snapshot: dict[str, Any],
+    justification: str | None,
+    payload_parser: str,
+) -> dict[str, Any]:
+    rationale = str(justification or "").strip()
+    if not rationale:
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_JUSTIFICATION_REQUIRED",
+            "--retire-missing requires an explicit --retirement-justification",
+        )
+    reconciled = [item for item in snapshot["command_results"] if item.get("satisfied")]
+    retired = [item for item in snapshot["command_results"] if not item.get("satisfied")]
+    if not reconciled:
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_RECONCILIATION_REQUIRED",
+            "partial closure requires at least one command proved by canonical facts or lineage; retire the whole intake otherwise",
+            {"missing_commands": retired},
+        )
+    if not retired:
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_RETIREMENT_EMPTY",
+            "all commands are satisfied; use ordinary reconciliation without --retire-missing",
+        )
+    reconciled_indexes = [int(item["command_index"]) for item in reconciled]
+    retired_indexes = [int(item["command_index"]) for item in retired]
+    partition = {
+        "reconciled_command_indexes": reconciled_indexes,
+        "retired_command_indexes": retired_indexes,
+    }
+    return {
+        "closure_kind": "legacy-non-atomic-partial-execution",
+        "retirement_reason": "not-executed-and-unsafe-to-replay",
+        "retirement_justification": rationale,
+        "payload_parser": payload_parser,
+        **partition,
+        "command_partition_digest": content_id(partition),
+        "replay_policy": "closed-intake-must-not-be-replayed",
+    }
+
+
+def build_partial_closure_receipt(
+    snapshot: dict[str, Any],
+    principal: str,
+    plan: dict[str, Any],
+    payload_id: str,
+) -> dict[str, Any]:
+    command_results = snapshot["command_results"]
+    reconciled = [item for item in command_results if item.get("satisfied")]
+    retired = [item for item in command_results if not item.get("satisfied")]
+    receipt = {
+        "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
+        "receipt_type": "partial-closure",
+        "ok": True,
+        "status": "closed",
+        "durable": True,
+        "dry_run": False,
+        "mode": "reconcile-intake",
+        "input_path": snapshot["input_path"],
+        "input_hash": snapshot["input_hash"],
+        "update_count": snapshot["update_count"],
+        "closed_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "principal": principal,
+        "payload_id": payload_id,
+        "snapshot_id": snapshot["snapshot_id"],
+        "read_set": snapshot["read_set"],
+        "partial_closure": {
+            "verification_method": "canonical-fact-reconciliation-plus-command-retirement",
+            "verification_status": "verified",
+            "all_commands_disposed": True,
+            "plan": plan,
+            "command_results": command_results,
+            "reconciled_commands": reconciled,
+            "retired_commands": retired,
+        },
+    }
+    receipt["receipt_id"] = content_id(receipt)
+    return receipt
+
+
+def partial_closure_receipt_path(memory_root: Path, receipt: dict[str, Any]) -> Path:
+    digest = str(receipt["receipt_id"]).removeprefix("sha256:")
+    return memory_root / INTAKE_PARTIAL_CLOSURE_RECEIPT_REL / f"ipc-{digest[:32]}.json"
+
+
+def partial_closure_receipt_valid(
+    receipt: dict[str, Any],
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+) -> bool:
+    body = dict(receipt)
+    receipt_id = body.pop("receipt_id", None)
+    closure = receipt.get("partial_closure") if isinstance(receipt.get("partial_closure"), dict) else {}
+    plan = closure.get("plan") if isinstance(closure.get("plan"), dict) else {}
+    command_results = closure.get("command_results")
+    if (
+        not isinstance(command_results, list)
+        or not command_results
+        or not isinstance(receipt.get("read_set"), list)
+    ):
+        return False
+    reconciled = [item for item in command_results if isinstance(item, dict) and item.get("satisfied")]
+    retired = [item for item in command_results if isinstance(item, dict) and not item.get("satisfied")]
+    if len(reconciled) + len(retired) != len(command_results) or not reconciled or not retired:
+        return False
+    try:
+        normalize_required_timestamp(receipt.get("closed_at"), "partial closure closed_at")
+        payload = json.loads(input_path.read_text(encoding="utf-8-sig"))
+        indexes = [int(item["command_index"]) for item in command_results]
+        reconciled_indexes = [int(item["command_index"]) for item in reconciled]
+        retired_indexes = [int(item["command_index"]) for item in retired]
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return False
+    partition = {
+        "reconciled_command_indexes": reconciled_indexes,
+        "retired_command_indexes": retired_indexes,
+    }
+    snapshot_body = {
+        "input_path": receipt.get("input_path"),
+        "input_hash": receipt.get("input_hash"),
+        "update_count": receipt.get("update_count"),
+        "command_results": command_results,
+        "read_set": receipt.get("read_set"),
+    }
+    return bool(
+        len(indexes) == len(set(indexes))
+        and sorted(indexes) == list(range(1, len(indexes) + 1))
+        and receipt.get("receipt_schema_version") == RECEIPT_SCHEMA_VERSION
+        and receipt.get("receipt_type") == "partial-closure"
+        and receipt.get("ok") is True
+        and receipt.get("status") == "closed"
+        and receipt.get("durable") is True
+        and receipt.get("dry_run") is False
+        and receipt.get("mode") == "reconcile-intake"
+        and receipt.get("input_path") == str(input_path)
+        and receipt.get("input_hash") == input_hash
+        and receipt.get("update_count") == update_count
+        and isinstance(receipt.get("principal"), str)
+        and bool(receipt.get("principal"))
+        and receipt.get("payload_id") == content_id(payload)
+        and receipt.get("snapshot_id") == content_id(snapshot_body)
+        and closure.get("verification_method") == "canonical-fact-reconciliation-plus-command-retirement"
+        and closure.get("verification_status") == "verified"
+        and closure.get("all_commands_disposed") is True
+        and closure.get("reconciled_commands") == reconciled
+        and closure.get("retired_commands") == retired
+        and plan.get("closure_kind") == "legacy-non-atomic-partial-execution"
+        and plan.get("retirement_reason") == "not-executed-and-unsafe-to-replay"
+        and bool(str(plan.get("retirement_justification") or "").strip())
+        and plan.get("payload_parser") in {"current-writer-schema", "legacy-terminal-action-scan"}
+        and plan.get("replay_policy") == "closed-intake-must-not-be-replayed"
+        and plan.get("reconciled_command_indexes") == reconciled_indexes
+        and plan.get("retired_command_indexes") == retired_indexes
+        and plan.get("command_partition_digest") == content_id(partition)
+        and receipt_id == content_id(body)
+    )
+
+
+def existing_partial_closure_receipt(
+    memory_root: Path,
+    input_path: Path,
+    input_hash: str,
+    update_count: int,
+) -> tuple[Path, dict[str, Any]] | None:
+    root = memory_root / INTAKE_PARTIAL_CLOSURE_RECEIPT_REL
+    if not root.is_dir():
+        return None
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for path in sorted(root.glob("ipc-*.json")):
+        receipt = load_json_object(path)
+        if receipt.get("input_hash") != input_hash:
+            continue
+        if (
+            path.resolve() == partial_closure_receipt_path(memory_root, receipt).resolve()
+            and partial_closure_receipt_valid(receipt, input_path, input_hash, update_count)
+        ):
+            matches.append((path, receipt))
+            continue
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_RECEIPT_INVALID",
+            f"durable partial-closure receipt is invalid: {path}",
+        )
+    return matches[-1] if matches else None
+
+
 def reconciliation_receipt_valid(receipt: dict[str, Any], input_path: Path, input_hash: str, update_count: int) -> bool:
     receipt_id = receipt.get("receipt_id")
     body = dict(receipt)
@@ -5820,15 +6182,95 @@ def apply_reconciliation_receipt(
     return receipt_path, receipt, publication, [path.as_posix() for path in changed]
 
 
+def apply_partial_closure_receipt(
+    memory_root: Path,
+    token_path: Path,
+    token_state: dict[str, Any],
+    snapshot: dict[str, Any],
+    principal: str,
+    plan: dict[str, Any],
+    payload_id: str,
+    fail_after_stage: bool,
+) -> tuple[Path, dict[str, Any], dict[str, Any], list[str]]:
+    receipt = build_partial_closure_receipt(snapshot, principal, plan, payload_id)
+    receipt_path = partial_closure_receipt_path(memory_root, receipt)
+    receipt_rel = receipt_path.relative_to(memory_root)
+    token_rel = token_path.relative_to(memory_root)
+    with tempfile.TemporaryDirectory(prefix=".intake-partial-closure-", dir=memory_root.parent) as temp_dir:
+        staged_root = Path(temp_dir) / "memory"
+        copy_memory_tree(memory_root, staged_root)
+        write_json_atomic(staged_root / receipt_rel, receipt)
+        write_json_atomic(
+            staged_root / token_rel,
+            consumed_reconciliation_token_state(token_state, receipt_path, receipt),
+        )
+        changed = changed_staged_files(memory_root, staged_root)
+        allowed = {receipt_rel, token_rel}
+        unexpected = [path.as_posix() for path in changed if path not in allowed]
+        if unexpected:
+            raise StatusSyncContractError(
+                "INTAKE_PARTIAL_CLOSURE_TARGET_INVALID",
+                "partial closure staged unexpected targets: " + ", ".join(unexpected),
+            )
+        if fail_after_stage:
+            raise StatusSyncContractError(
+                "INTAKE_PARTIAL_CLOSURE_INJECTED_FAILURE",
+                "injected failure after partial-closure staging",
+            )
+        publication = publish_staged_files(
+            memory_root,
+            staged_root,
+            changed,
+            transaction_kind="intake-partial-closure",
+        )
+    return receipt_path, receipt, publication, [path.as_posix() for path in changed]
+
+
 def run_reconcile_intake(args: argparse.Namespace) -> int:
     project_root = require_project_root(args.project_root)
     memory_root = resolve_memory_root(project_root, args.memory_root)
     input_path = require_file(args.updates_file, "updates-file")
     input_hash = sha256_bytes(input_path.read_bytes())
-    _, updates = load_updates_payload(input_path, args.source)
-    principal = " ".join(args.principal.split())
+    payload, updates, payload_parser = load_reconciliation_updates_payload(input_path, args.source)
+    payload_id = content_id(payload)
+    if args.retire_missing and not str(args.principal or "").strip():
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_PRINCIPAL_REQUIRED",
+            "--retire-missing requires an explicit governance --principal",
+        )
+    principal = " ".join(str(args.principal or "adp-status-sync").split())
     if not principal:
         raise StatusSyncContractError("INTAKE_RECONCILIATION_PRINCIPAL_INVALID", "principal must not be empty")
+    if args.retirement_justification and not args.retire_missing:
+        raise StatusSyncContractError(
+            "INTAKE_PARTIAL_CLOSURE_ARGUMENT_INVALID",
+            "--retirement-justification is accepted only with --retire-missing",
+        )
+    if args.retire_missing:
+        validate_partial_closure_target(memory_root, input_path)
+
+    existing_partial = existing_partial_closure_receipt(memory_root, input_path, input_hash, len(updates))
+    if existing_partial:
+        receipt_path, receipt = existing_partial
+        closure = receipt["partial_closure"]
+        emit(
+            {
+                "ok": True,
+                "mode": "reconcile-intake",
+                "dry_run": bool(args.dry_run),
+                "verification_status": "verified",
+                "all_satisfied": False,
+                "all_commands_disposed": True,
+                "reused": True,
+                "token": None,
+                "missing_commands": closure["retired_commands"],
+                "receipt": receipt,
+                "receipt_path": str(receipt_path),
+            },
+            args.output,
+        )
+        return 0
+
     existing = existing_reconciliation_receipt(memory_root, input_path, input_hash, len(updates))
     if existing:
         receipt_path, receipt = existing
@@ -5839,6 +6281,7 @@ def run_reconcile_intake(args: argparse.Namespace) -> int:
                 "dry_run": bool(args.dry_run),
                 "verification_status": "verified",
                 "all_satisfied": True,
+                "all_commands_disposed": True,
                 "reused": True,
                 "token": None,
                 "missing_commands": [],
@@ -5848,7 +6291,17 @@ def run_reconcile_intake(args: argparse.Namespace) -> int:
             args.output,
         )
         return 0
+
     snapshot = reconciliation_snapshot(memory_root, input_path, input_hash, updates)
+    closure_plan = None
+    if args.retire_missing:
+        if durable_receipts_for_input(memory_root, input_path):
+            raise StatusSyncContractError(
+                "INTAKE_PARTIAL_CLOSURE_ALREADY_EXECUTED",
+                "a durable successful receipt already binds this intake; partial closure cannot override execution semantics",
+            )
+        closure_plan = partial_closure_plan(snapshot, args.retirement_justification, payload_parser)
+
     if args.dry_run:
         if args.token:
             raise StatusSyncContractError(
@@ -5856,21 +6309,25 @@ def run_reconcile_intake(args: argparse.Namespace) -> int:
                 "--token is not accepted with --dry-run",
             )
         token = None
-        if snapshot["all_satisfied"]:
+        eligible = snapshot["all_satisfied"] or closure_plan is not None
+        if eligible:
             memory_root.mkdir(parents=True, exist_ok=True)
-            token = issue_reconciliation_token(memory_root, snapshot, principal)["token"]
+            token = issue_reconciliation_token(memory_root, snapshot, principal, closure_plan)["token"]
         emit(
             {
                 "ok": True,
                 "mode": "reconcile-intake",
                 "dry_run": True,
-                "verification_status": snapshot["verification_status"],
+                "verification_status": "verified" if closure_plan is not None else snapshot["verification_status"],
                 "all_satisfied": snapshot["all_satisfied"],
+                "all_commands_disposed": eligible,
                 "input_path": str(input_path),
                 "input_hash": input_hash,
+                "payload_parser": payload_parser,
                 "snapshot_id": snapshot["snapshot_id"],
                 "command_results": snapshot["command_results"],
                 "missing_commands": snapshot["missing_commands"],
+                "partial_closure_plan": closure_plan,
                 "token": token,
                 "receipt": None,
                 "receipt_path": None,
@@ -5878,10 +6335,11 @@ def run_reconcile_intake(args: argparse.Namespace) -> int:
             args.output,
         )
         return 0
+
     if not args.token:
         raise StatusSyncContractError(
             "INTAKE_RECONCILIATION_TOKEN_REQUIRED",
-            "durable reconciliation requires the single-use token from a fully satisfied dry-run",
+            "durable reconciliation requires the single-use token from an eligible dry-run",
         )
     token_path = reconciliation_token_path(memory_root, args.token)
     token_state = load_json_object(token_path)
@@ -5902,37 +6360,69 @@ def run_reconcile_intake(args: argparse.Namespace) -> int:
     if datetime.now(timezone.utc) > expires_at:
         update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RECONCILIATION_TOKEN_EXPIRED")
         raise StatusSyncContractError("INTAKE_RECONCILIATION_TOKEN_EXPIRED", "reconciliation token expired")
-    if not snapshot["all_satisfied"]:
+
+    token_binding = token_state.get("binding") if isinstance(token_state.get("binding"), dict) else {}
+    token_is_partial = isinstance(token_binding.get("partial_closure"), dict)
+    if token_is_partial != bool(args.retire_missing):
+        raise StatusSyncContractError(
+            "INTAKE_RECONCILIATION_TOKEN_INVALID",
+            "token closure mode does not match --retire-missing",
+        )
+    if token_is_partial:
+        closure_plan = partial_closure_plan(snapshot, args.retirement_justification, payload_parser)
+    elif not snapshot["all_satisfied"]:
         update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RECONCILIATION_FACTS_STALE")
         raise StatusSyncContractError(
             "INTAKE_RECONCILIATION_FACTS_STALE",
             "canonical facts no longer satisfy every historical command",
             {"missing_commands": snapshot["missing_commands"]},
         )
-    binding = reconciliation_binding(snapshot, principal)
-    if token_state.get("binding") != binding or token_state.get("binding_digest") != content_id(binding):
+
+    binding = reconciliation_binding(snapshot, principal, closure_plan)
+    if token_binding != binding or token_state.get("binding_digest") != content_id(binding):
         update_token_state(token_path, token_state, "invalidated", terminal_error_code="INTAKE_RECONCILIATION_READ_SET_STALE")
         raise StatusSyncContractError(
             "INTAKE_RECONCILIATION_READ_SET_STALE",
-            "canonical facts or lineage changed after the reconciliation dry-run",
+            "canonical facts, lineage, or the governed command partition changed after the dry-run",
         )
-    receipt_path, receipt, publication, changed = apply_reconciliation_receipt(
-        memory_root,
-        token_path,
-        token_state,
-        snapshot,
-        principal,
-        args.fail_after_stage,
-    )
+
+    if closure_plan is not None:
+        receipt_path, receipt, publication, changed = apply_partial_closure_receipt(
+            memory_root,
+            token_path,
+            token_state,
+            snapshot,
+            principal,
+            closure_plan,
+            payload_id,
+            args.fail_after_stage,
+        )
+        all_satisfied = False
+        missing_commands = snapshot["missing_commands"]
+        status = "closed"
+    else:
+        receipt_path, receipt, publication, changed = apply_reconciliation_receipt(
+            memory_root,
+            token_path,
+            token_state,
+            snapshot,
+            principal,
+            args.fail_after_stage,
+        )
+        all_satisfied = True
+        missing_commands = []
+        status = "reconciled"
     emit(
         {
             "ok": True,
             "mode": "reconcile-intake",
             "dry_run": False,
+            "status": status,
             "verification_status": "verified",
-            "all_satisfied": True,
+            "all_satisfied": all_satisfied,
+            "all_commands_disposed": True,
             "reused": False,
-            "missing_commands": [],
+            "missing_commands": missing_commands,
             "receipt": receipt,
             "receipt_path": str(receipt_path),
             "publication": publication,
@@ -6414,6 +6904,11 @@ def intake_retirement_snapshot(
             "historical intake root must be a JSON object",
         )
     input_hash = sha256_bytes(input_path.read_bytes())
+    if existing_partial_closure_receipt(memory_root, input_path, input_hash, len(updates)):
+        raise StatusSyncContractError(
+            "INTAKE_RETIREMENT_ALREADY_CLOSED",
+            "a durable partial-closure receipt already disposes every command in this intake",
+        )
     if durable_receipts_for_input(memory_root, input_path):
         raise StatusSyncContractError(
             "INTAKE_RETIREMENT_ALREADY_EXECUTED",
@@ -7117,17 +7612,51 @@ def run_update(args: argparse.Namespace) -> int:
     input_hash = sha256_bytes(input_path.read_bytes()) if input_path else None
     if input_path:
         args.updates_file = str(input_path)
-    updates = updates_from_args(args)
-    validate_update_targets(memory_root, updates)
-    baseline_context = validate_milestone_updates(memory_root, updates)
-    completed_receipt = (
-        completed_status_receipt(memory_root, input_hash, len(updates), input_path)
-        if input_hash and not args.dry_run
-        else None
-    )
+    partial_completed: tuple[Path, dict[str, Any]] | None = None
+    partial_updates: list[StatusUpdate] = []
+    if input_path is not None and input_hash is not None and not args.dry_run:
+        try:
+            _, partial_updates, _ = load_reconciliation_updates_payload(input_path, args.source)
+            partial_completed = existing_partial_closure_receipt(
+                memory_root,
+                input_path,
+                input_hash,
+                len(partial_updates),
+            )
+        except (StatusSyncContractError, ValueError, TypeError):
+            partial_completed = None
+    if partial_completed is not None:
+        updates = partial_updates
+        baseline_context = None
+        completed_receipt = partial_completed
+    else:
+        updates = updates_from_args(args)
+        validate_update_targets(memory_root, updates)
+        baseline_context = validate_milestone_updates(memory_root, updates)
+        completed_receipt = (
+            completed_status_receipt(memory_root, input_hash, len(updates), input_path)
+            if input_hash and not args.dry_run
+            else None
+        )
     if completed_receipt:
         receipt_path, receipt = completed_receipt
-        if receipt.get("receipt_type") == "reconciliation":
+        if receipt.get("receipt_type") == "partial-closure":
+            closure = receipt.get("partial_closure", {})
+            replayed_action_ids = sorted(
+                {
+                    str(item.get("matched_action_id"))
+                    for item in closure.get("reconciled_commands", [])
+                    if isinstance(item, dict) and item.get("matched_action_id")
+                }
+            )
+            intent_convergence = {
+                "status": "partially-closed",
+                "pending_intent_ids": [],
+                "consumed_intent_ids": [],
+                "outbox": None,
+            }
+            completed_status = "already-closed"
+        elif receipt.get("receipt_type") == "reconciliation":
             replayed_action_ids = sorted(
                 {
                     str(item.get("matched_action_id"))
@@ -7141,12 +7670,14 @@ def run_update(args: argparse.Namespace) -> int:
                 "consumed_intent_ids": [],
                 "outbox": None,
             }
+            completed_status = "already-applied"
         else:
             replayed_action_ids, intent_convergence = validate_completed_input_replay(
                 memory_root,
                 updates,
                 input_hash,
             )
+            completed_status = "already-applied"
         ledger_path = memory_root / ACTION_LEDGER_REL
         action_flow_path = memory_root / "views/action-flow.json"
         ledger_state_path = memory_root / ACTION_LEDGER_STATE_REL
@@ -7154,7 +7685,7 @@ def run_update(args: argparse.Namespace) -> int:
             {
                 "ok": True,
                 "mode": "update",
-                "status": "already-applied",
+                "status": completed_status,
                 "reused": True,
                 "dry_run": False,
                 "input_path": str(input_path),
@@ -7460,6 +7991,11 @@ def run_migrate_receipt(args: argparse.Namespace) -> int:
                     "executable_diff",
                 )
             }
+        if (
+            migration.get("evidence_kind") == "execution-receipt"
+            and migration.get("evidence_applied_at") != applied_at
+        ):
+            raise ValueError("applied-at must exactly match durable execution receipt applied_at")
     except ValueError as exc:
         if not args.dry_run:
             raise

@@ -104,7 +104,7 @@ Apply atomically rebuilds the ledger state, every WDR state, and every WDR actio
 
 ## Historical Receipt Migration
 
-Verify one historical input against its original successful non-dry-run execution report before writing anything. That report's root object must directly declare both the exact resolved `input_path` and raw-byte `input_hash`; values added by a wrapper, nested receipt, or later attestation are not execution evidence, and basename similarity is never evidence:
+Verify one historical input against either its original successful non-dry-run execution report or the canonical durable `receipt_type: execution` receipt written by status-sync. The evidence root must directly declare the exact logical `input_path` and raw-byte `input_hash`; wrapper-added values, nested receipt copies, later attestations, and basename similarity are not evidence. A durable receipt is accepted only from its canonical `receipts/status-sync/<execution_id>.json` path and must retain exact receipt identity, `ok: true`, `durable: true`, `dry_run: false`, `status: applied`, `mode: update`, `update_count`, and timezone-aware `applied_at`:
 
 ```bash
 uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --updates-file <path> --evidence-file <report.json> --applied-at <iso-time> --attested-by "<authority>" --memory-root "{memory-root}" --dry-run
@@ -116,9 +116,9 @@ An unverified result writes no receipt and remains blocked. Apply a verified res
 uv run "{skill-root}/scripts/sync_status.py" migrate-receipt "{project-root}" --updates-file <path> --evidence-file <report.json> --applied-at <iso-time> --attested-by "<authority>" --memory-root "{memory-root}" --verified-plan-token <token>
 ```
 
-Process historical inputs one at a time. A set with a different number of reports and intakes must be paired from declared path/hash bindings, never filenames; only `verification_status: verified` entries receive versioned receipts. `attested_by` is receipt attribution only: it proves neither execution nor authorization and cannot repair a report missing either direct binding.
+Process historical inputs one at a time. A set with a different number of evidence files and intakes must be paired from declared path/hash bindings, never filenames; only `verification_status: verified` entries receive versioned receipts. When the evidence is a durable execution receipt, `--applied-at` must exactly match its normalized `applied_at`; the receipt need not contain an `updates` array because the governed input bytes supply the executable payload. `attested_by` is receipt attribution only: it proves neither execution nor authorization and cannot repair evidence missing either direct binding.
 
-If the logical intake path still exists but its bytes changed after the recorded execution, recover the exact original bytes and add `--original-updates-file <restored-original.json>` to both commands. This governed `historical-input-change` mode requires the execution report's direct `input_hash` to match the restored bytes and its direct `input_path` to match the current logical intake path. It canonicalizes the executable envelope (`updates`, status/action commands, workstream routes, owners, due/trigger, Source, milestones, status intents, and baseline controls) for both versions and fails closed on any executable difference. Formatting and top-level non-execution metadata may differ. The durable migration receipt binds the original and current hashes, both payload IDs, the canonical executable payload ID, and the exact diff; it also preserves the original bytes under `receipts/status-sync-input-migration/originals/`. Filename equality, an old absolute path alone, or operator attestation never authorizes this migration.
+If the logical intake path still exists but its bytes changed after the recorded execution, recover the exact original bytes and add `--original-updates-file <restored-original.json>` to both commands. This governed `historical-input-change` mode requires the evidence's direct `input_hash` to match the restored bytes and its direct `input_path` to match the current logical intake path. This includes the common LF-to-CRLF checkout case: the Git blob or restored LF file must hash exactly to the old execution receipt, while the current CRLF file has a different raw hash. The command parses both JSON documents, canonicalizes the executable envelope (`updates`, status/action commands, workstream routes, owners, due/trigger, Source, milestones, status intents, and baseline controls), and fails closed on any executable difference. Formatting, line endings, and top-level non-execution metadata may differ. The durable migration receipt binds the original and current hashes, both payload IDs, the canonical executable payload ID, the evidence kind/identity, and the exact diff; it also preserves the original bytes under `receipts/status-sync-input-migration/originals/`. Filename equality, an old absolute path alone, or operator attestation never authorizes this migration.
 
 ## Canonical WDR Field Deduplication
 
@@ -144,17 +144,27 @@ A historical value may be `satisfied_by: superseded-lineage` only when durable r
 
 For WDR fields, receipt-bound or intake-bound daily-log commands must provide the ordered values. `change_notes` and `risks` may additionally preserve an exact historical prefix whose only appended values are fully matched structured metadata such as `risk_id`, `baseline_revision`, `related_plan_item_ids`, or `Candidate CHK-* from <artifact>:<path>`. Status and dependency changes never use substring containment. Milestones require the stable milestone ID, baseline/roadmap revision facts, an old ordered milestone observation, and a later daily-log or durable correction receipt matching the current roadmap row. If current Source references a correction intake without a durable receipt, reconciliation returns `missing_correction_receipts` instead of a generic current mismatch. Missing history, missing rows, or ambiguous candidates remain partial.
 
-A partial result returns `verification_status: partial` and an exact `missing_commands` list; blocked errors always return `verification_status: blocked`, `missing_commands`, and `token: null`. Neither state issues a success receipt. Only an all-satisfied result issues a 15-minute, principal-bound, single-use token:
+A partial result returns `verification_status: partial` and an exact `missing_commands` list; blocked errors always return `verification_status: blocked`, `missing_commands`, and `token: null`. Ordinary partial reconciliation issues no token. An all-satisfied result issues a 15-minute, principal-bound, single-use token:
 
 ```bash
 uv run "{skill-root}/scripts/sync_status.py" reconcile-intake "{project-root}" --updates-file <intake.json> --memory-root "{memory-root}" --principal <operator-id> --token <single-use-token>
 ```
 
-Apply revalidates the complete read-set. Any newer WDR, ledger, baseline, projection, or intent lineage invalidates the token rather than overwriting current facts. The only committed business artifacts are the consumed token state and a content-bound durable `reconciliation` receipt under `receipts/status-sync/`, published atomically. Do not replay any of the remaining historical intakes until each one either receives this receipt or reports no missing commands under another supported evidence migration.
+Apply revalidates the complete read-set. Any newer WDR, ledger, baseline, projection, or intent lineage invalidates the token rather than overwriting current facts. The only committed business artifacts are the consumed token state and a content-bound durable `reconciliation` receipt under `receipts/status-sync/`, published atomically.
+
+For a legacy **non-atomic partial execution** only, use a joint closure instead of replaying or retiring the whole intake. First run ordinary dry-run and review the exact partition. Then repeat it with `--retire-missing` and a governance rationale:
+
+```bash
+uv run "{skill-root}/scripts/sync_status.py" reconcile-intake "{project-root}" --updates-file <intake.json> --memory-root "{memory-root}" --principal <governance-authority> --retire-missing --retirement-justification "<why every missing command was not executed and cannot be replayed safely>" --dry-run
+```
+
+This path uses read-only legacy normalization when terminal actions lack modern IDs. It is eligible only when the verified snapshot contains at least one command supported by canonical facts or lineage and at least one missing command. It retires exactly the current `missing_commands` partition; if no command reconciles, retire the whole intake through the governed retirement flow, and if all commands reconcile, use ordinary reconciliation. Apply with the unchanged arguments and returned token, replacing `--dry-run` with `--token <single-use-token>`.
+
+The transaction atomically consumes the token and writes a content-bound `partial-closure` receipt under `receipts/status-sync-partial-closure/`. That receipt records every reconciled and retired command, the exact command-index partition, parser mode, read-set, principal, justification, and a `closed-intake-must-not-be-replayed` policy. It has `status: closed` and `mode: reconcile-intake`; it is never accepted as successful execution lineage. A later `update` of the same bytes returns `already-closed` without executing the retired commands, and whole-intake retirement is blocked because every command already has a terminal disposition.
 
 ## Governed Historical Intake Retirement
 
-Use retirement only for an executable historical intake that cannot legitimately receive an execution, migration, or reconciliation receipt. Retirement never changes the intake bytes and never claims the business commands executed.
+Use retirement only for an executable historical intake that cannot legitimately receive an execution, migration, reconciliation, or partial-closure receipt. Retirement never changes the intake bytes and never claims the business commands executed.
 
 ```bash
 uv run "{skill-root}/scripts/sync_status.py" retire-intake "{project-root}" --updates-file <intake.json> --reason superseded-by --superseded-by <successor-intake-or-durable-receipt> --principal <governance-authority> --memory-root "{memory-root}" --dry-run

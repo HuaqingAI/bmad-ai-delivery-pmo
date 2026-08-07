@@ -26,6 +26,7 @@ BUSINESS_PACKET_VALUE = SCRIPT_GLOBALS["business_packet_value"]
 RECEIPT_CONTENT_ID = SCRIPT_GLOBALS["receipt_content_id"]
 PENDING_STATUS_SYNC_INTAKES = SCRIPT_GLOBALS["pending_status_sync_intakes"]
 VALID_INTAKE_RETIREMENT_RECEIPT = SCRIPT_GLOBALS["valid_intake_retirement_receipt"]
+VALID_INTAKE_PARTIAL_CLOSURE_RECEIPT = SCRIPT_GLOBALS["valid_intake_partial_closure_receipt"]
 PREPASS_SCRIPT = SCRIPT.parents[2] / "adp-agent-program-lead" / "scripts" / "adp-state-prepass.py"
 STATUS_SYNC_SCRIPT = SCRIPT.parents[2] / "adp-status-sync" / "scripts" / "sync_status.py"
 LOCALE_CATALOG_PATH = SCRIPT.parents[2] / "adp-plan-baseline" / "assets" / "locale-catalog.json"
@@ -1948,6 +1949,77 @@ class AdpStateAuditTests(unittest.TestCase):
                 ["intake/status-sync/pending-actions.json"],
             )
 
+    def test_historical_input_change_accepts_canonical_execution_receipt_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            intake = memory_root / "intake/status-sync/pending-actions.json"
+            original = project_root / "recovered/pending-actions-lf.json"
+            original.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"updates": [{"id": "l1-checkout", "next_actions": ["Confirm payment owner"]}]}
+            lf_bytes = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+            original.write_bytes(lf_bytes)
+            intake.write_bytes(lf_bytes.replace(b"\n", b"\r\n"))
+            execution_id = "ssr-" + "b" * 32
+            evidence = memory_root / "receipts/status-sync" / f"{execution_id}.json"
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            applied_at = "2026-06-20T02:00:00Z"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "receipt_schema_version": 1,
+                        "receipt_type": "execution",
+                        "execution_id": execution_id,
+                        "ok": True,
+                        "status": "applied",
+                        "durable": True,
+                        "dry_run": False,
+                        "input_path": str(intake.resolve()),
+                        "input_hash": "sha256:" + hashlib.sha256(original.read_bytes()).hexdigest(),
+                        "applied_at": applied_at,
+                        "mode": "update",
+                        "update_count": 1,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(STATUS_SYNC_SCRIPT),
+                "migrate-receipt",
+                str(project_root),
+                "--updates-file",
+                str(intake),
+                "--original-updates-file",
+                str(original),
+                "--evidence-file",
+                str(evidence),
+                "--applied-at",
+                applied_at,
+                "--attested-by",
+                "PMO-A",
+            ]
+            preview = json.loads(subprocess.run(
+                [*command, "--dry-run"], check=True, capture_output=True, text=True, encoding="utf-8"
+            ).stdout)
+            applied = json.loads(subprocess.run(
+                [*command, "--verified-plan-token", preview["verified_plan_token"]],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            ).stdout)
+            self.assertEqual(applied["receipt"]["migration"]["evidence_kind"], "execution-receipt")
+            self.assertTrue(SUCCESSFUL_RECEIPT_PAYLOAD(applied["receipt"], intake, payload))
+            self.assertEqual(PENDING_STATUS_SYNC_INTAKES(memory_root), [])
+
+            evidence.write_text(evidence.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            self.assertEqual(
+                [item["path"] for item in PENDING_STATUS_SYNC_INTAKES(memory_root)],
+                ["intake/status-sync/pending-actions.json"],
+            )
+
     def test_wrapper_attestation_receipt_cannot_self_prove_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
@@ -2971,6 +3043,76 @@ class AdpStateAuditTests(unittest.TestCase):
             self.assertTrue(SUCCESSFUL_RECEIPT_PAYLOAD(receipt, intake, payload))
             receipt["reconciliation"]["command_results"][0]["satisfied"] = False
             self.assertFalse(SUCCESSFUL_RECEIPT_PAYLOAD(receipt, intake, payload))
+
+    def test_partial_closure_receipt_disposes_exact_command_partition_without_execution_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir) / "_bmad-output/adp/memory"
+            intake = memory_root / "intake/status-sync/legacy-partial.json"
+            intake.parent.mkdir(parents=True)
+            payload = {"updates": [{"id": "l1-checkout", "progress": "Legacy partial"}]}
+            intake.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            input_hash = "sha256:" + hashlib.sha256(intake.read_bytes()).hexdigest()
+            command_results = [
+                {"command_type": "action", "command_index": 1, "satisfied": True, "matched_action_id": "ACT-1"},
+                {"command_type": "action", "command_index": 2, "satisfied": False, "reason": "not found"},
+            ]
+            read_set = [{"path": "actions/action-ledger.md", "fingerprint": "sha256:" + "1" * 64}]
+            snapshot = {
+                "input_path": str(intake.resolve()),
+                "input_hash": input_hash,
+                "update_count": 1,
+                "command_results": command_results,
+                "read_set": read_set,
+            }
+            partition = {"reconciled_command_indexes": [1], "retired_command_indexes": [2]}
+            receipt = {
+                "receipt_schema_version": 1,
+                "receipt_type": "partial-closure",
+                "ok": True,
+                "status": "closed",
+                "durable": True,
+                "dry_run": False,
+                "mode": "reconcile-intake",
+                "input_path": str(intake.resolve()),
+                "input_hash": input_hash,
+                "update_count": 1,
+                "closed_at": "2026-08-06T10:00:00Z",
+                "principal": "PMO-A",
+                "payload_id": RECEIPT_CONTENT_ID(payload),
+                "snapshot_id": RECEIPT_CONTENT_ID(snapshot),
+                "read_set": read_set,
+                "partial_closure": {
+                    "verification_method": "canonical-fact-reconciliation-plus-command-retirement",
+                    "verification_status": "verified",
+                    "all_commands_disposed": True,
+                    "plan": {
+                        "closure_kind": "legacy-non-atomic-partial-execution",
+                        "retirement_reason": "not-executed-and-unsafe-to-replay",
+                        "retirement_justification": "Legacy command was not executed and cannot be replayed safely",
+                        "payload_parser": "legacy-terminal-action-scan",
+                        **partition,
+                        "command_partition_digest": RECEIPT_CONTENT_ID(partition),
+                        "replay_policy": "closed-intake-must-not-be-replayed",
+                    },
+                    "command_results": command_results,
+                    "reconciled_commands": [command_results[0]],
+                    "retired_commands": [command_results[1]],
+                },
+            }
+            receipt["receipt_id"] = RECEIPT_CONTENT_ID(receipt)
+            receipt_root = memory_root / "receipts/status-sync-partial-closure"
+            receipt_root.mkdir(parents=True)
+            receipt_path = receipt_root / "ipc-test.json"
+            receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+            self.assertTrue(VALID_INTAKE_PARTIAL_CLOSURE_RECEIPT(receipt, intake, payload, memory_root))
+            self.assertEqual(PENDING_STATUS_SYNC_INTAKES(memory_root), [])
+            receipt["partial_closure"]["plan"]["retirement_justification"] = "tampered"
+            receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+            self.assertEqual(
+                [item["path"] for item in PENDING_STATUS_SYNC_INTAKES(memory_root)],
+                ["intake/status-sync/legacy-partial.json"],
+            )
 
     def test_chinese_deadline_heading_aliases_are_complete(self) -> None:
         for heading in (

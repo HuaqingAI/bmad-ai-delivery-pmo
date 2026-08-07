@@ -46,6 +46,7 @@ NON_EXECUTABLE_INTAKE_STATES = {
 }
 STATUS_SYNC_RECEIPT_SCHEMA_VERSION = 1
 STATUS_SYNC_RECEIPT_REL = Path("receipts") / "status-sync"
+INTAKE_PARTIAL_CLOSURE_RECEIPT_REL = Path("receipts") / "status-sync-partial-closure"
 INTAKE_RETIREMENT_RECEIPT_REL = Path("receipts") / "status-sync-retirement"
 INTAKE_RETIREMENT_REASONS = {"never-applied", "superseded-by", "invalid-proposal"}
 ATTESTATION_WRAPPER_FIELDS = {
@@ -3106,6 +3107,7 @@ def pending_status_intents(memory_root: Path) -> list[dict[str, str]]:
 def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
     root = memory_root / "intake" / "status-sync"
     receipts = load_status_sync_receipts(memory_root)
+    partial_closures = load_intake_partial_closure_receipts(memory_root)
     retirements = load_intake_retirement_receipts(memory_root)
     results: list[dict[str, Any]] = []
     for path in sorted(root.glob("*.json")):
@@ -3137,6 +3139,8 @@ def pending_status_sync_intakes(memory_root: Path) -> list[dict[str, Any]]:
             continue
         lifecycle_status = intake_lifecycle_status(payload)
         if has_successful_intake_receipt(path, payload, receipts):
+            continue
+        if has_valid_intake_partial_closure(path, payload, partial_closures, memory_root):
             continue
         if has_valid_intake_retirement(path, payload, retirements, memory_root):
             continue
@@ -3216,6 +3220,31 @@ def load_intake_retirement_receipts(memory_root: Path) -> dict[Path, dict[str, A
         if isinstance(payload, dict):
             receipts[path.resolve()] = payload
     return receipts
+
+
+def load_intake_partial_closure_receipts(memory_root: Path) -> dict[Path, dict[str, Any]]:
+    root = memory_root / INTAKE_PARTIAL_CLOSURE_RECEIPT_REL
+    receipts: dict[Path, dict[str, Any]] = {}
+    for path in sorted(root.glob("*.json")):
+        try:
+            payload = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            receipts[path.resolve()] = payload
+    return receipts
+
+
+def has_valid_intake_partial_closure(
+    intake_path: Path,
+    intake_payload: dict[str, Any],
+    receipts: dict[Path, dict[str, Any]],
+    memory_root: Path,
+) -> bool:
+    return any(
+        valid_intake_partial_closure_receipt(receipt, intake_path, intake_payload, memory_root)
+        for receipt in receipts.values()
+    )
 
 
 def has_valid_intake_retirement(
@@ -3511,6 +3540,87 @@ def valid_intake_retirement_receipt(
     return retirement_id == receipt_content_id(body)
 
 
+def valid_intake_partial_closure_receipt(
+    receipt: dict[str, Any],
+    intake_path: Path,
+    intake_payload: dict[str, Any],
+    memory_root: Path,
+) -> bool:
+    if (
+        receipt.get("receipt_schema_version") != STATUS_SYNC_RECEIPT_SCHEMA_VERSION
+        or receipt.get("receipt_type") != "partial-closure"
+        or receipt.get("ok") is not True
+        or receipt.get("status") != "closed"
+        or receipt.get("durable") is not True
+        or receipt.get("dry_run") is not False
+        or receipt.get("mode") != "reconcile-intake"
+        or not valid_receipt_timestamp(receipt.get("closed_at"))
+    ):
+        return False
+    updates = intake_payload.get("updates")
+    if not isinstance(updates, list) or not updates or receipt.get("update_count") != len(updates):
+        return False
+    raw_input_path = receipt.get("input_path")
+    if not isinstance(raw_input_path, str) or not portable_memory_path_matches(raw_input_path, intake_path, memory_root):
+        return False
+    input_hash = str(receipt.get("input_hash") or "").strip().lower()
+    raw_hash = hashlib.sha256(intake_path.read_bytes()).hexdigest()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", input_hash) or input_hash.removeprefix("sha256:") != raw_hash:
+        return False
+    if receipt.get("payload_id") != receipt_content_id(intake_payload):
+        return False
+    if not str(receipt.get("principal") or "").strip():
+        return False
+    closure = receipt.get("partial_closure") if isinstance(receipt.get("partial_closure"), dict) else {}
+    plan = closure.get("plan") if isinstance(closure.get("plan"), dict) else {}
+    command_results = closure.get("command_results")
+    read_set = receipt.get("read_set")
+    if not isinstance(command_results, list) or not command_results or not isinstance(read_set, list):
+        return False
+    reconciled = [item for item in command_results if isinstance(item, dict) and item.get("satisfied") is True]
+    retired = [item for item in command_results if isinstance(item, dict) and item.get("satisfied") is False]
+    if len(reconciled) + len(retired) != len(command_results) or not reconciled or not retired:
+        return False
+    try:
+        indexes = [int(item["command_index"]) for item in command_results]
+        reconciled_indexes = [int(item["command_index"]) for item in reconciled]
+        retired_indexes = [int(item["command_index"]) for item in retired]
+    except (ValueError, TypeError, KeyError):
+        return False
+    partition = {
+        "reconciled_command_indexes": reconciled_indexes,
+        "retired_command_indexes": retired_indexes,
+    }
+    snapshot_body = {
+        "input_path": receipt.get("input_path"),
+        "input_hash": receipt.get("input_hash"),
+        "update_count": receipt.get("update_count"),
+        "command_results": command_results,
+        "read_set": read_set,
+    }
+    body = dict(receipt)
+    receipt_id = body.pop("receipt_id", None)
+    return bool(
+        len(indexes) == len(set(indexes))
+        and sorted(indexes) == list(range(1, len(indexes) + 1))
+        and receipt.get("snapshot_id") == receipt_content_id(snapshot_body)
+        and closure.get("verification_method") == "canonical-fact-reconciliation-plus-command-retirement"
+        and closure.get("verification_status") == "verified"
+        and closure.get("all_commands_disposed") is True
+        and closure.get("reconciled_commands") == reconciled
+        and closure.get("retired_commands") == retired
+        and plan.get("closure_kind") == "legacy-non-atomic-partial-execution"
+        and plan.get("retirement_reason") == "not-executed-and-unsafe-to-replay"
+        and bool(str(plan.get("retirement_justification") or "").strip())
+        and plan.get("payload_parser") in {"current-writer-schema", "legacy-terminal-action-scan"}
+        and plan.get("replay_policy") == "closed-intake-must-not-be-replayed"
+        and plan.get("reconciled_command_indexes") == reconciled_indexes
+        and plan.get("retired_command_indexes") == retired_indexes
+        and plan.get("command_partition_digest") == receipt_content_id(partition)
+        and receipt_id == receipt_content_id(body)
+    )
+
+
 def successful_receipt_payload(receipt: dict[str, Any], intake_path: Path, intake_payload: dict[str, Any]) -> bool:
     if not receipt or receipt.get("receipt_schema_version") != STATUS_SYNC_RECEIPT_SCHEMA_VERSION:
         return False
@@ -3721,17 +3831,19 @@ def valid_historical_input_change_migration(
         evidence_payload = json.loads(evidence_bytes.decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
+    evidence_claims = original_historical_execution_evidence_claims(
+        evidence_payload,
+        evidence,
+        intake_path,
+        original_hash,
+        original_payload,
+        memory_root,
+    )
     if (
         "sha256:" + hashlib.sha256(original_bytes).hexdigest() != original_hash
         or migration.get("original_input_snapshot_hash") != original_hash
         or not fingerprints_equal(migration.get("evidence_hash"), hashlib.sha256(evidence_bytes).hexdigest())
-        or not valid_original_historical_execution_report(
-            evidence_payload,
-            intake_path,
-            original_hash,
-            original_payload,
-            memory_root,
-        )
+        or evidence_claims is None
     ):
         return False
     original_canonical = canonical_executable_payload_from_raw(original_payload)
@@ -3748,6 +3860,17 @@ def valid_historical_input_change_migration(
     return bool(
         not executable_changed_paths
         and migration.get("evidence_mode") == "update"
+        and (
+            migration.get("evidence_kind") == evidence_claims["evidence_kind"]
+            or evidence_claims["evidence_kind"] == "execution-report"
+            and migration.get("evidence_kind") is None
+        )
+        and (
+            evidence_claims["evidence_kind"] != "execution-receipt"
+            or migration.get("evidence_execution_id") == evidence_claims["evidence_execution_id"]
+            and migration.get("evidence_applied_at") == evidence_claims["evidence_applied_at"]
+            and normalized_receipt_timestamp(receipt.get("applied_at")) == evidence_claims["evidence_applied_at"]
+        )
         and isinstance(migration.get("evidence_input_path"), str)
         and portable_memory_path_matches(migration["evidence_input_path"], intake_path, memory_root)
         and migration.get("evidence_input_hash") == original_hash
@@ -3760,37 +3883,74 @@ def valid_historical_input_change_migration(
     )
 
 
-def valid_original_historical_execution_report(
+def original_historical_execution_evidence_claims(
     payload: Any,
+    evidence_path: Path,
     logical_input_path: Path,
     original_hash: str,
     original_payload: Any,
     memory_root: Path,
-) -> bool:
-    if not isinstance(payload, dict) or ATTESTATION_WRAPPER_FIELDS.intersection(payload):
-        return False
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    original_updates = original_payload.get("updates") if isinstance(original_payload, dict) else None
+    if not isinstance(original_updates, list) or not original_updates:
+        return None
+    if payload.get("receipt_type") is not None:
+        execution_id = str(payload.get("execution_id") or "").strip()
+        evidence_applied_at = normalized_receipt_timestamp(payload.get("applied_at"))
+        expected_path = memory_root / STATUS_SYNC_RECEIPT_REL / f"{execution_id}.json"
+        if (
+            payload.get("receipt_schema_version") != STATUS_SYNC_RECEIPT_SCHEMA_VERSION
+            or payload.get("receipt_type") != "execution"
+            or re.fullmatch(r"ssr-[0-9a-f]{32}", execution_id) is None
+            or evidence_path.resolve() != expected_path.resolve()
+            or payload.get("ok") is not True
+            or payload.get("status") != "applied"
+            or payload.get("durable") is not True
+            or payload.get("dry_run") is not False
+            or payload.get("mode") != "update"
+            or payload.get("update_count") != len(original_updates)
+            or evidence_applied_at is None
+            or not fingerprints_equal(payload.get("input_hash"), original_hash)
+        ):
+            return None
+        declared_path = payload.get("input_path")
+        if not isinstance(declared_path, str) or not portable_memory_path_matches(
+            declared_path,
+            logical_input_path,
+            memory_root,
+        ):
+            return None
+        return {
+            "evidence_kind": "execution-receipt",
+            "evidence_execution_id": execution_id,
+            "evidence_applied_at": evidence_applied_at,
+        }
+    if ATTESTATION_WRAPPER_FIELDS.intersection(payload):
+        return None
     if payload.get("ok") is not True or payload.get("dry_run") is not False:
-        return False
+        return None
     if str(payload.get("mode") or "").strip().lower() != "update":
-        return False
+        return None
     status = normalize_status(payload.get("status") or payload.get("lifecycle_status"))
     if status and status != "applied":
-        return False
+        return None
     updates = payload.get("updates")
-    original_updates = original_payload.get("updates") if isinstance(original_payload, dict) else None
     if (
         not isinstance(updates, list)
         or not updates
-        or not isinstance(original_updates, list)
         or len(updates) != len(original_updates)
         or not fingerprints_equal(payload.get("input_hash"), original_hash)
     ):
-        return False
+        return None
     declared_path = payload.get("input_path")
-    return bool(
+    if not (
         isinstance(declared_path, str)
         and portable_memory_path_matches(declared_path, logical_input_path, memory_root)
-    )
+    ):
+        return None
+    return {"evidence_kind": "execution-report"}
 
 
 def valid_migration_receipt(
@@ -3829,7 +3989,7 @@ def valid_migration_receipt(
         return False
     if evidence_hash.removeprefix("sha256:") != hashlib.sha256(evidence_bytes).hexdigest():
         return False
-    if not valid_original_execution_report(evidence_payload, receipt):
+    if not valid_original_execution_report(evidence_payload, receipt, path, memory_root):
         return False
     evidence_input_path = migration.get("evidence_input_path")
     evidence_input_hash = str(migration.get("evidence_input_hash") or "").strip().lower()
@@ -3842,8 +4002,42 @@ def valid_migration_receipt(
     return fingerprints_equal(evidence_input_hash, receipt_input_hash)
 
 
-def valid_original_execution_report(payload: Any, receipt: dict[str, Any]) -> bool:
-    if not isinstance(payload, dict) or ATTESTATION_WRAPPER_FIELDS.intersection(payload):
+def valid_original_execution_report(
+    payload: Any,
+    receipt: dict[str, Any],
+    evidence_path: Path,
+    memory_root: Path,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("receipt_type") is not None:
+        execution_id = str(payload.get("execution_id") or "").strip()
+        declared_path = payload.get("input_path")
+        receipt_path = receipt.get("input_path")
+        expected_input = (
+            resolve_portable_memory_path(receipt_path, memory_root)
+            if isinstance(receipt_path, str)
+            else None
+        )
+        return bool(
+            payload.get("receipt_schema_version") == STATUS_SYNC_RECEIPT_SCHEMA_VERSION
+            and payload.get("receipt_type") == "execution"
+            and re.fullmatch(r"ssr-[0-9a-f]{32}", execution_id) is not None
+            and evidence_path.resolve() == (memory_root / STATUS_SYNC_RECEIPT_REL / f"{execution_id}.json").resolve()
+            and payload.get("ok") is True
+            and payload.get("status") == "applied"
+            and payload.get("durable") is True
+            and payload.get("dry_run") is False
+            and payload.get("mode") == "update"
+            and payload.get("update_count") == receipt.get("update_count")
+            and normalized_receipt_timestamp(payload.get("applied_at"))
+            == normalized_receipt_timestamp(receipt.get("applied_at"))
+            and isinstance(declared_path, str)
+            and expected_input is not None
+            and portable_memory_path_matches(declared_path, expected_input, memory_root)
+            and fingerprints_equal(payload.get("input_hash"), receipt.get("input_hash"))
+        )
+    if ATTESTATION_WRAPPER_FIELDS.intersection(payload):
         return False
     if payload.get("ok") is not True or payload.get("dry_run") is not False:
         return False

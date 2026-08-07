@@ -2153,6 +2153,83 @@ class StatusSyncV2Tests(unittest.TestCase):
             self.assertIsNone(preview["verified_plan_token"])
             self.assertIsNone(preview["receipt"])
 
+    def test_historical_input_change_accepts_durable_execution_receipt_without_updates(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory_root = root / MEMORY_REL
+            current = memory_root / "intake/status-sync/crlf-checkout.json"
+            original = root / "recovered/lf-checkout.json"
+            current.parent.mkdir(parents=True, exist_ok=True)
+            original.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"updates": [{"id": "l1-checkout", "progress": "Historically applied"}]}
+            lf_bytes = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+            original.write_bytes(lf_bytes)
+            current.write_bytes(lf_bytes.replace(b"\n", b"\r\n"))
+            execution_id = "ssr-" + "a" * 32
+            evidence = memory_root / module.STATUS_SYNC_RECEIPT_REL / f"{execution_id}.json"
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            applied_at = "2026-06-20T02:00:00Z"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "receipt_schema_version": module.RECEIPT_SCHEMA_VERSION,
+                        "receipt_type": "execution",
+                        "execution_id": execution_id,
+                        "ok": True,
+                        "status": "applied",
+                        "durable": True,
+                        "dry_run": False,
+                        "input_path": str(current),
+                        "input_hash": file_id(original),
+                        "applied_at": applied_at,
+                        "mode": "update",
+                        "update_count": 1,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            command = [
+                "migrate-receipt",
+                str(root),
+                "--updates-file",
+                str(current),
+                "--original-updates-file",
+                str(original),
+                "--evidence-file",
+                str(evidence),
+                "--applied-at",
+                applied_at,
+                "--attested-by",
+                "PMO-A",
+            ]
+
+            _, preview = self.run_cli(*command, "--dry-run")
+            self.assertEqual(preview["verification_status"], "verified")
+            migration = preview["receipt"]["migration"]
+            self.assertEqual(migration["evidence_kind"], "execution-receipt")
+            self.assertEqual(migration["evidence_execution_id"], execution_id)
+            self.assertEqual(migration["evidence_applied_at"], applied_at)
+            self.assertEqual(migration["original_input_hash"], file_id(original))
+            self.assertEqual(migration["current_input_hash"], file_id(current))
+
+            _, applied = self.run_cli(*command, "--verified-plan-token", preview["verified_plan_token"])
+            receipt_path = Path(applied["receipt_path"])
+            self.assertIsNotNone(module.durable_status_receipt_record(memory_root, receipt_path))
+
+            _, mismatched = self.run_cli(
+                *command[:-4],
+                "--applied-at",
+                "2026-06-20T02:00:01Z",
+                "--attested-by",
+                "PMO-A",
+                "--dry-run",
+            )
+            self.assertEqual(mismatched["verification_status"], "unverified")
+            self.assertIn("exactly match durable execution receipt", mismatched["reason"])
+
     def test_never_applied_retirement_rejects_canonical_execution_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2278,6 +2355,122 @@ class StatusSyncV2Tests(unittest.TestCase):
             self.assertEqual([item["requested_action_id"] for item in preview["missing_commands"]], ["ACT-MISSING-999"])
             self.assertEqual(sorted(receipt_root.glob("*.json")), existing_receipts)
             self.assertEqual(Path(created["action_ledger"]).read_text(encoding="utf-8").count("ACT-MISSING-999"), 0)
+
+    def test_reconcile_intake_closes_legacy_partial_execution_without_replay(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_record(root, "l1-checkout")
+            created = self.create_action(root, "l1-checkout", "ACT-RECON-001")
+            intake_root = root / MEMORY_REL / "intake/status-sync"
+            intake_root.mkdir(parents=True, exist_ok=True)
+            intake = intake_root / "legacy-partial.json"
+            intake.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {
+                                "id": "l1-checkout",
+                                "actions": [
+                                    {
+                                        "action_id": "ACT-RECON-001",
+                                        "action": "Publish evidence for l1-checkout",
+                                    },
+                                    {
+                                        "status": "done",
+                                        "owner": "Legacy Owner",
+                                        "workstream": "l1-checkout",
+                                        "action": "Legacy misclassified fact that was never executed",
+                                        "source": "meeting#legacy",
+                                        "due": "historical",
+                                        "closure_criteria": "Legacy note exists",
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            justification = (
+                "The first command has canonical lineage; the legacy terminal command was misclassified, "
+                "never executed, and cannot be replayed safely"
+            )
+
+            _, ordinary = self.run_cli(
+                "reconcile-intake", str(root), "--updates-file", str(intake), "--dry-run"
+            )
+            self.assertEqual(ordinary["verification_status"], "partial")
+            self.assertEqual(ordinary["payload_parser"], "legacy-terminal-action-scan")
+            self.assertIsNone(ordinary["token"])
+
+            command = [
+                "reconcile-intake",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--retire-missing",
+                "--retirement-justification",
+                justification,
+                "--principal",
+                "PMO-A",
+            ]
+            _, preview = self.run_cli(*command, "--dry-run")
+            self.assertEqual(preview["verification_status"], "verified")
+            self.assertFalse(preview["all_satisfied"])
+            self.assertTrue(preview["all_commands_disposed"])
+            self.assertEqual(preview["partial_closure_plan"]["reconciled_command_indexes"], [1])
+            self.assertEqual(preview["partial_closure_plan"]["retired_command_indexes"], [2])
+
+            token_path = module.reconciliation_token_path(root / MEMORY_REL, preview["token"])
+            before_token = token_path.read_bytes()
+            failed, failure = self.run_cli(
+                *command,
+                "--token",
+                preview["token"],
+                "--fail-after-stage",
+                check=False,
+            )
+            self.assertEqual(failed.returncode, 2)
+            self.assertEqual(failure["error_code"], "INTAKE_PARTIAL_CLOSURE_INJECTED_FAILURE")
+            self.assertEqual(token_path.read_bytes(), before_token)
+            self.assertFalse((root / MEMORY_REL / module.INTAKE_PARTIAL_CLOSURE_RECEIPT_REL).exists())
+
+            _, applied = self.run_cli(*command, "--token", preview["token"])
+            receipt = applied["receipt"]
+            receipt_path = Path(applied["receipt_path"])
+            self.assertEqual(applied["status"], "closed")
+            self.assertEqual(receipt["receipt_type"], "partial-closure")
+            self.assertEqual(receipt["status"], "closed")
+            self.assertEqual(len(receipt["partial_closure"]["reconciled_commands"]), 1)
+            self.assertEqual(len(receipt["partial_closure"]["retired_commands"]), 1)
+            self.assertTrue(
+                module.partial_closure_receipt_valid(receipt, intake.resolve(), file_id(intake), 1)
+            )
+            self.assertIsNone(module.durable_status_receipt_record(root / MEMORY_REL, receipt_path))
+
+            _, replay = self.run_cli("update", str(root), "--updates-file", str(intake))
+            self.assertEqual(replay["status"], "already-closed")
+            ledger_text = Path(created["action_ledger"]).read_text(encoding="utf-8")
+            self.assertNotIn("Legacy misclassified fact that was never executed", ledger_text)
+
+            completed, blocked = self.run_cli(
+                "retire-intake",
+                str(root),
+                "--updates-file",
+                str(intake),
+                "--reason",
+                "invalid-proposal",
+                "--justification",
+                "Do not replay",
+                "--principal",
+                "PMO-A",
+                "--dry-run",
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(blocked["error_code"], "INTAKE_RETIREMENT_ALREADY_CLOSED")
 
     def test_reconcile_intake_rejects_stale_status_lineage_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

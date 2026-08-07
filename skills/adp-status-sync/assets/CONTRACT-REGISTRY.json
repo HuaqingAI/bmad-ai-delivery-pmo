@@ -1145,7 +1145,8 @@
         {"category": "fact", "source_kind": "business-decision-packet", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "decisions/business-decision-packets", "glob": "*.md"}, "affects": ["/"]},
         {"category": "fact", "source_kind": "l0-reference", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "l0", "glob": "**/*"}, "affects": ["/"]},
         {"category": "fact", "source_kind": "pending-intake", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "intake", "glob": "**/*.json"}, "affects": ["/"]},
-        {"category": "audit", "source_kind": "operation-receipt", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "receipts/status-sync", "glob": "*.json"}, "affects": ["/"]}
+        {"category": "audit", "source_kind": "operation-receipt", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "receipts/status-sync", "glob": "*.json"}, "affects": ["/"]},
+        {"category": "audit", "source_kind": "partial-closure-receipt", "cardinality": "zero-or-more", "enumerator": {"id": "glob-kind-v1", "root": "memory", "base": "receipts/status-sync-partial-closure", "glob": "*.json"}, "affects": ["/"]}
       ],
       "direct_upstreams": [{"kind": "action-projection-drift-verdict", "cardinality": "one", "affects": ["/"]}],
       "allowed_affects": ["/"],

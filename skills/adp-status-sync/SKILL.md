@@ -60,7 +60,7 @@ Add only fields that are reliable:
 - `--memory-root <path>` for non-default ADP memory
 - `--dry-run` to preview without writing
 
-For multiple workstreams, workflow-produced actions, updates-file execution, legacy authority-state bootstrap, receipt migration, or fact reconciliation of a receipt-less historical intake, load `references/batch-status-updates.md`; it owns the payload contract, preview acceptance, atomic apply, durable receipts, and migrations.
+For multiple workstreams, workflow-produced actions, updates-file execution, legacy authority-state bootstrap, receipt migration, fact reconciliation, or governed partial closure of a legacy non-atomic intake, load `references/batch-status-updates.md`; it owns the payload contract, preview acceptance, atomic apply, durable receipts, and migrations.
 
 If neither runtime works, manual fallback is valid only for one named workstream's volatile WDR fields plus one daily-log append. Batch files, milestones, structured actions, receipt-required intake, and any atomic multi-file update are blocked; preserve their input unchanged for retry.
 
