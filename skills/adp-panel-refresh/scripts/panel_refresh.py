@@ -83,6 +83,7 @@ SCRIPT_PATHS = {
     "flow-graph": SKILLS_ROOT / "adp-flow-graph/scripts/flow_graph.py",
     "meeting-pack": SKILLS_ROOT / "adp-meeting-pack/scripts/render_meeting_pack.py",
     "management-panel": SKILLS_ROOT / "adp-management-panel/scripts/management_panel.py",
+    "effective-config": SKILLS_ROOT / "adp-plan-baseline/scripts/adp_effective_config.py",
 }
 
 
@@ -203,7 +204,54 @@ def load_optional_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def source_inventory(memory_root: Path) -> dict[str, str]:
+def load_effective_config_module() -> Any:
+    path = SCRIPT_PATHS["effective-config"]
+    if not path.is_file():
+        raise RefreshError(
+            "EFFECTIVE_CONFIG_UNAVAILABLE",
+            f"shared effective-config resolver is missing: {path}",
+        )
+    spec = importlib.util.spec_from_file_location("adp_effective_config_for_refresh", path)
+    if spec is None or spec.loader is None:
+        raise RefreshError(
+            "EFFECTIVE_CONFIG_UNAVAILABLE",
+            f"cannot load shared effective-config resolver: {path}",
+        )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def effective_config_inventory(project_root: Path) -> dict[str, str]:
+    module = load_effective_config_module()
+    code, resolved = module.resolve_effective_config(project_root)
+    if code != 0 or not resolved.get("ok"):
+        raise RefreshError(
+            "EFFECTIVE_CONFIG_UNAVAILABLE",
+            str(resolved.get("error") or "shared effective config could not be resolved"),
+        )
+    inventory: dict[str, str] = {}
+    for source in resolved.get("sources_checked", []):
+        if not isinstance(source, dict) or source.get("exists") is not True:
+            continue
+        path = Path(str(source.get("path") or ""))
+        if not path.is_file():
+            continue
+        try:
+            relative = path.relative_to(project_root).as_posix()
+        except ValueError as exc:
+            raise RefreshError(
+                "EFFECTIVE_CONFIG_INVALID",
+                f"effective-config source is outside project root: {path}",
+            ) from exc
+        inventory[relative] = file_fingerprint(path)
+    return inventory
+
+
+def source_inventory(
+    memory_root: Path,
+    project_root: Path | None = None,
+) -> dict[str, str]:
     if not memory_root.is_dir():
         raise RefreshError("MEMORY_ROOT_MISSING", f"ADP memory root does not exist: {memory_root}")
     inventory: dict[str, str] = {}
@@ -220,7 +268,9 @@ def source_inventory(memory_root: Path) -> dict[str, str]:
             for prefix in SOURCE_PREFIXES
         ):
             inventory[relative] = file_fingerprint(path)
-    return inventory
+    if project_root is not None:
+        inventory.update(effective_config_inventory(project_root.resolve()))
+    return dict(sorted(inventory.items()))
 
 
 def pending_intent_ids(memory_root: Path) -> list[str]:
@@ -676,7 +726,7 @@ def detect(
     fixture: bool = False,
     selection_policy: str | None = None,
 ) -> dict[str, Any]:
-    live = source_inventory(memory_root)
+    live = source_inventory(memory_root, project_root)
     previous = last_successful_receipt(memory_root)
     prior = previous.get("source_fingerprints") if isinstance(previous.get("source_fingerprints"), dict) else {}
     changed = sorted(
@@ -763,7 +813,7 @@ def supersede_stale_dirty_plan(
             "superseded_by_refresh_id": plan["refresh_id"],
             "superseded_by_plan_id": plan["plan_id"],
             "superseded_by_plan_path": str(plan_path),
-            "supersede_reason": "fact sources changed after the dirty refresh plan",
+            "supersede_reason": "bound sources changed after the dirty refresh plan",
         }
     )
     atomic_json(previous_path, previous)
@@ -1247,7 +1297,11 @@ def validate_staged_publication(
             "REFRESH_PUBLICATION_INELIGIBLE",
             "staged action projection drift must be repaired before publication",
         )
-    expected_sources = source_inventory(staged_root) if plan.get("fixture") else plan.get("source_fingerprints")
+    expected_sources = (
+        source_inventory(staged_root, project_root)
+        if plan.get("fixture")
+        else plan.get("source_fingerprints")
+    )
     binding_mismatches = source_binding_mismatches(audit.get("source_fingerprints"), expected_sources)
     readiness = strict_audit_readiness(audit, binding_mismatches)
     if readiness != "ready":
@@ -1562,9 +1616,9 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
                     "SELECTION_POLICY_CHANGED_SINCE_PLAN",
                     "selection policy changed after refresh planning; run plan again",
                 )
-    live = source_inventory(memory_root)
+    live = source_inventory(memory_root, project_root)
     if live != plan.get("source_fingerprints"):
-        raise RefreshError("SOURCE_CHANGED_SINCE_PLAN", "fact sources changed after refresh planning; run plan again")
+        raise RefreshError("SOURCE_CHANGED_SINCE_PLAN", "bound sources changed after refresh planning; run plan again")
     receipt_path = memory_root / RECEIPTS_REL / f"{plan['refresh_id']}.json"
     existing_receipt = load_optional_json(receipt_path)
     if existing_receipt.get("status") == "published":
@@ -1657,8 +1711,8 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
 
         panel_result = results.get("management-panel", {})
         with fact_read_lock(memory_root):
-            if source_inventory(memory_root) != plan["source_fingerprints"]:
-                raise RefreshError("SOURCE_CHANGED_DURING_REFRESH", "fact sources changed while projections were rebuilding")
+            if source_inventory(memory_root, project_root) != plan["source_fingerprints"]:
+                raise RefreshError("SOURCE_CHANGED_DURING_REFRESH", "bound sources changed while projections were rebuilding")
             prepublish_validation = validate_staged_publication(
                 args,
                 project_root,
@@ -1677,7 +1731,11 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
                     allow_fixture_sources=bool(plan.get("fixture")),
                 )
                 publication = atomic_publish(memory_root, staged_root, changed, workspace, plan["plan_id"])
-            committed_sources = source_inventory(memory_root) if plan.get("fixture") else plan["source_fingerprints"]
+            committed_sources = (
+                source_inventory(memory_root, project_root)
+                if plan.get("fixture")
+                else plan["source_fingerprints"]
+            )
         generation_id = content_id(
             {
                 "refresh_id": plan["refresh_id"],
@@ -1784,7 +1842,7 @@ def inspect_refresh(
 
 def _inspect_refresh_unlocked(args: argparse.Namespace, project_root: Path, memory_root: Path) -> dict[str, Any]:
     receipt = last_successful_receipt(memory_root)
-    live = source_inventory(memory_root)
+    live = source_inventory(memory_root, project_root)
     pending = pending_intent_ids(memory_root)
     changed = sorted(
         path
