@@ -336,6 +336,39 @@ def current_policy_path(memory_root: Path, explicit: str | None, project_root: P
     return resolve_external_path(project_root, value) if isinstance(value, str) and value else None
 
 
+def published_policy_candidate(
+    memory_root: Path,
+    project_root: Path,
+) -> tuple[str | None, str | None]:
+    receipt = last_successful_receipt(memory_root)
+    if receipt.get("status") != "published":
+        return None, None
+    raw_path = receipt.get("selection_policy")
+    claimed_id = receipt.get("selection_policy_id")
+    if raw_path is None and claimed_id is None:
+        return None, None
+    if not isinstance(raw_path, str) or not raw_path or not isinstance(claimed_id, str) or not claimed_id:
+        raise RefreshError(
+            "REFRESH_RECEIPT_INVALID",
+            "published receipt selection policy binding is incomplete",
+        )
+    path = resolve_external_path(project_root, raw_path)
+    policy = load_json(path)
+    policy_id = content_id(policy)
+    if policy_id != claimed_id:
+        raise RefreshError(
+            "REFRESH_RECEIPT_INVALID",
+            "published receipt selection policy content identity is stale",
+        )
+    try:
+        validate_policy(memory_root, path)
+    except RefreshError as exc:
+        if exc.code == "SELECTION_POLICY_INVALID":
+            return None, None
+        raise
+    return str(path), policy_id
+
+
 def load_management_panel_module() -> Any:
     path = SCRIPT_PATHS["management-panel"]
     spec = importlib.util.spec_from_file_location("adp_management_panel_for_refresh", path)
@@ -556,6 +589,9 @@ def pause_for_policy(
     candidate_policy_path = workspace / "selection-policy.json"
     atomic_json(candidates_path, candidates)
     atomic_json(candidate_policy_path, candidates["candidate_policy"])
+    plan["selection_policy"] = None
+    plan["selection_policy_id"] = None
+    plan["selection_policy_source"] = None
     plan["status"] = "awaiting-policy"
     plan["retry_from_instance_key"] = "meeting-pack:fde-morning"
     plan["awaiting_policy"] = {
@@ -570,6 +606,9 @@ def pause_for_policy(
             "current_run_id": plan["refresh_id"],
             "current_status": "awaiting-policy",
             "retry_from_instance_key": plan["retry_from_instance_key"],
+            "selection_policy": None,
+            "selection_policy_id": None,
+            "selection_policy_source": None,
             "pending_invalidations": plan.get("nodes", []),
             "metrics": status.get("metrics", default_metrics()),
         }
@@ -601,6 +640,7 @@ def bind_policy_to_plan(
         atomic_json(durable_path, policy)
     plan["selection_policy"] = str(durable_path)
     plan["selection_policy_id"] = policy_id
+    plan["selection_policy_source"] = "staged"
     plan["status"] = next_status
     plan["retry_from_instance_key"] = "meeting-pack:fde-morning"
     plan.pop("awaiting_policy", None)
@@ -614,6 +654,7 @@ def bind_policy_to_plan(
             "retry_from_instance_key": plan["retry_from_instance_key"],
             "selection_policy": str(durable_path),
             "selection_policy_id": policy_id,
+            "selection_policy_source": "staged",
             "pending_invalidations": plan.get("nodes", []),
             "metrics": status.get("metrics", default_metrics()),
         }
@@ -633,9 +674,17 @@ def bind_policy_to_plan(
     }
 
 
-def invalidated_nodes(changed_sources: list[str], fixture: bool, *, policy_changed: bool = False) -> list[str]:
+def invalidated_nodes(
+    changed_sources: list[str],
+    fixture: bool,
+    *,
+    policy_changed: bool = False,
+    policy_checkpoint_required: bool = False,
+) -> list[str]:
     if fixture:
         return ["management-panel"] if changed_sources or policy_changed else []
+    if policy_checkpoint_required:
+        return list(NODE_ORDER)
     if policy_changed and not changed_sources:
         return ["management-panel"]
     if not changed_sources:
@@ -742,11 +791,30 @@ def detect(
         drift_count, drift_action_ids, repair_batches = 0, [], []
     else:
         drift_count, drift_action_ids, repair_batches = audit_drift_details(audit)
-    policy_path = current_policy_path(memory_root, selection_policy, project_root)
-    policy_id = content_id(load_json(policy_path)) if policy_path and policy_path.is_file() else None
+    if selection_policy:
+        policy_path = resolve_external_path(project_root, selection_policy)
+        policy_id = content_id(load_json(policy_path)) if policy_path.is_file() else None
+    elif fixture:
+        policy_path = current_policy_path(memory_root, None, project_root)
+        policy_id = content_id(load_json(policy_path)) if policy_path and policy_path.is_file() else None
+    else:
+        published_path, policy_id = published_policy_candidate(memory_root, project_root)
+        policy_path = Path(published_path) if published_path else None
     prior_policy_id = previous.get("selection_policy_id")
-    policy_changed = bool(policy_id and prior_policy_id != policy_id)
-    nodes = invalidated_nodes(changed, fixture, policy_changed=policy_changed)
+    policy_changed = bool(previous and prior_policy_id != policy_id)
+    policy_checkpoint_required = bool(
+        not fixture
+        and selection_policy is None
+        and isinstance(prior_policy_id, str)
+        and prior_policy_id
+        and policy_id is None
+    )
+    nodes = invalidated_nodes(
+        changed,
+        fixture,
+        policy_changed=policy_changed,
+        policy_checkpoint_required=policy_checkpoint_required,
+    )
     resume = interrupted_plan(memory_root)
     blocked_reasons: list[str] = []
     if pending:
@@ -763,6 +831,7 @@ def detect(
         "selection_policy": str(policy_path) if policy_path else None,
         "selection_policy_id": policy_id,
         "selection_policy_changed": policy_changed,
+        "selection_policy_checkpoint_required": policy_checkpoint_required,
         "pending_intent_ids": pending,
         "drift_count": drift_count,
         "drift_action_ids": drift_action_ids,
@@ -770,21 +839,25 @@ def detect(
         "drift_audit_path": str(audit_path) if audit_path else None,
         "drift_audit_stale": drift_audit_stale,
         "invalidated_nodes": nodes,
-        "recommended_mode": "blocked" if blocked_reasons else ("full" if changed else ("panel-only" if policy_changed else "reuse")),
+        "recommended_mode": "blocked" if blocked_reasons else (
+            "full"
+            if changed or policy_checkpoint_required
+            else ("panel-only" if policy_changed else "reuse")
+        ),
         "blocked_reasons": blocked_reasons,
         "recommended_workflows": ["adp-status-sync"] if blocked_reasons else [],
         **resume,
     }
 
 
-def supersede_stale_dirty_plan(
+def supersede_stale_nonterminal_plan(
     detection: dict[str, Any],
     plan: dict[str, Any],
     plan_path: Path,
 ) -> dict[str, str]:
     raw_path = detection.get("resume_plan_path")
     if (
-        detection.get("resume_status") != "dirty"
+        detection.get("resume_status") not in {"planned", "refreshing", "dirty", "awaiting-policy"}
         or detection.get("blocked_reasons")
         or not isinstance(raw_path, str)
     ):
@@ -798,7 +871,7 @@ def supersede_stale_dirty_plan(
         ) from exc
     previous = load_optional_json(previous_path)
     if (
-        previous.get("status") != "dirty"
+        previous.get("status") not in {"planned", "refreshing", "dirty", "awaiting-policy"}
         or previous.get("refresh_id") == plan.get("refresh_id")
         or previous.get("source_fingerprints") == detection.get("source_fingerprints")
     ):
@@ -813,7 +886,7 @@ def supersede_stale_dirty_plan(
             "superseded_by_refresh_id": plan["refresh_id"],
             "superseded_by_plan_id": plan["plan_id"],
             "superseded_by_plan_path": str(plan_path),
-            "supersede_reason": "bound sources changed after the dirty refresh plan",
+            "supersede_reason": "bound sources changed after the nonterminal refresh plan",
         }
     )
     atomic_json(previous_path, previous)
@@ -837,23 +910,28 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
         raise RefreshError("PERIOD_INVALID", "period must satisfy period-start <= period-end <= as-of")
     selection_policy = None
     selection_policy_id = None
+    selection_policy_source = None
     if args.selection_policy:
         policy_path = resolve_external_path(project_root, args.selection_policy)
         selection_policy = str(policy_path)
         _, selection_policy_id, _ = validate_policy(memory_root, policy_path)
+        selection_policy_source = "explicit"
     elif not args.fixture:
-        prior = load_optional_json(memory_root / STATUS_REL)
-        selection_policy = prior.get("selection_policy") if isinstance(prior.get("selection_policy"), str) else None
-        if selection_policy:
-            policy_path = resolve_external_path(project_root, selection_policy)
-            _, selection_policy_id, _ = validate_policy(memory_root, policy_path)
+        selection_policy = detection.get("selection_policy")
+        selection_policy_id = detection.get("selection_policy_id")
+        selection_policy_source = "published" if selection_policy and selection_policy_id else None
     blocked = list(detection["blocked_reasons"])
     previous_receipt = last_successful_receipt(memory_root)
     if args.fixture:
         planned_nodes = ["management-panel"] if (
             detection["changed_sources"] or detection["selection_policy_changed"] or args.force_full or not previous_receipt
         ) else []
-    elif detection["changed_sources"] or args.force_full or not previous_receipt:
+    elif (
+        detection["changed_sources"]
+        or detection["selection_policy_checkpoint_required"]
+        or args.force_full
+        or not previous_receipt
+    ):
         planned_nodes = list(NODE_ORDER)
     elif detection["selection_policy_changed"]:
         planned_nodes = ["management-panel"]
@@ -868,11 +946,16 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
         "fde_period_end": args.fde_period_end,
         "selection_policy": selection_policy,
         "selection_policy_id": selection_policy_id,
+        "selection_policy_source": selection_policy_source,
         "fixture": bool(args.fixture),
         "source_fingerprints": detection["source_fingerprints"],
         "changed_sources": detection["changed_sources"],
         "pending_intent_ids": detection["pending_intent_ids"],
-        "mode": "full" if args.force_full or detection["changed_sources"] else ("panel-only" if detection["selection_policy_changed"] else "reuse"),
+        "mode": "full" if (
+            args.force_full
+            or detection["changed_sources"]
+            or detection["selection_policy_checkpoint_required"]
+        ) else ("panel-only" if detection["selection_policy_changed"] else "reuse"),
         "blocked_reasons": blocked,
         "nodes": [
             {"instance_key": node, "status": "pending", "output": None, "error": None}
@@ -900,7 +983,7 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
             "plan_id": plan_id,
         }
         atomic_json(path, plan)
-    superseded = supersede_stale_dirty_plan(detection, plan, path)
+    superseded = supersede_stale_nonterminal_plan(detection, plan, path)
     status = load_optional_json(memory_root / STATUS_REL)
     status.update(
         {
@@ -910,6 +993,7 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
             "pending_invalidations": plan["nodes"],
             "selection_policy": selection_policy,
             "selection_policy_id": selection_policy_id,
+            "selection_policy_source": selection_policy_source,
             "retry_from_instance_key": plan["retry_from_instance_key"],
             "metrics": status.get("metrics", default_metrics()),
         }
@@ -1712,6 +1796,27 @@ def validate_plan_selection_policy(
     return context
 
 
+def pause_for_rejected_published_policy(
+    memory_root: Path,
+    plan: dict[str, Any],
+    plan_path: Path,
+    error: RefreshError,
+) -> dict[str, Any]:
+    workspace = workspace_for(memory_root, str(plan.get("refresh_id") or ""))
+    plan["rejected_published_selection_policy"] = {
+        "selection_policy": plan.get("selection_policy"),
+        "selection_policy_id": plan.get("selection_policy_id"),
+        "reason": str(error),
+    }
+    return pause_for_policy(
+        memory_root,
+        workspace / "memory",
+        workspace,
+        plan,
+        plan_path,
+    )
+
+
 def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path) -> dict[str, Any]:
     plan, plan_path = load_or_create_plan(args, project_root, memory_root)
     validate_plan_freshness(memory_root, plan, plan_path)
@@ -1734,11 +1839,28 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
             workspace_for(memory_root, plan["refresh_id"]) / "memory",
             next_status="planned",
         )
-    if not plan.get("fixture"):
-        validate_plan_selection_policy(project_root, memory_root, plan)
     live = source_inventory(memory_root, project_root)
     if live != plan.get("source_fingerprints"):
         raise RefreshError("SOURCE_CHANGED_SINCE_PLAN", "bound sources changed after refresh planning; run plan again")
+    if not plan.get("fixture"):
+        try:
+            validate_plan_selection_policy(project_root, memory_root, plan)
+        except RefreshError as exc:
+            if (
+                exc.code == "SELECTION_POLICY_INVALID"
+                and plan.get("selection_policy_source") == "published"
+            ):
+                return {
+                    **pause_for_rejected_published_policy(
+                        memory_root,
+                        plan,
+                        plan_path,
+                        exc,
+                    ),
+                    "ok": True,
+                    "operation": "apply",
+                }
+            raise
     receipt_path = memory_root / RECEIPTS_REL / f"{plan['refresh_id']}.json"
     existing_receipt = load_optional_json(receipt_path)
     if existing_receipt.get("status") == "published":
@@ -1796,6 +1918,21 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
                 try:
                     validate_plan_selection_policy(project_root, memory_root, plan)
                 except Exception as exc:
+                    if (
+                        isinstance(exc, RefreshError)
+                        and exc.code == "SELECTION_POLICY_INVALID"
+                        and plan.get("selection_policy_source") == "published"
+                    ):
+                        return {
+                            **pause_for_rejected_published_policy(
+                                memory_root,
+                                plan,
+                                plan_path,
+                                exc,
+                            ),
+                            "ok": True,
+                            "operation": "apply",
+                        }
                     plan["status"] = "dirty"
                     plan["retry_from_instance_key"] = "meeting-pack:fde-morning"
                     atomic_json(plan_path, plan)
