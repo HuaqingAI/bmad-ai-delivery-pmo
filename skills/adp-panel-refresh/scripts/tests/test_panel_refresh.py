@@ -81,6 +81,75 @@ class PanelRefreshTests(unittest.TestCase):
         memory.mkdir(parents=True)
         return memory
 
+    def scaffold_program_status_sources(self, root: Path, memory: Path) -> None:
+        config = root / "_bmad/bmb/config.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "communication_language: English\n"
+            "document_output_language: English\n"
+            "output_folder: '{project-root}/_bmad-output'\n"
+            "default_reporting_cadence: weekly\n"
+            "status_stale_after_days: 7\n"
+            "schedule_variance_tolerance_days: 0\n"
+            "meeting_pack_item_limit: 10\n",
+            encoding="utf-8",
+        )
+        source = {"type": "approved-plan", "reference": "docs/plan.md", "confirmed_by": "Program Owner"}
+        baseline = {
+            "schema_version": "1.0",
+            "baseline_id": "PROGRAM-BASELINE",
+            "revision": 1,
+            "confirmation_status": "approved",
+            "project": {
+                "name": "Panel Refresh Test",
+                "owner": "Program Owner",
+                "target_date": "2026-12-31",
+                "source": source,
+            },
+            "default_tolerance_days": 0,
+            "gates": [],
+            "milestones": [
+                {
+                    "id": "MS-ONE",
+                    "name": "Milestone one",
+                    "workstream_id": "ws-one",
+                    "planned_date": "2026-08-15",
+                    "owner": "FDE One",
+                    "confirmation_status": "approved",
+                    "source": source,
+                    "dependencies": [],
+                    "baseline_revision": 1,
+                    "critical_path": True,
+                }
+            ],
+            "critical_path": ["MS-ONE"],
+            "weighting": {"enabled": False, "completion_measure": None, "source": None},
+            "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+        baseline_path = memory / "plans/program-baseline.md"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(
+            "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+            + json.dumps(baseline, indent=2)
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        wdr = memory / "workstreams/ws-one/delivery-record.md"
+        wdr.parent.mkdir(parents=True, exist_ok=True)
+        wdr.write_text(
+            "# Workstream Delivery Record\n\n"
+            "## Identity\n\n"
+            "- Workstream ID: ws-one\n\n"
+            "## Roadmap\n\n"
+            "| Milestone ID | Milestone | Type | Status | Planned | Forecast | Actual | "
+            "Owner | Confidence | Depends On | Source | Baseline Revision |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| MS-ONE | Milestone one | checkpoint | planned | 2026-08-15 | 2026-08-15 | "
+            "TBD | FDE One | high | TBD | workstreams/ws-one/evidence.md#status | 1 |\n",
+            encoding="utf-8",
+        )
+
     def run_cli(self, *args: str, check: bool = True) -> tuple[subprocess.CompletedProcess[str], dict]:
         completed = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
@@ -193,6 +262,143 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(inspected["publication_eligibility"], "blocked")
             self.assertEqual(inspected["changed_sources"], ["actions/action-ledger.md"])
             self.assertEqual(inspected["recommended_workflows"], ["adp-panel-refresh"])
+
+    def test_full_refresh_runs_program_status_against_staging_memory_root(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = self.scaffold(root)
+            self.scaffold_program_status_sources(root, memory)
+            planned = self.plan(root)
+            plan_path = Path(planned["plan_path"])
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            today = module.datetime.now(module.timezone.utc).date()
+            plan.update(
+                {
+                    "source_as_of": today.isoformat(),
+                    "period_start": (today - module.timedelta(days=6)).isoformat(),
+                    "period_end": today.isoformat(),
+                    "fixture": True,
+                    "selection_policy": "fixture-policy.json",
+                    "selection_policy_id": "sha256:" + "a" * 64,
+                    "status": "planned",
+                    "retry_from_instance_key": module.NODE_ORDER[0],
+                    "nodes": [
+                        {"instance_key": node, "status": "pending", "output": None, "error": None}
+                        for node in module.NODE_ORDER
+                    ],
+                }
+            )
+            module.atomic_json(plan_path, plan)
+            args = module.parse_args(
+                [
+                    "apply",
+                    str(root),
+                    "--plan",
+                    str(plan_path),
+                    "--fail-after-node",
+                    "management-panel",
+                ]
+            )
+            original_execute_node = module.execute_node
+
+            def execute_with_real_status(
+                node: str,
+                node_args,
+                current_plan: dict,
+                project_root: Path,
+                staged_root: Path,
+                workspace: Path,
+                results: dict,
+            ) -> dict:
+                result_path = workspace / "results" / (node.replace(":", "-") + ".json")
+                if node == "state-audit":
+                    prepass = workspace / "state-audit-prepass.json"
+                    module.atomic_json(
+                        prepass,
+                        {
+                            "ok": True,
+                            "schema_version": 2,
+                            "project_root": str(project_root),
+                            "memory_root": str(staged_root),
+                            "sources_read": [],
+                            "missing_sources": [],
+                            "workstreams": [],
+                            "gaps": [],
+                            "cross_reference_gaps": [],
+                            "action_cross_check": [],
+                            "ledger_actions": [],
+                        },
+                    )
+                    return module.run_json_command(
+                        [
+                            sys.executable,
+                            str(module.SCRIPT_PATHS["state-audit"]),
+                            str(project_root),
+                            "--memory-root",
+                            str(staged_root),
+                            "--prepass-json",
+                            str(prepass),
+                            "--scenario",
+                            "global",
+                            "--as-of",
+                            current_plan["source_as_of"],
+                            "--output-dir",
+                            str(staged_root / "audits"),
+                        ],
+                        result_path,
+                        node,
+                        False,
+                    )
+                if node == "program-status":
+                    return original_execute_node(
+                        node,
+                        node_args,
+                        current_plan,
+                        project_root,
+                        staged_root,
+                        workspace,
+                        results,
+                    )
+                payload = {"ok": True, "status": "completed", "node": node}
+                if node == "management-panel":
+                    payload["panel_id"] = "panel-staging-memory-root"
+                module.atomic_json(result_path, payload)
+                return payload
+
+            with (
+                patch.object(module, "execute_node", side_effect=execute_with_real_status),
+                self.assertRaises(module.RefreshError) as raised,
+            ):
+                module.apply_refresh(args, root.resolve(), memory.resolve())
+            self.assertEqual(
+                raised.exception.code,
+                "INJECTED_REFRESH_CRASH",
+                str(raised.exception),
+            )
+
+            completed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            node_status = {item["instance_key"]: item["status"] for item in completed_plan["nodes"]}
+            self.assertEqual(set(module.NODE_ORDER), set(node_status))
+            self.assertTrue(all(node_status[node] == "completed" for node in module.NODE_ORDER))
+
+            workspace = module.workspace_for(memory.resolve(), plan["refresh_id"])
+            program_result = json.loads(
+                (workspace / "results/program-status.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(program_result["status"], "complete")
+            staged_model = json.loads(
+                (workspace / "memory/views/program-status.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("plans/program-baseline.md", staged_model["source_fingerprints"])
+            self.assertIn(
+                "workstreams/ws-one/delivery-record.md",
+                staged_model["source_fingerprints"],
+            )
+            self.assertNotIn(
+                ".adp-panel-refresh-staging",
+                json.dumps(staged_model, ensure_ascii=False),
+            )
 
     def test_completed_node_resumes_after_injected_crash_without_early_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -33,6 +33,7 @@ def build_progress_projection(
     reporting_period: dict[str, str],
     source_fingerprints: dict[str, str],
     previous_snapshot: dict[str, Any] | None,
+    audited_source_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     baseline_items = {str(item["id"]): item for item in baseline.get("milestones", [])}
     assessed_items = {str(item["id"]): item for item in assessed_milestones}
@@ -47,6 +48,7 @@ def build_progress_projection(
         as_of,
         source_fingerprints,
         scope_contract,
+        audited_source_keys,
     )
     corrections = collect_corrections(rows, baseline_items, audit, source_fingerprints)
     horizons = forecast_horizons(progress_rows, as_of)
@@ -264,8 +266,13 @@ def evaluate_actual_eligibility(
     as_of: date,
     source_fingerprints: dict[str, str],
     scope_contract: dict[str, Any],
+    audited_source_keys: set[str] | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    accepted_sources = {normalize_path(path) for path in audit.get("source_fingerprints", {})}
+    accepted_sources = (
+        audited_source_keys
+        if audited_source_keys is not None
+        else {normalize_path(path) for path in audit.get("source_fingerprints", {})}
+    )
     projection_rows: list[dict[str, Any]] = []
     eligible_actuals: list[dict[str, Any]] = []
     excluded_actuals: list[dict[str, Any]] = []

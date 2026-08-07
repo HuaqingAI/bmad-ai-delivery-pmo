@@ -26,7 +26,7 @@ from progress_projection import (
 )
 
 
-GENERATOR_VERSION = "2.0.3"
+GENERATOR_VERSION = "2.0.4"
 SCHEMA_VERSION = "1.0"
 SCOPE_CONTRACT_VERSION = "1.0.0"
 SCOPE_CONTRACT_MIGRATION_ERROR = "ADP-SCOPE-CONTRACT-MIGRATION-REQUIRED"
@@ -242,13 +242,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     source_inventory: list[dict[str, Any]] = []
     source_fingerprints: dict[str, str] = {}
-    add_file_source(project_root, baseline_path, "program-baseline", source_inventory, source_fingerprints)
-    add_file_source(project_root, audit_path, "input-audit", source_inventory, source_fingerprints)
-    add_config_sources(project_root, config, source_inventory, source_fingerprints)
+    add_file_source(project_root, memory_root, baseline_path, "program-baseline", source_inventory, source_fingerprints)
+    add_file_source(project_root, memory_root, audit_path, "input-audit", source_inventory, source_fingerprints)
+    add_config_sources(project_root, memory_root, config, source_inventory, source_fingerprints)
     locale_catalog_path = Path(args.config_script).expanduser().resolve().parent.parent / "assets/locale-catalog.json"
     if not locale_catalog_path.is_file():
         raise DependencyError("ADP locale catalog", locale_catalog_path, ["adp-setup"])
-    add_file_source(project_root, locale_catalog_path, "locale-catalog", source_inventory, source_fingerprints)
+    add_file_source(project_root, memory_root, locale_catalog_path, "locale-catalog", source_inventory, source_fingerprints)
 
     rows, row_sources, row_findings = collect_milestone_rows(
         project_root,
@@ -258,7 +258,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     findings.extend(row_findings)
     for path in row_sources:
-        add_file_source(project_root, path, "workstream-delivery-record", source_inventory, source_fingerprints)
+        add_file_source(project_root, memory_root, path, "workstream-delivery-record", source_inventory, source_fingerprints)
     blocking_rows = [item for item in findings if item.get("severity") == "blocked"]
     if blocking_rows:
         return blocked_result(
@@ -271,7 +271,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             findings=findings,
         )
 
-    stale_issues = compare_audit_fingerprints(project_root, audit, source_fingerprints, baseline_path, row_sources, config)
+    stale_issues = compare_audit_fingerprints(
+        project_root,
+        audit,
+        source_fingerprints,
+        baseline_path,
+        row_sources,
+        config,
+        memory_root=memory_root,
+    )
     if stale_issues:
         return blocked_result(
             project_root,
@@ -281,18 +289,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "; ".join(stale_issues),
             ["adp-state-audit"],
         )
-    for key, value in audit.get("source_fingerprints", {}).items():
-        normalized_key = normalize_path_key(str(key))
-        if any(normalize_path_key(existing) == normalized_key for existing in source_fingerprints):
+    audited_fingerprints = canonical_audit_fingerprints(project_root, memory_root, audit)
+    for key, value in audited_fingerprints.items():
+        if key in source_fingerprints:
             continue
-        source_fingerprints[normalized_key] = normalize_hash(value)
+        source_fingerprints[key] = value
 
     signals: list[dict[str, Any]] = []
     if args.signals_json:
         signal_path = Path(args.signals_json).expanduser().resolve()
         signals = validate_signals(load_json(signal_path), baseline)
-        add_file_source(project_root, signal_path, "status-signals", source_inventory, source_fingerprints)
-        add_signal_sources(project_root, signals, source_inventory, source_fingerprints)
+        add_file_source(project_root, memory_root, signal_path, "status-signals", source_inventory, source_fingerprints)
+        add_signal_sources(project_root, memory_root, signals, source_inventory, source_fingerprints)
         signals, signal_findings = filter_current_signals(
             signals,
             as_of,
@@ -319,6 +327,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         source_fingerprints=source_fingerprints,
         previous=previous,
         config_module=config_module,
+        audited_source_keys=set(audited_fingerprints),
     )
     catalog_fingerprint = file_sha256(locale_catalog_path)
     model["title"] = config_module.message("status.title", locale)
@@ -404,6 +413,7 @@ def compute_model(
     source_fingerprints: dict[str, str],
     previous: dict[str, Any] | None,
     config_module: Any,
+    audited_source_keys: set[str],
 ) -> dict[str, Any]:
     critical_ids = set(str(value) for value in baseline.get("critical_path", []))
     milestone_signals = index_target_signals(signals, "milestone")
@@ -460,6 +470,7 @@ def compute_model(
                 config_module,
                 findings,
                 audit,
+                audited_source_keys,
             )
             assessed["scope_kind"] = "workstream"
         visiting.remove(milestone_id)
@@ -486,6 +497,7 @@ def compute_model(
         reporting_period=period,
         source_fingerprints=fingerprints,
         previous_snapshot=previous,
+        audited_source_keys=audited_source_keys,
     )
     flow_state = build_flow_state(
         baseline=baseline,
@@ -650,6 +662,7 @@ def assess_milestone(
     config_module: Any,
     findings: list[dict[str, Any]],
     audit: dict[str, Any],
+    audited_source_keys: set[str],
 ) -> dict[str, Any]:
     planned = parse_date(str(item["planned_date"]), f"milestone {item['id']} planned date")
     tolerance = item.get("tolerance_days", baseline.get("default_tolerance_days", 0))
@@ -664,9 +677,7 @@ def assess_milestone(
         actual_exclusion_reason = "missing-completion-criteria"
     elif actual and not (row or {}).get("source_references"):
         actual_exclusion_reason = "missing-evidence"
-    elif actual and normalize_path_key(str((row or {}).get("wdr_path") or "")) not in {
-        normalize_path_key(str(path)) for path in audit.get("source_fingerprints", {})
-    }:
+    elif actual and normalize_path_key(str((row or {}).get("wdr_path") or "")) not in audited_source_keys:
         actual_exclusion_reason = "unaudited-actual"
     if actual_exclusion_reason:
         findings.append(
@@ -1169,7 +1180,14 @@ def collect_milestone_rows(
     for workstream_id in workstreams:
         path = memory_root / "workstreams" / workstream_id / "delivery-record.md"
         if not path.is_file():
-            findings.append(program_finding("actual.wdr_missing", "warning", f"workstream {workstream_id} delivery record is missing", str(path)))
+            findings.append(
+                program_finding(
+                    "actual.wdr_missing",
+                    "warning",
+                    f"workstream {workstream_id} delivery record is missing",
+                    source_path_key(project_root, memory_root, path),
+                )
+            )
             continue
         sources.append(path)
         for row in parse_roadmap_table(path.read_text(encoding="utf-8-sig")):
@@ -1177,18 +1195,18 @@ def collect_milestone_rows(
             if is_missing(milestone_id):
                 continue
             if milestone_id in rows:
-                findings.append(program_finding("actual.duplicate", "blocked", f"milestone {milestone_id} occurs in more than one WDR row", relative_path(project_root, path)))
+                findings.append(program_finding("actual.duplicate", "blocked", f"milestone {milestone_id} occurs in more than one WDR row", source_path_key(project_root, memory_root, path)))
                 continue
             row_revision = row_value(row, "baseline revision")
             if is_missing(row_revision) or not row_revision.isdigit() or int(row_revision) != revision:
-                findings.append(program_finding("actual.revision_mismatch", "blocked", f"milestone {milestone_id} actual row does not match baseline revision {revision}", relative_path(project_root, path)))
+                findings.append(program_finding("actual.revision_mismatch", "blocked", f"milestone {milestone_id} actual row does not match baseline revision {revision}", source_path_key(project_root, memory_root, path)))
                 continue
             rows[milestone_id] = {
                 "status": row_value(row, "status"),
                 "forecast": row_value(row, "forecast"),
                 "actual": row_value(row, "actual"),
                 "source_references": split_references(row_value(row, "source")),
-                "wdr_path": relative_path(project_root, path),
+                "wdr_path": source_path_key(project_root, memory_root, path),
                 "correction_id": row_value(row, "correction id"),
                 "correction_kind": row_value(row, "correction kind"),
                 "correction_audit_id": row_value(row, "correction audit id"),
@@ -1286,8 +1304,11 @@ def compare_audit_fingerprints(
     baseline_path: Path,
     row_sources: list[Path],
     config: dict[str, Any],
+    *,
+    memory_root: Path | None = None,
 ) -> list[str]:
-    audited = {normalize_path_key(str(key)): normalize_hash(value) for key, value in audit.get("source_fingerprints", {}).items()}
+    memory_root = (memory_root or baseline_path.parent.parent).resolve()
+    audited = canonical_audit_fingerprints(project_root, memory_root, audit)
     required_paths = [baseline_path, *row_sources]
     for source in config.get("sources_checked", []):
         path = Path(str(source.get("path", "")))
@@ -1295,23 +1316,46 @@ def compare_audit_fingerprints(
             required_paths.append(path)
     issues: list[str] = []
     for path in required_paths:
-        project_key = normalize_path_key(relative_path(project_root, path))
-        current_hash = normalize_hash(current.get(relative_path(project_root, path), ""))
-        candidates = audit_path_candidates(project_key)
+        source_key = source_path_key(project_root, memory_root, path)
+        current_hash = normalize_hash(current.get(source_key, ""))
+        candidates = audit_path_candidates(
+            relative_path(project_root, path),
+            project_root=project_root,
+            memory_root=memory_root,
+        )
         audited_key = next((key for key in candidates if key in audited), None)
         if audited_key is None:
-            issues.append(f"input audit has no fingerprint for {project_key}")
+            issues.append(f"input audit has no fingerprint for {source_key}")
         elif audited[audited_key] != current_hash:
-            issues.append(f"input audit fingerprint is stale for {project_key}")
+            issues.append(f"input audit fingerprint is stale for {source_key}")
     return sorted(set(issues))
 
 
-def audit_path_candidates(project_relative: str) -> list[str]:
-    candidates = [project_relative]
-    marker = "_bmad-output/adp/memory/"
-    if marker in project_relative:
-        candidates.append(project_relative.split(marker, 1)[1])
-    return candidates
+def canonical_audit_fingerprints(
+    project_root: Path,
+    memory_root: Path,
+    audit: dict[str, Any],
+) -> dict[str, str]:
+    canonical: dict[str, str] = {}
+    for raw_key, raw_hash in sorted(audit.get("source_fingerprints", {}).items(), key=lambda item: str(item[0])):
+        key = canonical_source_key(project_root, memory_root, str(raw_key))
+        value = normalize_hash(raw_hash)
+        prior = canonical.get(key)
+        canonical[key] = value if prior in {None, value} else ""
+    return canonical
+
+
+def audit_path_candidates(
+    project_relative: str,
+    *,
+    project_root: Path | None = None,
+    memory_root: Path | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+    if project_root is not None and memory_root is not None:
+        candidates.append(canonical_source_key(project_root, memory_root, project_relative))
+    candidates.append(normalize_path_key(project_relative))
+    return list(dict.fromkeys(candidates))
 
 
 def validate_signals(payload: dict[str, Any], baseline: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1874,7 +1918,7 @@ def inspect_latest(project_root: Path, memory_root: Path) -> dict[str, Any]:
     outputs = output_paths(memory_root, str(model.get("snapshot_id")))
     input_audit_path = next(
         (
-            resolve_path(project_root, str(item.get("path")))
+            resolve_source_path(project_root, memory_root, str(item.get("path")))
             for item in model.get("source_inventory", [])
             if item.get("type") == "input-audit" and item.get("path")
         ),
@@ -2248,29 +2292,38 @@ def load_baseline_module(path: Path, config_module: Any) -> Any:
 
 def add_file_source(
     project_root: Path,
+    memory_root: Path,
     path: Path,
     source_type: str,
     inventory: list[dict[str, Any]],
     fingerprints: dict[str, str],
 ) -> None:
     path = path.resolve()
-    relative = relative_path(project_root, path)
-    inventory.append({"type": source_type, "path": relative, "exists": path.is_file()})
+    source_key = source_path_key(project_root, memory_root, path)
+    inventory.append({"type": source_type, "path": source_key, "exists": path.is_file()})
     if path.is_file():
-        fingerprints[relative] = file_sha256(path)
+        fingerprints[source_key] = file_sha256(path)
 
 
 def add_config_sources(
-    project_root: Path, config: dict[str, Any], inventory: list[dict[str, Any]], fingerprints: dict[str, str]
+    project_root: Path,
+    memory_root: Path,
+    config: dict[str, Any],
+    inventory: list[dict[str, Any]],
+    fingerprints: dict[str, str],
 ) -> None:
     for source in config.get("sources_checked", []):
         path = Path(str(source.get("path", "")))
         if path.is_file():
-            add_file_source(project_root, path, "effective-config", inventory, fingerprints)
+            add_file_source(project_root, memory_root, path, "effective-config", inventory, fingerprints)
 
 
 def add_signal_sources(
-    project_root: Path, signals: list[dict[str, Any]], inventory: list[dict[str, Any]], fingerprints: dict[str, str]
+    project_root: Path,
+    memory_root: Path,
+    signals: list[dict[str, Any]],
+    inventory: list[dict[str, Any]],
+    fingerprints: dict[str, str],
 ) -> None:
     for signal in signals:
         reference = signal["source"]["reference"].split("#", 1)[0]
@@ -2278,7 +2331,7 @@ def add_signal_sources(
         if not path.is_absolute():
             path = project_root / path
         if path.is_file():
-            add_file_source(project_root, path, "signal-evidence", inventory, fingerprints)
+            add_file_source(project_root, memory_root, path, "signal-evidence", inventory, fingerprints)
         else:
             inventory.append({"type": "signal-reference", "path": signal["source"]["reference"], "exists": False})
 
@@ -2412,6 +2465,38 @@ def relative_path(project_root: Path, path: Path) -> str:
         return path.resolve().relative_to(project_root.resolve()).as_posix()
     except ValueError:
         return path.resolve().as_posix()
+
+
+def source_path_key(project_root: Path, memory_root: Path, path: Path) -> str:
+    resolved = path.expanduser().resolve()
+    try:
+        return resolved.relative_to(memory_root.expanduser().resolve()).as_posix()
+    except ValueError:
+        return relative_path(project_root, resolved)
+
+
+def canonical_source_key(project_root: Path, memory_root: Path, value: str) -> str:
+    normalized = value.replace("\\", "/").removeprefix("./")
+    raw_path = Path(normalized).expanduser()
+    if raw_path.is_absolute():
+        return source_path_key(project_root, memory_root, raw_path)
+    project_candidate = (project_root / raw_path).resolve()
+    try:
+        project_candidate.relative_to(memory_root.resolve())
+    except ValueError:
+        return normalized
+    return source_path_key(project_root, memory_root, project_candidate)
+
+
+def resolve_source_path(project_root: Path, memory_root: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    memory_candidate = (memory_root / path).resolve()
+    project_candidate = (project_root / path).resolve()
+    if memory_candidate.exists() or not project_candidate.exists():
+        return memory_candidate
+    return project_candidate
 
 
 def normalize_path_key(value: str) -> str:

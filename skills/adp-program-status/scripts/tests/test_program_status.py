@@ -154,8 +154,15 @@ class ProgramStatusTests(unittest.TestCase):
             "updated_at": "2026-07-01T00:00:00Z",
         }
 
-    def scaffold(self, root: Path, baseline: dict, rows_by_workstream: dict[str, list[dict]] | None = None, language: str = "English") -> Path:
-        memory = root / "_bmad-output/adp/memory"
+    def scaffold(
+        self,
+        root: Path,
+        baseline: dict,
+        rows_by_workstream: dict[str, list[dict]] | None = None,
+        language: str = "English",
+        memory_root: Path | None = None,
+    ) -> Path:
+        memory = memory_root or root / "_bmad-output/adp/memory"
         (memory / "plans").mkdir(parents=True)
         config = root / "_bmad/bmb/config.yaml"
         config.parent.mkdir(parents=True)
@@ -671,7 +678,7 @@ class ProgramStatusTests(unittest.TestCase):
             model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
 
             self.assertEqual(model["overall_status"], "at-risk")
-            self.assertIn(evidence.relative_to(root).as_posix(), model["source_fingerprints"])
+            self.assertIn(evidence.relative_to(memory).as_posix(), model["source_fingerprints"])
             self.assertIn("PS-SOURCE-BACKED-SIGNAL", model["rule_ids"])
 
     def test_stale_and_future_signals_do_not_drive_current_status(self) -> None:
@@ -824,6 +831,75 @@ class ProgramStatusTests(unittest.TestCase):
                 key for key in model["source_fingerprints"] if key.endswith("plans/program-baseline.md")
             ]
             self.assertEqual(1, len(baseline_keys))
+
+    def test_absolute_staging_memory_root_uses_memory_relative_fingerprint_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = {"type": "approved-plan", "reference": "docs/plan.md", "confirmed_by": "Program Owner"}
+            milestones = [
+                {
+                    "id": "M-L0",
+                    "name": "Foundation ready",
+                    "workstream_id": "l0-foundation-platform",
+                    "planned_date": "2026-07-20",
+                    "owner": "L0 Owner",
+                    "confirmation_status": "approved",
+                    "source": source,
+                    "dependencies": [],
+                    "baseline_revision": 1,
+                    "critical_path": True,
+                },
+                {
+                    "id": "M-L1",
+                    "name": "Transaction loop ready",
+                    "workstream_id": "l1-transaction-loop",
+                    "planned_date": "2026-07-21",
+                    "owner": "L1 Owner",
+                    "confirmation_status": "approved",
+                    "source": source,
+                    "dependencies": [],
+                    "baseline_revision": 1,
+                    "critical_path": True,
+                },
+            ]
+            staging_memory = (
+                root
+                / "_bmad-output/adp/.adp-panel-refresh-staging"
+                / "refresh-970d6f3b7b448b053dd9fa7d"
+                / "memory"
+            ).resolve()
+            memory = self.scaffold(
+                root,
+                self.baseline(milestones=milestones, critical_path=[]),
+                {
+                    "l0-foundation-platform": [{"id": "M-L0", "forecast": "2026-07-20"}],
+                    "l1-transaction-loop": [{"id": "M-L1", "forecast": "2026-07-21"}],
+                },
+                memory_root=staging_memory,
+            )
+            audit = self.write_real_audit(root, memory)
+            audit_keys = set(json.loads(audit.read_text(encoding="utf-8"))["source_fingerprints"])
+            expected_memory_keys = {
+                "plans/program-baseline.md",
+                "workstreams/l0-foundation-platform/delivery-record.md",
+                "workstreams/l1-transaction-loop/delivery-record.md",
+            }
+            self.assertTrue(expected_memory_keys.issubset(audit_keys))
+
+            completed, result = self.generate(
+                root,
+                audit,
+                extra=["--memory-root", str(memory.resolve())],
+            )
+            self.assertEqual(completed.returncode, 0, result)
+            model = json.loads(Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8"))
+            inventory_paths = {str(item["path"]) for item in model["source_inventory"]}
+
+            self.assertTrue(expected_memory_keys.issubset(model["source_fingerprints"]))
+            self.assertTrue(expected_memory_keys.issubset(inventory_paths))
+            self.assertIn("_bmad/bmb/config.yaml", model["source_fingerprints"])
+            self.assertIn("_bmad/bmb/config.yaml", inventory_paths)
+            self.assertNotIn(".adp-panel-refresh-staging", json.dumps(model, ensure_ascii=False))
 
     def test_future_actual_is_excluded_from_current_status_and_weighted_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
