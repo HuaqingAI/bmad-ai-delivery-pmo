@@ -312,41 +312,15 @@ class PanelRefreshTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         return result
 
-    def make_staged_audit_ready(self, root: Path, plan: dict) -> None:
-        module = load_module()
-        memory = root / MEMORY_REL
-        staged = module.workspace_for(memory.resolve(), plan["refresh_id"]) / "memory"
-        audit_path = next((staged / "audits/management-panel").glob("panel-input-audit-*.json"))
-        audit = json.loads(audit_path.read_text(encoding="utf-8"))
-        audit.update(
-            {
-                "ok": True,
-                "audit_status": "pass",
-                "execution_disposition": "ready",
-                "safe_to_generate": True,
-                "source_fingerprints": module.source_inventory(staged, root.resolve()),
-                "warnings": [],
-            }
-        )
-        audit.setdefault("counts", {})["blocking_findings"] = 0
-        audit["counts"]["action_projection_drift"] = 0
-        audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
     def apply_ready_fixture(self, root: Path, plan: dict) -> dict:
-        completed, crashed = self.run_cli(
+        completed, result = self.run_cli(
             "apply",
             str(root),
             "--plan",
             plan["plan_path"],
-            "--fail-after-node",
-            "management-panel",
             check=False,
         )
-        self.assertEqual(completed.returncode, 1, crashed)
-        self.assertEqual(crashed["error_code"], "INJECTED_REFRESH_CRASH")
-        self.make_staged_audit_ready(root, plan)
-        resumed, result = self.run_cli("apply", str(root), "--plan", plan["plan_path"], check=False)
-        self.assertEqual(resumed.returncode, 0, result)
+        self.assertEqual(completed.returncode, 0, result)
         return result
 
     def scaffold_policy_sources(self, memory: Path) -> dict:
@@ -764,7 +738,6 @@ class PanelRefreshTests(unittest.TestCase):
             durable_plan = json.loads(Path(plan["plan_path"]).read_text(encoding="utf-8"))
             self.assertEqual(durable_plan["nodes"][0]["status"], "completed")
 
-            self.make_staged_audit_ready(root, plan)
             _, resumed = self.run_cli("apply", str(root), "--plan", plan["plan_path"])
             self.assertEqual(resumed["status"], "published")
             self.assertEqual(resumed["inspect"]["publication_eligibility"], "eligible")
@@ -1095,6 +1068,62 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(detected["resume_refresh_id"], replacement["refresh_id"])
             self.assertEqual(detected["resume_status"], "planned")
 
+    def test_confirmed_fde_window_replacement_supersedes_dirty_run_without_source_change(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            first_args = module.parse_args(
+                ["plan", str(root), "--fixture", "--force-full", "--as-of", "2026-08-07"]
+            )
+            first = module.plan_refresh(first_args, root, memory)
+            first_path = Path(first["plan_path"])
+            dirty = json.loads(first_path.read_text(encoding="utf-8"))
+            dirty["status"] = "dirty"
+            dirty["retry_from_instance_key"] = "meeting-pack:fde-morning"
+            dirty["nodes"][0].update({"status": "blocked", "error": "old meeting window failed"})
+            module.atomic_json(first_path, dirty)
+            status = module.load_optional_json(memory / module.STATUS_REL)
+            status.update(
+                {
+                    "current_run_id": first["refresh_id"],
+                    "current_status": "dirty",
+                    "retry_from_instance_key": "meeting-pack:fde-morning",
+                }
+            )
+            status["state_id"] = module.content_id(
+                {key: value for key, value in status.items() if key != "state_id"}
+            )
+            module.atomic_json(memory / module.STATUS_REL, status)
+            evidence = module.workspace_for(memory, first["refresh_id"]) / "failed-window.json"
+            module.atomic_json(evidence, {"error": "old meeting window failed"})
+
+            replacement_args = module.parse_args(
+                [
+                    "plan",
+                    str(root),
+                    "--fixture",
+                    "--force-full",
+                    "--as-of",
+                    "2026-08-07",
+                    "--fde-period-start",
+                    "2026-08-03",
+                    "--fde-period-end",
+                    "2026-08-07",
+                ]
+            )
+            replacement = module.plan_refresh(replacement_args, root, memory)
+            superseded = module.load_json(first_path)
+
+            self.assertEqual(first["source_fingerprints"], replacement["source_fingerprints"])
+            self.assertNotEqual(first["refresh_id"], replacement["refresh_id"])
+            self.assertEqual(replacement["superseded_refresh_id"], first["refresh_id"])
+            self.assertEqual(superseded["status"], "superseded")
+            self.assertIn("fde_period_start", superseded["supersede_reason"])
+            self.assertIn("fde_period_end", superseded["supersede_reason"])
+            self.assertEqual(superseded["nodes"][0]["error"], "old meeting window failed")
+            self.assertTrue(evidence.is_file())
+
     def test_effective_config_change_creates_replacement_full_plan(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1365,29 +1394,25 @@ class PanelRefreshTests(unittest.TestCase):
             memory = self.scaffold(root)
             plan = self.plan(root)
             self.apply_ready_fixture(root, plan)
-            audit_path = memory / "audits/zzzz/input-audit.json"
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
-            audit_path.write_text(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "audit_type": "input",
-                        "scenario": "management-panel",
-                        "audit_status": "blocked",
-                        "execution_disposition": "blocked",
-                        "safe_to_generate": False,
-                        "counts": {"action_projection_drift": 0, "blocking_findings": 1},
-                    }
-                ),
-                encoding="utf-8",
+            receipt = load_module().last_successful_receipt(memory)
+            audit_path = memory / receipt["panel_input_audit"]
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            audit.update(
+                {
+                    "audit_status": "blocked",
+                    "execution_disposition": "blocked",
+                    "safe_to_render": False,
+                }
             )
+            audit["counts"]["blocking_findings"] = 1
+            audit_path.write_text(json.dumps(audit), encoding="utf-8")
 
             _, inspected = self.run_cli("inspect", str(root))
 
             self.assertEqual(inspected["audit_readiness"], "blocked")
             self.assertEqual(inspected["publication_eligibility"], "blocked")
 
-    def test_degraded_staged_audit_blocks_publication(self) -> None:
+    def test_degraded_staged_panel_audit_publishes_with_recovery_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             memory = self.scaffold(root)
@@ -1401,47 +1426,294 @@ class PanelRefreshTests(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.returncode, 0, result)
+            self.assertEqual(result["status"], "published")
+            self.assertEqual(result["prepublish_validation"]["audit_readiness"], "degraded")
+            self.assertEqual(
+                result["prepublish_validation"]["panel_input_audit"]["readiness"],
+                "degraded",
+            )
+            self.assertTrue(
+                result["prepublish_validation"]["panel_input_audit"]["warning_findings"]
+            )
+            self.assertEqual(result["panel_recovery_status"], "degraded")
+            self.assertEqual(result["panel_recommended_workflows"], ["adp-meeting-pack"])
+            self.assertTrue((memory / "views/management-panel/index.html").exists())
+            self.assertEqual(result["inspect"]["publication_eligibility"], "eligible")
+            self.assertEqual(result["inspect"]["audit_readiness"], "degraded")
+
+    def test_safe_to_publish_false_blocks_completed_staged_panel(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = self.scaffold(root)
+            plan = self.plan(root)
+            completed, crashed = self.run_cli(
+                "apply",
+                str(root),
+                "--plan",
+                plan["plan_path"],
+                "--fail-after-node",
+                "management-panel",
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 1, crashed)
+            workspace = module.workspace_for(memory.resolve(), plan["refresh_id"])
+            panel_result = module.load_json(workspace / "results/management-panel.json")
+            artifact_audit_path = Path(panel_result["panel_artifact_audit"])
+            artifact_audit = module.load_json(artifact_audit_path)
+            artifact_audit["safe_to_publish"] = False
+            module.atomic_json(artifact_audit_path, artifact_audit)
+
+            resumed, result = self.run_cli(
+                "apply",
+                str(root),
+                "--plan",
+                plan["plan_path"],
+                check=False,
+            )
+
+            self.assertEqual(resumed.returncode, 1, result)
             self.assertEqual(result["error_code"], "REFRESH_PUBLICATION_INELIGIBLE")
+            self.assertIn("artifact audit", result["error"])
             self.assertFalse((memory / "views/management-panel/index.html").exists())
 
-    def test_public_inspect_rejects_degraded_and_asymmetric_audit_source_maps(self) -> None:
-        for scenario in ("degraded", "missing-audit-source"):
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temp_dir:
-                root = Path(temp_dir)
-                memory = self.scaffold(root)
-                source = memory / "actions/action-ledger.md"
-                source.parent.mkdir(parents=True)
-                source.write_text("# Ledger\n", encoding="utf-8")
-                plan = self.plan(root)
-                self.apply_ready_fixture(root, plan)
-                receipt = load_module().last_successful_receipt(memory)
-                audit_path = memory / "audits/zzzz/strict-readiness.json"
-                audit_path.parent.mkdir(parents=True, exist_ok=True)
-                audit = {
-                    "ok": True,
-                    "audit_type": "input",
-                    "scenario": "management-panel",
-                    "audit_status": "warning" if scenario == "degraded" else "pass",
-                    "execution_disposition": "degraded" if scenario == "degraded" else "ready",
-                    "safe_to_generate": True,
-                    "counts": {"action_projection_drift": 0, "blocking_findings": 0},
-                    "source_fingerprints": (
-                        receipt["source_fingerprints"] if scenario == "degraded" else {}
-                    ),
-                }
-                audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    def test_plan_bound_state_audit_subset_normalizes_digests_without_false_stale(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            refresh_id = "refresh-" + "1" * 24
+            workspace = module.workspace_for(memory, refresh_id)
+            staged = workspace / "memory"
+            staged.mkdir(parents=True)
 
-                _, inspected = self.run_cli("inspect", str(root), check=False)
+            source_paths = ["index.md", "project-charter.md"] + [
+                f"actions/source-{index:03d}.md" for index in range(885)
+            ]
+            for relative in source_paths:
+                path = staged / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"source {relative}\n", encoding="utf-8")
+            plan_sources = module.source_inventory(staged)
+            audit_coverage = ["index.md", "project-charter.md"] + sorted(
+                path for path in plan_sources if path.startswith("actions/")
+            )[:131]
+            audit_sources = {
+                path: plan_sources[path].removeprefix("sha256:")
+                for path in audit_coverage
+            }
+            self.assertEqual(len(plan_sources), 887)
+            self.assertEqual(len(audit_sources), 133)
 
-                expected_readiness = "degraded" if scenario == "degraded" else "stale"
-                self.assertEqual(inspected["audit_readiness"], expected_readiness)
-                self.assertEqual(inspected["publication_eligibility"], "blocked")
-                if scenario == "missing-audit-source":
-                    self.assertEqual(
-                        inspected["audit_binding_mismatches"],
-                        ["actions/action-ledger.md", "workstreams/L1/delivery-record.md"],
+            audits = staged / "audits"
+            panel_audits = audits / "management-panel"
+            panel_audits.mkdir(parents=True)
+            state_audit_path = audits / "2026-08-07-global-input-audit-plan-bound.json"
+            state_audit = {
+                "ok": True,
+                "audit_type": "input",
+                "scenario": "global",
+                "input_audit_id": "input-audit-plan-bound",
+                "audit_status": "pass",
+                "execution_disposition": "ready",
+                "safe_to_generate": True,
+                "counts": {"action_projection_drift": 0, "blocking_findings": 0},
+                "source_fingerprints": audit_sources,
+            }
+            module.atomic_json(state_audit_path, state_audit)
+
+            input_audit_path = panel_audits / "panel-input-audit-plan-bound.json"
+            input_warnings = [
+                {
+                    "code": "panel.input.fde.readiness-degraded",
+                    "execution_disposition": "degraded",
+                    "recommended_workflow": "adp-meeting-pack",
+                },
+                {
+                    "code": "panel.input.business.readiness-degraded",
+                    "execution_disposition": "degraded",
+                    "recommended_workflow": "adp-meeting-pack",
+                },
+            ]
+            input_audit = {
+                "ok": True,
+                "audit_type": "panel-input",
+                "panel_input_audit_id": "panel-input-audit-plan-bound",
+                "audit_status": "warning",
+                "execution_disposition": "degraded",
+                "safe_to_render": True,
+                "blocking_gaps": [],
+                "warnings": input_warnings,
+                "recommended_workflows": ["adp-meeting-pack"],
+                "counts": {"blocking_findings": 0, "warning_findings": 2},
+            }
+            module.atomic_json(input_audit_path, input_audit)
+            artifact_audit_path = panel_audits / "panel-artifact-audit-plan-bound.json"
+            artifact_audit = {
+                "ok": True,
+                "audit_type": "panel-artifact",
+                "panel_artifact_audit_id": "panel-artifact-audit-plan-bound",
+                "panel_input_audit_id": input_audit["panel_input_audit_id"],
+                "panel_id": "panel-plan-bound",
+                "audit_status": "pass",
+                "execution_disposition": "ready",
+                "safe_to_publish": True,
+                "blocking_gaps": [],
+                "warnings": [],
+                "recommended_workflows": [],
+                "counts": {"blocking_findings": 0, "warning_findings": 0},
+            }
+            module.atomic_json(artifact_audit_path, artifact_audit)
+
+            results_root = workspace / "results"
+            state_result_path = results_root / "state-audit.json"
+            state_result = {
+                "ok": True,
+                "status": "complete",
+                "input_audit_id": state_audit["input_audit_id"],
+                "outputs": {"json": str(state_audit_path)},
+            }
+            module.atomic_json(state_result_path, state_result)
+            panel_result_path = results_root / "management-panel.json"
+            panel_result = {
+                "ok": True,
+                "status": "complete",
+                "panel_id": artifact_audit["panel_id"],
+                "panel_input_audit": str(input_audit_path),
+                "panel_input_audit_id": input_audit["panel_input_audit_id"],
+                "panel_artifact_audit": str(artifact_audit_path),
+                "panel_artifact_audit_id": artifact_audit["panel_artifact_audit_id"],
+                "recovery_status": "degraded",
+                "recommended_workflows": ["adp-meeting-pack"],
+            }
+            module.atomic_json(panel_result_path, panel_result)
+            plan = {
+                "refresh_id": refresh_id,
+                "plan_id": "sha256:" + "2" * 64,
+                "fixture": False,
+                "source_fingerprints": plan_sources,
+                "nodes": [
+                    {
+                        "instance_key": "state-audit",
+                        "status": "completed",
+                        "output": str(state_result_path),
+                        "error": None,
+                    },
+                    {
+                        "instance_key": "management-panel",
+                        "status": "completed",
+                        "output": str(panel_result_path),
+                        "error": None,
+                    },
+                ],
+            }
+            args = module.parse_args(["apply", str(root)])
+            results = {"state-audit": state_result, "management-panel": panel_result}
+            with (
+                patch.object(module, "latest_audit_path", side_effect=AssertionError("must not guess")),
+                patch.object(
+                    module,
+                    "run_json_command",
+                    return_value={"ok": True, "status": "complete", "panel_id": "panel-plan-bound"},
+                ),
+            ):
+                validation = module.validate_staged_publication(
+                    args,
+                    root,
+                    staged,
+                    workspace,
+                    plan,
+                    panel_result,
+                    results,
+                )
+
+            self.assertEqual(validation["audit_binding_mismatches"], [])
+            self.assertEqual(validation["state_audit"]["readiness"], "ready")
+            self.assertEqual(validation["panel_input_audit"]["readiness"], "degraded")
+            self.assertEqual(validation["panel_input_audit"]["warning_findings"], input_warnings)
+            self.assertEqual(validation["audit_readiness"], "degraded")
+
+            bad_bindings = []
+            changed_digest = dict(audit_sources)
+            changed_digest[audit_coverage[0]] = "0" * 64
+            bad_bindings.append(("digest-change", changed_digest, audit_coverage[0]))
+            missing_required = dict(audit_sources)
+            missing_required["actions/audit-only-required.md"] = "f" * 64
+            bad_bindings.append(
+                ("missing-required", missing_required, "actions/audit-only-required.md")
+            )
+            for scenario, bad_sources, expected_path in bad_bindings:
+                with self.subTest(scenario=scenario):
+                    module.atomic_json(
+                        state_audit_path,
+                        {**state_audit, "source_fingerprints": bad_sources},
                     )
+                    with (
+                        patch.object(
+                            module,
+                            "latest_audit_path",
+                            side_effect=AssertionError("must not guess"),
+                        ),
+                        patch.object(
+                            module,
+                            "run_json_command",
+                            return_value={
+                                "ok": True,
+                                "status": "complete",
+                                "panel_id": "panel-plan-bound",
+                            },
+                        ),
+                        self.assertRaises(module.RefreshError) as raised,
+                    ):
+                        module.validate_staged_publication(
+                            args,
+                            root,
+                            staged,
+                            workspace,
+                            plan,
+                            panel_result,
+                            results,
+                        )
+                    self.assertEqual(
+                        raised.exception.code,
+                        "REFRESH_PUBLICATION_INELIGIBLE",
+                    )
+                    self.assertIn("stale", str(raised.exception))
+                    self.assertEqual(
+                        module.source_binding_mismatches(bad_sources, plan_sources),
+                        [expected_path],
+                    )
+
+    def test_public_inspect_uses_receipt_bound_audits_not_latest_global_guess(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = self.scaffold(root)
+            plan = self.plan(root)
+            self.apply_ready_fixture(root, plan)
+            misleading = memory / "audits/zzzz/latest-global.json"
+            misleading.parent.mkdir(parents=True, exist_ok=True)
+            misleading.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "audit_type": "input",
+                        "scenario": "global",
+                        "audit_status": "blocked",
+                        "execution_disposition": "blocked",
+                        "safe_to_generate": False,
+                        "generated_at": "2026-08-07T23:59:59Z",
+                        "counts": {"action_projection_drift": 0, "blocking_findings": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _, inspected = self.run_cli("inspect", str(root), check=False)
+
+            self.assertEqual(inspected["audit_readiness"], "degraded")
+            self.assertEqual(inspected["publication_eligibility"], "eligible")
+            self.assertNotEqual(inspected["panel_input_audit_path"], str(misleading))
 
     def test_public_inspect_uses_refresh_then_fact_lock(self) -> None:
         module = load_module()
@@ -2099,6 +2371,12 @@ class PanelRefreshTests(unittest.TestCase):
                         "source_fingerprints": {},
                         "selection_policy": str(policy_a),
                         "selection_policy_id": validated_a["selection_policy_id"],
+                        "state_audit": "audits/state.json",
+                        "state_audit_id": "input-audit-published",
+                        "panel_input_audit": "audits/management-panel/input.json",
+                        "panel_input_audit_id": "panel-input-audit-published",
+                        "panel_artifact_audit": "audits/management-panel/artifact.json",
+                        "panel_artifact_audit_id": "panel-artifact-audit-published",
                     }
                 ),
                 encoding="utf-8",
@@ -2152,6 +2430,48 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertTrue(inspected["selection_policy_changed"])
             self.assertEqual(inspected["business_freshness"], "stale")
             self.assertEqual(inspected["publication_eligibility"], "blocked")
+
+    def test_legacy_receipt_without_direct_audit_bindings_forces_full_checkpoint(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            source_fingerprints = module.source_inventory(memory, root)
+            receipt_path = memory / "receipts/panel-refresh/legacy.json"
+            module.atomic_json(
+                receipt_path,
+                {
+                    "status": "published",
+                    "generation_id": "generation-legacy",
+                    "source_fingerprints": source_fingerprints,
+                    "selection_policy": None,
+                    "selection_policy_id": None,
+                },
+            )
+            module.atomic_json(
+                memory / module.STATUS_REL,
+                {
+                    "last_successful_receipt": "receipts/panel-refresh/legacy.json",
+                    "selection_policy": None,
+                },
+            )
+
+            detected = module.detect(root, memory)
+            planned = module.plan_refresh(
+                module.parse_args(["plan", str(root), "--as-of", "2026-08-07"]),
+                root,
+                memory,
+            )
+
+            self.assertTrue(detected["audit_binding_checkpoint_required"])
+            self.assertEqual(detected["invalidated_nodes"], list(module.NODE_ORDER))
+            self.assertEqual(detected["recommended_mode"], "full")
+            self.assertTrue(planned["audit_binding_checkpoint_required"])
+            self.assertEqual(planned["mode"], "full")
+            self.assertEqual(
+                [node["instance_key"] for node in planned["nodes"]],
+                list(module.NODE_ORDER),
+            )
 
     def test_detect_returns_exact_interrupted_plan_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

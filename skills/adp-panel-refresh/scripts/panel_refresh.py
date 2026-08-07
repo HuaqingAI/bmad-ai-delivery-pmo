@@ -39,6 +39,7 @@ POLICY_CANDIDATES_REL = Path("state/panel-refresh/selection-policy-candidates.js
 POLICIES_REL = Path("state/panel-refresh/policies")
 FACT_LOCK_REL = Path("state/fact-write.lock")
 REFRESH_ID_PATTERN = re.compile(r"refresh-[0-9a-f]{24}")
+SHA256_FINGERPRINT_PATTERN = re.compile(r"(?:sha256:)?([0-9a-fA-F]{64})")
 WINDOWS_LOCK_RETRY_SECONDS = 0.05
 WINDOWS_LOCK_CONTENTION_ERRORS = {
     error
@@ -60,6 +61,10 @@ SOURCE_PREFIXES = (
     "state/fact-generation.json",
     "state/status-intent-outbox.json",
     "workstreams/",
+)
+SOURCE_FILES = (
+    "index.md",
+    "project-charter.md",
 )
 DERIVED_PREFIXES = ("audits/", "snapshots/", "views/")
 PUBLISHABLE_STATE_PREFIXES = (
@@ -263,7 +268,7 @@ def source_inventory(
             part.startswith(".") for part in Path(relative).parts
         ):
             continue
-        if relative == "state/status-intent-outbox.json" or any(
+        if relative in SOURCE_FILES or relative == "state/status-intent-outbox.json" or any(
             relative == prefix or relative.startswith(prefix)
             for prefix in SOURCE_PREFIXES
         ):
@@ -326,6 +331,20 @@ def last_successful_receipt(memory_root: Path) -> dict[str, Any]:
         return {}
     path = memory_root / raw_path
     return load_optional_json(path)
+
+
+def publication_audit_bindings_complete(receipt: dict[str, Any]) -> bool:
+    return all(
+        isinstance(receipt.get(field), str) and bool(receipt[field])
+        for field in (
+            "state_audit",
+            "state_audit_id",
+            "panel_input_audit",
+            "panel_input_audit_id",
+            "panel_artifact_audit",
+            "panel_artifact_audit_id",
+        )
+    )
 
 
 def current_policy_path(memory_root: Path, explicit: str | None, project_root: Path) -> Path | None:
@@ -680,10 +699,11 @@ def invalidated_nodes(
     *,
     policy_changed: bool = False,
     policy_checkpoint_required: bool = False,
+    audit_binding_checkpoint_required: bool = False,
 ) -> list[str]:
     if fixture:
         return ["management-panel"] if changed_sources or policy_changed else []
-    if policy_checkpoint_required:
+    if policy_checkpoint_required or audit_binding_checkpoint_required:
         return list(NODE_ORDER)
     if policy_changed and not changed_sources:
         return ["management-panel"]
@@ -809,11 +829,17 @@ def detect(
         and prior_policy_id
         and policy_id is None
     )
+    audit_binding_checkpoint_required = bool(
+        previous
+        and not fixture
+        and not publication_audit_bindings_complete(previous)
+    )
     nodes = invalidated_nodes(
         changed,
         fixture,
         policy_changed=policy_changed,
         policy_checkpoint_required=policy_checkpoint_required,
+        audit_binding_checkpoint_required=audit_binding_checkpoint_required,
     )
     resume = interrupted_plan(memory_root)
     blocked_reasons: list[str] = []
@@ -832,6 +858,7 @@ def detect(
         "selection_policy_id": policy_id,
         "selection_policy_changed": policy_changed,
         "selection_policy_checkpoint_required": policy_checkpoint_required,
+        "audit_binding_checkpoint_required": audit_binding_checkpoint_required,
         "pending_intent_ids": pending,
         "drift_count": drift_count,
         "drift_action_ids": drift_action_ids,
@@ -841,7 +868,7 @@ def detect(
         "invalidated_nodes": nodes,
         "recommended_mode": "blocked" if blocked_reasons else (
             "full"
-            if changed or policy_checkpoint_required
+            if changed or policy_checkpoint_required or audit_binding_checkpoint_required
             else ("panel-only" if policy_changed else "reuse")
         ),
         "blocked_reasons": blocked_reasons,
@@ -873,9 +900,30 @@ def supersede_stale_nonterminal_plan(
     if (
         previous.get("status") not in {"planned", "refreshing", "dirty", "awaiting-policy"}
         or previous.get("refresh_id") == plan.get("refresh_id")
-        or previous.get("source_fingerprints") == detection.get("source_fingerprints")
     ):
         return {}
+    sources_changed = previous.get("source_fingerprints") != detection.get("source_fingerprints")
+    changed_bindings = [
+        key
+        for key in (
+            "source_as_of",
+            "period_start",
+            "period_end",
+            "fde_period_start",
+            "fde_period_end",
+            "selection_policy_id",
+            "fixture",
+            "mode",
+        )
+        if previous.get(key) != plan.get(key)
+    ]
+    reason = (
+        "bound sources changed after the nonterminal refresh plan"
+        if sources_changed
+        else "confirmed refresh bindings replaced the nonterminal plan"
+    )
+    if changed_bindings and not sources_changed:
+        reason += ": " + ", ".join(changed_bindings)
     previous.update(
         {
             "status": "superseded",
@@ -886,7 +934,7 @@ def supersede_stale_nonterminal_plan(
             "superseded_by_refresh_id": plan["refresh_id"],
             "superseded_by_plan_id": plan["plan_id"],
             "superseded_by_plan_path": str(plan_path),
-            "supersede_reason": "bound sources changed after the nonterminal refresh plan",
+            "supersede_reason": reason,
         }
     )
     atomic_json(previous_path, previous)
@@ -929,6 +977,7 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
     elif (
         detection["changed_sources"]
         or detection["selection_policy_checkpoint_required"]
+        or detection["audit_binding_checkpoint_required"]
         or args.force_full
         or not previous_receipt
     ):
@@ -947,6 +996,9 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
         "selection_policy": selection_policy,
         "selection_policy_id": selection_policy_id,
         "selection_policy_source": selection_policy_source,
+        "audit_binding_checkpoint_required": detection[
+            "audit_binding_checkpoint_required"
+        ],
         "fixture": bool(args.fixture),
         "source_fingerprints": detection["source_fingerprints"],
         "changed_sources": detection["changed_sources"],
@@ -955,6 +1007,7 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
             args.force_full
             or detection["changed_sources"]
             or detection["selection_policy_checkpoint_required"]
+            or detection["audit_binding_checkpoint_required"]
         ) else ("panel-only" if detection["selection_policy_changed"] else "reuse"),
         "blocked_reasons": blocked,
         "nodes": [
@@ -1318,7 +1371,13 @@ def publishable_changes(
         if not (
             path.startswith(DERIVED_PREFIXES)
             or path.startswith(PUBLISHABLE_STATE_PREFIXES)
-            or (allow_fixture_sources and any(path == prefix or path.startswith(prefix) for prefix in SOURCE_PREFIXES))
+            or (
+                allow_fixture_sources
+                and (
+                    path in SOURCE_FILES
+                    or any(path == prefix or path.startswith(prefix) for prefix in SOURCE_PREFIXES)
+                )
+            )
         )
     ]
     if illegal:
@@ -1329,14 +1388,194 @@ def publishable_changes(
     return changed
 
 
+def normalize_sha256_fingerprint(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = SHA256_FINGERPRINT_PATTERN.fullmatch(value.strip())
+    return "sha256:" + match.group(1).lower() if match else None
+
+
 def source_binding_mismatches(audit_sources: Any, expected_sources: Any) -> list[str]:
+    """Compare only the source coverage declared by the audit."""
     if not isinstance(audit_sources, dict) or not isinstance(expected_sources, dict):
         return ["<source-map-missing>"]
-    return sorted(
-        path
-        for path in set(audit_sources) | set(expected_sources)
-        if audit_sources.get(path) != expected_sources.get(path)
+    mismatches: list[str] = []
+    for raw_path, audit_fingerprint in audit_sources.items():
+        path = str(raw_path or "")
+        expected_fingerprint = expected_sources.get(path)
+        if (
+            not path
+            or normalize_sha256_fingerprint(audit_fingerprint) is None
+            or normalize_sha256_fingerprint(expected_fingerprint) is None
+            or normalize_sha256_fingerprint(audit_fingerprint)
+            != normalize_sha256_fingerprint(expected_fingerprint)
+        ):
+            mismatches.append(path or "<empty-source-path>")
+    return sorted(set(mismatches))
+
+
+def plan_node_state(plan: dict[str, Any], node: str) -> dict[str, Any] | None:
+    rows = plan.get("nodes")
+    if not isinstance(rows, list):
+        raise RefreshError("REFRESH_PLAN_INVALID", "refresh plan nodes must be an array")
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("instance_key") == node
+    ]
+    if len(matches) > 1:
+        raise RefreshError("REFRESH_PLAN_INVALID", f"refresh plan contains duplicate {node} nodes")
+    return matches[0] if matches else None
+
+
+def bound_node_result(
+    plan: dict[str, Any],
+    workspace: Path,
+    node: str,
+    results: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    state = plan_node_state(plan, node)
+    expected_path = workspace / "results" / (node.replace(":", "-") + ".json")
+    raw_output = state.get("output") if state else None
+    if (
+        state is None
+        or state.get("status") != "completed"
+        or not isinstance(raw_output, str)
+        or not raw_output
+        or not Path(raw_output).is_absolute()
+        or Path(raw_output).resolve() != expected_path.resolve()
+        or not expected_path.is_file()
+        or expected_path.is_symlink()
+    ):
+        raise RefreshError(
+            "REFRESH_RESULT_INVALID",
+            f"{node} is not bound to its completed result in the current refresh workspace",
+            node=node,
+        )
+    persisted = load_json(expected_path)
+    if results.get(node) != persisted:
+        raise RefreshError(
+            "REFRESH_RESULT_INVALID",
+            f"{node} in-memory result differs from its current workspace result",
+            node=node,
+        )
+    return persisted
+
+
+def result_file_in_staging(staged_root: Path, raw_path: Any, label: str) -> tuple[Path, str]:
+    if not isinstance(raw_path, str) or not raw_path or not Path(raw_path).is_absolute():
+        raise RefreshError("REFRESH_RESULT_INVALID", f"{label} path is missing or not absolute")
+    path = Path(raw_path)
+    resolved_root = staged_root.resolve()
+    resolved_path = path.resolve()
+    try:
+        relative = resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise RefreshError("REFRESH_RESULT_INVALID", f"{label} path is outside current staging") from exc
+    if not resolved_path.is_file() or path.is_symlink():
+        raise RefreshError("REFRESH_RESULT_INVALID", f"{label} file is missing or symlinked")
+    return resolved_path, relative.as_posix()
+
+
+def receipt_file_in_memory(memory_root: Path, raw_path: Any) -> tuple[Path, str] | None:
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    relative = Path(raw_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    path = memory_root / relative
+    resolved_root = memory_root.resolve()
+    resolved_path = path.resolve()
+    try:
+        normalized = resolved_path.relative_to(resolved_root).as_posix()
+    except ValueError:
+        return None
+    if not resolved_path.is_file() or path.is_symlink():
+        return None
+    return resolved_path, normalized
+
+
+def state_audit_for_publication(
+    staged_root: Path,
+    workspace: Path,
+    plan: dict[str, Any],
+    results: dict[str, dict[str, Any]],
+) -> tuple[Path, str, dict[str, Any]] | None:
+    state = plan_node_state(plan, "state-audit")
+    if state is None:
+        if plan.get("fixture"):
+            return None
+        previous = last_successful_receipt(staged_root)
+        inherited = receipt_file_in_memory(
+            staged_root,
+            previous.get("state_audit"),
+        )
+        if inherited is None:
+            raise RefreshError(
+                "REFRESH_PUBLICATION_INELIGIBLE",
+                "refresh plan has no plan-bound or published state audit",
+            )
+        audit_path, relative = inherited
+        audit = load_json(audit_path)
+        if (
+            audit.get("audit_type") != "input"
+            or audit.get("scenario") != "global"
+            or not audit.get("input_audit_id")
+            or audit.get("input_audit_id") != previous.get("state_audit_id")
+        ):
+            raise RefreshError(
+                "REFRESH_PUBLICATION_INELIGIBLE",
+                "published state audit binding is missing or inconsistent",
+            )
+        return audit_path, relative, audit
+    result = bound_node_result(plan, workspace, "state-audit", results)
+    outputs = result.get("outputs") if isinstance(result.get("outputs"), dict) else {}
+    audit_path, relative = result_file_in_staging(
+        staged_root,
+        outputs.get("json"),
+        "state-audit output",
     )
+    audit = load_json(audit_path)
+    if (
+        result.get("ok") is not True
+        or audit.get("audit_type") != "input"
+        or audit.get("scenario") != "global"
+        or not audit.get("input_audit_id")
+        or result.get("input_audit_id") != audit.get("input_audit_id")
+    ):
+        raise RefreshError(
+            "REFRESH_RESULT_INVALID",
+            "state-audit result identity does not match its global input audit",
+            node="state-audit",
+        )
+    return audit_path, relative, audit
+
+
+def panel_audit_from_result(
+    staged_root: Path,
+    panel_result: dict[str, Any],
+    *,
+    path_field: str,
+    id_field: str,
+    audit_type: str,
+) -> tuple[Path, str, dict[str, Any]]:
+    audit_path, relative = result_file_in_staging(
+        staged_root,
+        panel_result.get(path_field),
+        path_field.replace("_", " "),
+    )
+    audit = load_json(audit_path)
+    if (
+        audit.get("audit_type") != audit_type
+        or not audit.get(id_field)
+        or panel_result.get(id_field) != audit.get(id_field)
+    ):
+        raise RefreshError(
+            "REFRESH_RESULT_INVALID",
+            f"Management Panel result does not match {path_field}",
+            node="management-panel",
+        )
+    return audit_path, relative, audit
 
 
 def strict_audit_readiness(audit: dict[str, Any], binding_mismatches: list[str]) -> str:
@@ -1350,11 +1589,65 @@ def strict_audit_readiness(audit: dict[str, Any], binding_mismatches: list[str])
         return "blocked"
     if binding_mismatches:
         return "stale"
+    if audit.get("safe_to_generate") is not True:
+        return "unverified"
     if audit.get("audit_status") == "pass" and audit.get("execution_disposition") == "ready":
         return "ready"
-    if audit.get("execution_disposition") == "degraded":
+    if (
+        audit.get("audit_status") in {"pass", "warning"}
+        and audit.get("execution_disposition") == "degraded"
+    ):
         return "degraded"
     return "unverified"
+
+
+def panel_audit_readiness(audit: dict[str, Any], safe_field: str) -> str:
+    if (
+        audit.get("ok") is False
+        or audit.get("audit_status") == "blocked"
+        or audit.get("execution_disposition") == "blocked"
+        or audit.get(safe_field) is not True
+        or int(audit.get("counts", {}).get("blocking_findings", 0) or 0) > 0
+    ):
+        return "blocked"
+    if audit.get("audit_status") == "pass" and audit.get("execution_disposition") == "ready":
+        return "ready"
+    if (
+        audit.get("audit_status") in {"pass", "warning"}
+        and audit.get("execution_disposition") == "degraded"
+    ):
+        return "degraded"
+    return "unverified"
+
+
+def combined_audit_readiness(*values: str) -> str:
+    active = [value for value in values if value != "not-applicable"]
+    for value in ("blocked", "stale", "missing", "unverified", "degraded"):
+        if value in active:
+            return value
+    return "ready" if active and all(value == "ready" for value in active) else "missing"
+
+
+def audit_receipt_summary(
+    relative_path: str,
+    audit: dict[str, Any],
+    *,
+    id_field: str,
+    safe_field: str,
+    readiness: str,
+) -> dict[str, Any]:
+    return {
+        "path": relative_path,
+        "audit_id": audit.get(id_field),
+        "audit_status": audit.get("audit_status"),
+        "execution_disposition": audit.get("execution_disposition"),
+        safe_field: audit.get(safe_field),
+        "readiness": readiness,
+        "counts": audit.get("counts", {}),
+        "blocking_findings": audit.get("blocking_gaps", []),
+        "warning_findings": audit.get("warnings", []),
+        "recommended_workflows": audit.get("recommended_workflows", []),
+    }
 
 
 def validate_staged_publication(
@@ -1364,6 +1657,7 @@ def validate_staged_publication(
     workspace: Path,
     plan: dict[str, Any],
     panel_result: dict[str, Any],
+    results: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     pending = pending_intent_ids(staged_root)
     if pending:
@@ -1371,28 +1665,89 @@ def validate_staged_publication(
             "REFRESH_PUBLICATION_INELIGIBLE",
             "staged status intents are still pending: " + ", ".join(pending),
         )
-    audit_path = latest_audit_path(staged_root)
-    if audit_path is None:
-        raise RefreshError("REFRESH_PUBLICATION_INELIGIBLE", "staged panel has no management-panel input audit")
-    audit = load_json(audit_path)
-    drift_count, drift_action_ids, repair_batches = audit_drift_details(audit)
-    if drift_count or drift_action_ids:
+    bound_panel_result = bound_node_result(plan, workspace, "management-panel", results)
+    if bound_panel_result != panel_result:
         raise RefreshError(
-            "REFRESH_PUBLICATION_INELIGIBLE",
-            "staged action projection drift must be repaired before publication",
+            "REFRESH_RESULT_INVALID",
+            "Management Panel result is not the current plan-bound node result",
+            node="management-panel",
         )
-    expected_sources = (
-        source_inventory(staged_root, project_root)
-        if plan.get("fixture")
-        else plan.get("source_fingerprints")
+
+    state_binding = state_audit_for_publication(staged_root, workspace, plan, results)
+    if state_binding is None:
+        state_audit_relative = None
+        state_audit = {}
+        drift_count, drift_action_ids, repair_batches = 0, [], []
+        binding_mismatches: list[str] = []
+        state_readiness = "not-applicable"
+        state_summary = None
+    else:
+        _, state_audit_relative, state_audit = state_binding
+        drift_count, drift_action_ids, repair_batches = audit_drift_details(state_audit)
+        if drift_count or drift_action_ids:
+            raise RefreshError(
+                "REFRESH_PUBLICATION_INELIGIBLE",
+                "staged action projection drift must be repaired before publication",
+            )
+        binding_mismatches = source_binding_mismatches(
+            state_audit.get("source_fingerprints"),
+            plan.get("source_fingerprints"),
+        )
+        state_readiness = strict_audit_readiness(state_audit, binding_mismatches)
+        if state_readiness not in {"ready", "degraded"}:
+            raise RefreshError(
+                "REFRESH_PUBLICATION_INELIGIBLE",
+                f"staged state audit is not publishable: {state_readiness}",
+            )
+        state_summary = audit_receipt_summary(
+            state_audit_relative,
+            state_audit,
+            id_field="input_audit_id",
+            safe_field="safe_to_generate",
+            readiness=state_readiness,
+        )
+        state_summary["source_binding_mismatches"] = binding_mismatches
+
+    _, input_audit_relative, input_audit = panel_audit_from_result(
+        staged_root,
+        panel_result,
+        path_field="panel_input_audit",
+        id_field="panel_input_audit_id",
+        audit_type="panel-input",
     )
-    binding_mismatches = source_binding_mismatches(audit.get("source_fingerprints"), expected_sources)
-    readiness = strict_audit_readiness(audit, binding_mismatches)
-    if readiness != "ready":
+    _, artifact_audit_relative, artifact_audit = panel_audit_from_result(
+        staged_root,
+        panel_result,
+        path_field="panel_artifact_audit",
+        id_field="panel_artifact_audit_id",
+        audit_type="panel-artifact",
+    )
+    if (
+        artifact_audit.get("panel_input_audit_id") != input_audit.get("panel_input_audit_id")
+        or artifact_audit.get("panel_id") != panel_result.get("panel_id")
+    ):
+        raise RefreshError(
+            "REFRESH_RESULT_INVALID",
+            "Management Panel artifact audit does not bind the current panel and input audit",
+            node="management-panel",
+        )
+    input_readiness = panel_audit_readiness(input_audit, "safe_to_render")
+    artifact_readiness = panel_audit_readiness(artifact_audit, "safe_to_publish")
+    if input_readiness not in {"ready", "degraded"}:
         raise RefreshError(
             "REFRESH_PUBLICATION_INELIGIBLE",
-            f"staged audit is not strictly ready: {readiness}",
+            f"staged Panel input audit is not publishable: {input_readiness}",
         )
+    if artifact_readiness not in {"ready", "degraded"}:
+        raise RefreshError(
+            "REFRESH_PUBLICATION_INELIGIBLE",
+            f"staged Panel artifact audit is not publishable: {artifact_readiness}",
+        )
+    readiness = combined_audit_readiness(
+        state_readiness,
+        input_readiness,
+        artifact_readiness,
+    )
     command = [
         sys.executable,
         str(SCRIPT_PATHS["management-panel"]),
@@ -1412,9 +1767,24 @@ def validate_staged_publication(
         output_flag="--output",
     )
     return {
-        "audit_path": str(audit_path),
+        "audit_path": state_audit_relative,
         "audit_readiness": readiness,
         "audit_binding_mismatches": binding_mismatches,
+        "state_audit": state_summary,
+        "panel_input_audit": audit_receipt_summary(
+            input_audit_relative,
+            input_audit,
+            id_field="panel_input_audit_id",
+            safe_field="safe_to_render",
+            readiness=input_readiness,
+        ),
+        "panel_artifact_audit": audit_receipt_summary(
+            artifact_audit_relative,
+            artifact_audit,
+            id_field="panel_artifact_audit_id",
+            safe_field="safe_to_publish",
+            readiness=artifact_readiness,
+        ),
         "drift_count": drift_count,
         "drift_action_ids": drift_action_ids,
         "repair_batches": repair_batches,
@@ -1823,7 +2193,7 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
     if plan.get("status") == "superseded":
         raise RefreshError(
             "REFRESH_PLAN_SUPERSEDED",
-            "refresh plan was replaced after its fact sources changed; apply its replacement plan",
+            "refresh plan was replaced by a newer confirmed plan; apply its replacement plan",
         )
     if plan.get("blocked_reasons"):
         raise RefreshError("REFRESH_PLAN_BLOCKED", "; ".join(plan["blocked_reasons"]))
@@ -1991,6 +2361,7 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
                 workspace,
                 plan,
                 panel_result,
+                results,
             )
             publication = committed_publication_for_plan(memory_root, plan["plan_id"])
             if publication:
@@ -2015,11 +2386,21 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
                 "panel_id": panel_result.get("panel_id"),
             }
         )
+        panel_input_validation = prepublish_validation.get("panel_input_audit")
+        if not isinstance(panel_input_validation, dict):
+            panel_input_validation = {}
+        panel_artifact_validation = prepublish_validation.get("panel_artifact_audit")
+        if not isinstance(panel_artifact_validation, dict):
+            panel_artifact_validation = {}
+        state_validation = prepublish_validation.get("state_audit")
+        if not isinstance(state_validation, dict):
+            state_validation = {}
         receipt = {
             "ok": True,
             "schema_version": "1.0.0",
             "operation": "apply",
             "status": "published",
+            "fixture": bool(plan.get("fixture")),
             "refresh_id": plan["refresh_id"],
             "plan_id": plan["plan_id"],
             "generation_id": generation_id,
@@ -2028,6 +2409,24 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
             "selection_policy": plan.get("selection_policy"),
             "selection_policy_id": plan.get("selection_policy_id"),
             "panel_id": panel_result.get("panel_id"),
+            "panel_recovery_status": panel_result.get("recovery_status"),
+            "panel_recommended_workflows": (
+                list(panel_result["recommended_workflows"])
+                if isinstance(panel_result.get("recommended_workflows"), list)
+                else []
+            ),
+            "state_audit": state_validation.get("path"),
+            "state_audit_id": state_validation.get("audit_id"),
+            "panel_input_audit": panel_input_validation.get("path"),
+            "panel_input_audit_id": panel_input_validation.get("audit_id"),
+            "panel_input_audit_disposition": panel_input_validation.get(
+                "execution_disposition"
+            ),
+            "panel_artifact_audit": panel_artifact_validation.get("path"),
+            "panel_artifact_audit_id": panel_artifact_validation.get("audit_id"),
+            "panel_artifact_audit_disposition": panel_artifact_validation.get(
+                "execution_disposition"
+            ),
             "nodes": plan["nodes"],
             "publication_transaction": publication,
             "prepublish_validation": prepublish_validation,
@@ -2154,20 +2553,84 @@ def _inspect_refresh_unlocked(args: argparse.Namespace, project_root: Path, memo
         else ("stale" if receipt else "migration-required")
     )
     drift_count = 0
-    audit_readiness = "missing"
+    drift_action_ids: list[str] = []
+    repair_batches: list[dict[str, Any]] = []
     audit_binding_mismatches: list[str] = []
-    audit_path = latest_audit_path(memory_root)
-    if audit_path:
-        audit = load_optional_json(audit_path)
-        drift_count, drift_action_ids, repair_batches = audit_drift_details(audit)
-        audit_binding_mismatches = source_binding_mismatches(
-            audit.get("source_fingerprints"),
-            receipt.get("source_fingerprints") if receipt else None,
+    state_audit_path: Path | None = None
+    panel_input_audit_path: Path | None = None
+    panel_artifact_audit_path: Path | None = None
+    state_readiness = "not-applicable" if receipt.get("fixture") else "missing"
+    input_readiness = "missing"
+    artifact_readiness = "missing"
+    if receipt:
+        state_binding = receipt_file_in_memory(
+            memory_root,
+            receipt.get("state_audit"),
         )
-        audit_readiness = strict_audit_readiness(audit, audit_binding_mismatches)
+        if state_binding is not None:
+            state_audit_path, _ = state_binding
+            state_audit = load_optional_json(state_audit_path)
+            if (
+                state_audit.get("audit_type") == "input"
+                and state_audit.get("scenario") == "global"
+                and state_audit.get("input_audit_id") == receipt.get("state_audit_id")
+            ):
+                drift_count, drift_action_ids, repair_batches = audit_drift_details(state_audit)
+                audit_binding_mismatches = source_binding_mismatches(
+                    state_audit.get("source_fingerprints"),
+                    receipt.get("source_fingerprints"),
+                )
+                state_readiness = strict_audit_readiness(state_audit, audit_binding_mismatches)
+            else:
+                state_readiness = "unverified"
+
+        input_binding = receipt_file_in_memory(
+            memory_root,
+            receipt.get("panel_input_audit"),
+        )
+        if input_binding is not None:
+            panel_input_audit_path, _ = input_binding
+            input_audit = load_optional_json(panel_input_audit_path)
+            if (
+                input_audit.get("audit_type") == "panel-input"
+                and input_audit.get("panel_input_audit_id")
+                == receipt.get("panel_input_audit_id")
+            ):
+                input_readiness = panel_audit_readiness(input_audit, "safe_to_render")
+            else:
+                input_readiness = "unverified"
+
+        artifact_binding = receipt_file_in_memory(
+            memory_root,
+            receipt.get("panel_artifact_audit"),
+        )
+        if artifact_binding is not None:
+            panel_artifact_audit_path, _ = artifact_binding
+            artifact_audit = load_optional_json(panel_artifact_audit_path)
+            if (
+                artifact_audit.get("audit_type") == "panel-artifact"
+                and artifact_audit.get("panel_artifact_audit_id")
+                == receipt.get("panel_artifact_audit_id")
+                and artifact_audit.get("panel_input_audit_id")
+                == receipt.get("panel_input_audit_id")
+                and artifact_audit.get("panel_id") == receipt.get("panel_id")
+            ):
+                artifact_readiness = panel_audit_readiness(
+                    artifact_audit,
+                    "safe_to_publish",
+                )
+            else:
+                artifact_readiness = "unverified"
     else:
-        drift_action_ids = []
-        repair_batches = []
+        latest_path = latest_audit_path(memory_root)
+        if latest_path is not None:
+            latest_audit = load_optional_json(latest_path)
+            drift_count, drift_action_ids, repair_batches = audit_drift_details(latest_audit)
+    audit_readiness = combined_audit_readiness(
+        state_readiness,
+        input_readiness,
+        artifact_readiness,
+    )
     receipt_integrity = False
     if receipt and receipt.get("receipt_id"):
         receipt_body = dict(receipt)
@@ -2178,7 +2641,7 @@ def _inspect_refresh_unlocked(args: argparse.Namespace, project_root: Path, memo
         and business_freshness == "fresh"
         and not pending
         and drift_count == 0
-        and audit_readiness == "ready"
+        and audit_readiness in {"ready", "degraded"}
         and receipt_integrity
     )
     result = {
@@ -2198,9 +2661,18 @@ def _inspect_refresh_unlocked(args: argparse.Namespace, project_root: Path, memo
         "drift_count": drift_count,
         "drift_action_ids": drift_action_ids,
         "repair_batches": repair_batches,
-        "audit_path": str(audit_path) if audit_path else None,
+        "audit_path": str(state_audit_path) if state_audit_path else None,
         "audit_readiness": audit_readiness,
         "audit_binding_mismatches": audit_binding_mismatches,
+        "state_audit_readiness": state_readiness,
+        "panel_input_audit_path": (
+            str(panel_input_audit_path) if panel_input_audit_path else None
+        ),
+        "panel_input_audit_readiness": input_readiness,
+        "panel_artifact_audit_path": (
+            str(panel_artifact_audit_path) if panel_artifact_audit_path else None
+        ),
+        "panel_artifact_audit_readiness": artifact_readiness,
         "receipt_integrity": "pass" if receipt_integrity else "fail",
         "panel_inspect": panel_result,
         "recommended_workflows": (
