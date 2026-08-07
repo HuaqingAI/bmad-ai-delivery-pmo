@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Any
 
 
@@ -15,6 +15,7 @@ PROGRESS_BASIS = "weighted-milestone"
 MIGRATION_ERROR_CODE = "ADP-PROGRESS-MIGRATION-REQUIRED"
 ZERO = Decimal("0")
 HUNDRED = Decimal("100")
+CENT = Decimal("0.01")
 
 
 class ProgressContractError(ValueError):
@@ -153,6 +154,14 @@ def build_progress_projection(
         audit_lineage=audit_lineage,
         comparability=comparability,
     )
+
+    if overall_status == "measurable":
+        allocate_scope_completed_contributions(
+            by_scope,
+            by_workstream,
+            progress_rows,
+            overall["current"]["actual_completion_percent"],
+        )
 
     previous_actual = previous_progress_actual(previous_snapshot)
     current_actual = overall["current"]["actual_completion_percent"]
@@ -385,6 +394,78 @@ def validate_scope_weights(
     return "measurable", [measurement_reason("eligible", "PROGRESS-SCOPE-ELIGIBLE", "The scope has approved weighting and auditable milestone state.", ["plans/program-baseline.md"], [])]
 
 
+def allocate_scope_completed_contributions(
+    by_scope: list[dict[str, Any]],
+    by_workstream: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    overall_actual: float,
+) -> None:
+    raw_by_scope: dict[str, Decimal] = {}
+    for row in rows:
+        scope_id = str(row["workstream_id"])
+        raw_by_scope.setdefault(scope_id, ZERO)
+        if row["completed"] and row["weight"] is not None:
+            raw_by_scope[scope_id] += row["weight"]
+
+    measurable = sorted(
+        (
+            scope
+            for scope in by_scope
+            if scope["progress_kind"] == PROGRESS_BASIS
+            and scope["measurement_status"] == "measurable"
+        ),
+        key=lambda scope: str(scope["scope_id"]),
+    )
+    target = Decimal(str(overall_actual)).quantize(CENT)
+    raw_total = sum(
+        (raw_by_scope.get(str(scope["scope_id"]), ZERO) for scope in measurable),
+        ZERO,
+    )
+    if Decimal(str(round2(raw_total))) != target:
+        raise ProgressContractError(
+            "overall actual does not equal raw scope completed contribution"
+        )
+
+    floors: dict[str, Decimal] = {}
+    remainders: dict[str, Decimal] = {}
+    for scope in measurable:
+        scope_id = str(scope["scope_id"])
+        raw = raw_by_scope.get(scope_id, ZERO)
+        floor = raw.quantize(CENT, rounding=ROUND_FLOOR)
+        floors[scope_id] = floor
+        remainders[scope_id] = raw - floor
+
+    residual = target - sum(floors.values(), ZERO)
+    residual_units_decimal = residual / CENT
+    if residual_units_decimal != residual_units_decimal.to_integral_value():
+        raise ProgressContractError(
+            "scope contribution residual is not representable at two decimals"
+        )
+    residual_units = int(residual_units_decimal)
+    if residual_units < 0 or residual_units > len(measurable):
+        raise ProgressContractError("scope contribution residual is outside allocation bounds")
+
+    ranked_scope_ids = sorted(
+        floors,
+        key=lambda scope_id: (-remainders[scope_id], scope_id),
+    )
+    allocated = dict(floors)
+    for scope_id in ranked_scope_ids[:residual_units]:
+        allocated[scope_id] += CENT
+    if sum(allocated.values(), ZERO) != target:
+        raise ProgressContractError("scope contribution allocation does not equal overall actual")
+
+    for scope in measurable:
+        scope_id = str(scope["scope_id"])
+        scope["current"]["completed_contribution_pp"] = round2(allocated[scope_id])
+    for workstream in by_workstream:
+        workstream_id = str(workstream.get("workstream_id") or "")
+        if workstream_id in allocated:
+            workstream["current"]["completed_contribution_pp"] = round2(
+                allocated[workstream_id]
+            )
+
+
 def build_scope_projection(
     *,
     scope_id: str,
@@ -433,7 +514,9 @@ def build_scope_projection(
         "planned_completion_percent": planned_percent,
         "completion_gap_pp": round2(Decimal(str(actual_percent)) - Decimal(str(planned_percent))),
         "project_weight_percent": round2(project_weight),
-        "completed_contribution_pp": round2(completed_contribution),
+        "completed_contribution_pp": (
+            None if project_scale else round2(completed_contribution)
+        ),
     }
     base["value_lineage"] = {
         "actual_completion_percent": actual_lineage,

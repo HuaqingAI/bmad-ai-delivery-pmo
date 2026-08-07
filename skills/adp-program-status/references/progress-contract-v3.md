@@ -6,9 +6,9 @@ This reference freezes the `program-status.progress` contract that roadmap, meet
 
 - `progress_schema_version` is exactly `3.0.0`; `basis` is exactly `weighted-milestone`.
 - Fields ending in `_percent` use a `0..100` scale. `completion_gap_pp`, `actual_delta_pp`, and `completed_contribution_pp` are percentage points; date variance remains `variance_days` outside this object.
-- Approved milestone weights are project percentage points with at most two decimal places and sum to `100.00` across the applicable project scope. Calculations use decimal arithmetic and serialize to two decimal places with round-half-up.
+- Approved milestone weights are project percentage points and sum to `100.00` across the applicable project scope. Calculations retain source precision in decimal arithmetic and serialize to two decimal places with round-half-up.
 - `completion_gap_pp` is the serialized actual percent minus the serialized planned percent. It is never a schedule-days metric.
-- `by_scope[].current.project_weight_percent` is the scope's share of project weight. `completed_contribution_pp` is completed project weight, not the within-scope completion rate. Overall actual equals the sum of measurable weighted scope contributions.
+- `by_scope[].current.project_weight_percent` is the scope's share of project weight. `completed_contribution_pp` is completed project weight, not the within-scope completion rate. Overall actual equals the sum of measurable weighted scope contributions. Scope contributions use deterministic largest-remainder allocation at `0.01` percentage-point precision so their serialized sum equals the independently rounded true overall; tie-breaking is by ascending canonical `scope_id`.
 
 ## Measurement status and nulls
 

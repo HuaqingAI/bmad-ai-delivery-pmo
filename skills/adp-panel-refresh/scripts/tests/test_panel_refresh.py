@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from contextlib import contextmanager
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -175,6 +176,117 @@ class PanelRefreshTests(unittest.TestCase):
             "TBD | FDE One | high | TBD | workstreams/ws-one/evidence.md#status | 1 |\n",
             encoding="utf-8",
         )
+
+    def scaffold_rounding_program_status_sources(
+        self,
+        root: Path,
+        memory: Path,
+    ) -> None:
+        config = root / "_bmad/bmb/config.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "communication_language: English\n"
+            "document_output_language: English\n"
+            "output_folder: '{project-root}/_bmad-output'\n"
+            "default_reporting_cadence: weekly\n"
+            "status_stale_after_days: 7\n"
+            "schedule_variance_tolerance_days: 0\n"
+            "meeting_pack_item_limit: 10\n",
+            encoding="utf-8",
+        )
+        source = {
+            "type": "approved-plan",
+            "reference": "docs/plan.md",
+            "confirmed_by": "Program Owner",
+        }
+        milestones: list[dict] = []
+        for index in range(4):
+            workstream_id = f"ws-{index + 1}"
+            milestones.extend(
+                [
+                    {
+                        "id": f"M-{index + 1}-DONE",
+                        "name": f"Completed milestone {index + 1}",
+                        "workstream_id": workstream_id,
+                        "planned_date": "2026-08-01",
+                        "owner": f"Owner {index + 1}",
+                        "confirmation_status": "approved",
+                        "source": source,
+                        "dependencies": [],
+                        "baseline_revision": 1,
+                        "completion_criteria": "Accepted evidence is linked",
+                        "weight": 1.53846,
+                    },
+                    {
+                        "id": f"M-{index + 1}-NEXT",
+                        "name": f"Pending milestone {index + 1}",
+                        "workstream_id": workstream_id,
+                        "planned_date": "2026-08-20",
+                        "owner": f"Owner {index + 1}",
+                        "confirmation_status": "approved",
+                        "source": source,
+                        "dependencies": [],
+                        "baseline_revision": 1,
+                        "completion_criteria": "Future acceptance is recorded",
+                        "weight": 23.46154,
+                    },
+                ]
+            )
+        baseline = {
+            "schema_version": "1.0",
+            "baseline_id": "PROGRAM-BASELINE",
+            "revision": 1,
+            "confirmation_status": "approved",
+            "project": {
+                "name": "Panel Rounding Test",
+                "owner": "Program Owner",
+                "target_date": "2026-12-31",
+                "source": source,
+            },
+            "default_tolerance_days": 0,
+            "gates": [],
+            "milestones": milestones,
+            "critical_path": [],
+            "weighting": {
+                "enabled": True,
+                "completion_measure": "accepted milestone weight",
+                "source": {
+                    "type": "approved-plan",
+                    "reference": "docs/weights.md",
+                    "confirmed_by": "Program Owner",
+                },
+            },
+            "created_at": "2026-08-01T00:00:00Z",
+            "updated_at": "2026-08-01T00:00:00Z",
+        }
+        baseline_path = memory / "plans/program-baseline.md"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(
+            "# Program Baseline\n\n<!-- adp:program-baseline:v1 -->\n\n```json\n"
+            + json.dumps(baseline, indent=2)
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        for index in range(4):
+            workstream_id = f"ws-{index + 1}"
+            wdr = memory / "workstreams" / workstream_id / "delivery-record.md"
+            wdr.parent.mkdir(parents=True, exist_ok=True)
+            wdr.write_text(
+                "# Workstream Delivery Record\n\n"
+                "## Identity\n\n"
+                f"- Workstream ID: {workstream_id}\n\n"
+                "## Roadmap\n\n"
+                "| Milestone ID | Milestone | Type | Status | Planned | Forecast | Actual | "
+                "Owner | Confidence | Depends On | Source | Baseline Revision |\n"
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                f"| M-{index + 1}-DONE | Completed milestone | checkpoint | done | 2026-08-01 | "
+                f"TBD | 2026-08-01 | Owner {index + 1} | high | TBD | "
+                f"workstreams/{workstream_id}/evidence.md#done | 1 |\n"
+                f"| M-{index + 1}-NEXT | Pending milestone | checkpoint | planned | 2026-08-20 | "
+                f"2026-08-20 | TBD | Owner {index + 1} | high | TBD | "
+                f"workstreams/{workstream_id}/evidence.md#next | 1 |\n",
+                encoding="utf-8",
+            )
 
     def run_cli(self, *args: str, check: bool = True) -> tuple[subprocess.CompletedProcess[str], dict]:
         completed = subprocess.run(
@@ -425,6 +537,177 @@ class PanelRefreshTests(unittest.TestCase):
                 ".adp-panel-refresh-staging",
                 json.dumps(staged_model, ensure_ascii=False),
             )
+
+    def test_program_status_resume_handles_cumulative_scope_rounding(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            self.scaffold_rounding_program_status_sources(root, memory)
+            planned = self.plan(root)
+            plan_path = Path(planned["plan_path"])
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            today = module.datetime.now(module.timezone.utc).date()
+            plan.update(
+                {
+                    "source_as_of": today.isoformat(),
+                    "period_start": (today - module.timedelta(days=6)).isoformat(),
+                    "period_end": today.isoformat(),
+                    "fixture": True,
+                    "selection_policy": "fixture-policy.json",
+                    "selection_policy_id": "sha256:" + "a" * 64,
+                    "status": "planned",
+                    "retry_from_instance_key": "state-audit",
+                    "nodes": [
+                        {
+                            "instance_key": node,
+                            "status": "pending",
+                            "output": None,
+                            "error": None,
+                        }
+                        for node in module.NODE_ORDER
+                    ],
+                }
+            )
+            module.atomic_json(plan_path, plan)
+            original_execute_node = module.execute_node
+
+            def execute_real_status_path(
+                node: str,
+                node_args,
+                current_plan: dict,
+                project_root: Path,
+                staged_root: Path,
+                workspace: Path,
+                results: dict,
+            ) -> dict:
+                if node == "program-status":
+                    return original_execute_node(
+                        node,
+                        node_args,
+                        current_plan,
+                        project_root,
+                        staged_root,
+                        workspace,
+                        results,
+                    )
+                result_path = workspace / "results" / (node.replace(":", "-") + ".json")
+                if node != "state-audit":
+                    payload = {"ok": True, "status": "completed", "node": node}
+                    if node == "management-panel":
+                        payload["panel_id"] = "panel-rounding-resume"
+                    module.atomic_json(result_path, payload)
+                    return payload
+                prepass = workspace / "state-audit-prepass.json"
+                module.atomic_json(
+                    prepass,
+                    {
+                        "ok": True,
+                        "schema_version": 2,
+                        "project_root": str(project_root),
+                        "memory_root": str(staged_root),
+                        "sources_read": [],
+                        "missing_sources": [],
+                        "workstreams": [],
+                        "gaps": [],
+                        "cross_reference_gaps": [],
+                        "action_cross_check": [],
+                        "ledger_actions": [],
+                    },
+                )
+                return module.run_json_command(
+                    [
+                        sys.executable,
+                        str(module.SCRIPT_PATHS["state-audit"]),
+                        str(project_root),
+                        "--memory-root",
+                        str(staged_root),
+                        "--prepass-json",
+                        str(prepass),
+                        "--scenario",
+                        "global",
+                        "--as-of",
+                        current_plan["source_as_of"],
+                        "--output-dir",
+                        str(staged_root / "audits"),
+                    ],
+                    result_path,
+                    node,
+                    False,
+                )
+
+            first_args = module.parse_args(
+                [
+                    "apply",
+                    str(root),
+                    "--plan",
+                    str(plan_path),
+                    "--fail-after-node",
+                    "state-audit",
+                ]
+            )
+            with (
+                patch.object(
+                    module,
+                    "execute_node",
+                    side_effect=execute_real_status_path,
+                ),
+                self.assertRaises(module.RefreshError) as first_failure,
+            ):
+                module.apply_refresh(first_args, root, memory)
+            self.assertEqual(first_failure.exception.code, "INJECTED_REFRESH_CRASH")
+
+            dirty = json.loads(plan_path.read_text(encoding="utf-8"))
+            dirty["status"] = "dirty"
+            dirty["retry_from_instance_key"] = "program-status"
+            module.atomic_json(plan_path, dirty)
+            resume_args = module.parse_args(
+                [
+                    "apply",
+                    str(root),
+                    "--plan",
+                    str(plan_path),
+                    "--fail-after-node",
+                    "management-panel",
+                ]
+            )
+            with (
+                patch.object(
+                    module,
+                    "execute_node",
+                    side_effect=execute_real_status_path,
+                ),
+                self.assertRaises(module.RefreshError) as resumed_failure,
+            ):
+                module.apply_refresh(resume_args, root, memory)
+            self.assertEqual(resumed_failure.exception.code, "INJECTED_REFRESH_CRASH")
+
+            completed_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertTrue(
+                all(item["status"] == "completed" for item in completed_plan["nodes"])
+            )
+            workspace = module.workspace_for(memory, plan["refresh_id"])
+            program_result = json.loads(
+                (workspace / "results/program-status.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(program_result["status"], "complete")
+            staged_model = json.loads(
+                (workspace / "memory/views/program-status.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            progress = staged_model["progress"]
+            contributions = [
+                Decimal(str(item["current"]["completed_contribution_pp"]))
+                for item in progress["by_scope"]
+                if item["measurement_status"] == "measurable"
+            ]
+            self.assertEqual(6.15, progress["overall"]["current"]["actual_completion_percent"])
+            self.assertEqual(
+                [Decimal("1.53"), Decimal("1.54"), Decimal("1.54"), Decimal("1.54")],
+                sorted(contributions),
+            )
+            self.assertEqual(Decimal("6.15"), sum(contributions, Decimal(0)))
 
     def test_completed_node_resumes_after_injected_crash_without_early_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

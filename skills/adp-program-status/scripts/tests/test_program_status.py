@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -799,6 +800,131 @@ class ProgramStatusTests(unittest.TestCase):
                 self.assertIn("Actual Completion: 100.00%", rendered)
                 self.assertIn("Planned Completion: 0.00%", rendered)
                 self.assertIn("Completion Gap: 100.00 pp", rendered)
+
+    def test_scope_contributions_allocate_cumulative_rounding_residual(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = {
+                "type": "approved-plan",
+                "reference": "docs/plan.md",
+                "confirmed_by": "Program Owner",
+            }
+            completed_weight = 1.53846
+            remaining_weight = 23.46154
+            milestones: list[dict] = []
+            rows_by_workstream: dict[str, list[dict]] = {}
+            for index in range(4):
+                workstream_id = f"ws-{index + 1}"
+                completed_id = f"M-{index + 1}-DONE"
+                pending_id = f"M-{index + 1}-NEXT"
+                milestones.extend(
+                    [
+                        {
+                            "id": completed_id,
+                            "name": f"Completed milestone {index + 1}",
+                            "workstream_id": workstream_id,
+                            "planned_date": "2026-07-10",
+                            "owner": f"Owner {index + 1}",
+                            "confirmation_status": "approved",
+                            "source": source,
+                            "dependencies": [],
+                            "baseline_revision": 1,
+                            "completion_criteria": "Accepted evidence is linked",
+                            "weight": completed_weight,
+                        },
+                        {
+                            "id": pending_id,
+                            "name": f"Pending milestone {index + 1}",
+                            "workstream_id": workstream_id,
+                            "planned_date": "2026-08-20",
+                            "owner": f"Owner {index + 1}",
+                            "confirmation_status": "approved",
+                            "source": source,
+                            "dependencies": [],
+                            "baseline_revision": 1,
+                            "completion_criteria": "Future acceptance is recorded",
+                            "weight": remaining_weight,
+                        },
+                    ]
+                )
+                rows_by_workstream[workstream_id] = [
+                    {
+                        "id": completed_id,
+                        "status": "done",
+                        "actual": "2026-07-12",
+                    },
+                    {
+                        "id": pending_id,
+                        "status": "planned",
+                        "forecast": "2026-08-20",
+                    },
+                ]
+            weighting = {
+                "enabled": True,
+                "completion_measure": "accepted milestone weight",
+                "source": {
+                    "type": "approved-plan",
+                    "reference": "docs/weights.md",
+                    "confirmed_by": "Program Owner",
+                },
+            }
+            baseline = self.baseline(
+                milestones=milestones,
+                critical_path=[],
+                weighting=weighting,
+            )
+            memory = self.scaffold(root, baseline, rows_by_workstream)
+            audit = self.write_real_audit(root, memory)
+
+            completed, result = self.generate(root, audit)
+            self.assertEqual(completed.returncode, 0, result)
+            model = json.loads(
+                Path(result["outputs"]["snapshot"]).read_text(encoding="utf-8")
+            )
+            progress = model["progress"]
+            contributions = [
+                Decimal(str(item["current"]["completed_contribution_pp"]))
+                for item in progress["by_scope"]
+                if item["measurement_status"] == "measurable"
+            ]
+
+            self.assertEqual(6.15, progress["overall"]["current"]["actual_completion_percent"])
+            self.assertEqual(
+                [Decimal("1.53"), Decimal("1.54"), Decimal("1.54"), Decimal("1.54")],
+                sorted(contributions),
+            )
+            self.assertEqual(Decimal("6.15"), sum(contributions, Decimal(0)))
+            by_scope_contributions = {
+                item["scope_id"]: item["current"]["completed_contribution_pp"]
+                for item in progress["by_scope"]
+                if item["scope_kind"] == "physical"
+                and item["measurement_status"] == "measurable"
+            }
+            by_workstream_contributions = {
+                item["workstream_id"]: item["current"]["completed_contribution_pp"]
+                for item in progress["by_workstream"]
+                if item["measurement_status"] == "measurable"
+            }
+            self.assertEqual(
+                {"ws-1": 1.54, "ws-2": 1.54, "ws-3": 1.54, "ws-4": 1.53},
+                by_scope_contributions,
+            )
+            self.assertEqual(by_scope_contributions, by_workstream_contributions)
+            program_status.validate_progress_projection(progress)
+            self.assertEqual([], validate_schema(progress, load_contract_json(SCHEMA_PATH)))
+
+            tampered = json.loads(json.dumps(progress))
+            tampered_scope = next(
+                item
+                for item in tampered["by_scope"]
+                if item["measurement_status"] == "measurable"
+            )
+            tampered_scope["current"]["completed_contribution_pp"] += 0.01
+            with self.assertRaisesRegex(
+                program_status.ProgressContractError,
+                "overall actual does not equal workstream completed contribution",
+            ):
+                program_status.validate_progress_projection(tampered)
 
     def test_real_audit_memory_relative_wdr_key_keeps_actual_eligible(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
