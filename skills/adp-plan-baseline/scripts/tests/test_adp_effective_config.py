@@ -61,6 +61,31 @@ class EffectiveConfigTests(unittest.TestCase):
             self.assertEqual(result["values"]["schedule_variance_tolerance_days"], 3)
             self.assertEqual(result["value_sources"]["status_stale_after_days"], str(config.resolve()))
 
+    def test_panel_refresh_staging_policy_resolves_nested_adp_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "_bmad").mkdir()
+            config = root / "_bmad/config.yaml"
+            config.write_text(
+                "adp:\n"
+                "  panel_refresh:\n"
+                "    staging:\n"
+                "      max_total_gb: 4\n"
+                "      keep_superseded_days: 14\n"
+                "      keep_published_runs: 2\n",
+                encoding="utf-8",
+            )
+
+            _, result = resolve_effective_config(root)
+
+            self.assertEqual(result["values"]["panel_refresh.staging.max_total_gb"], 4)
+            self.assertEqual(
+                result["values"]["panel_refresh.staging.keep_superseded_days"], 14
+            )
+            self.assertEqual(
+                result["values"]["panel_refresh.staging.keep_published_runs"], 2
+            )
+
     def test_legacy_adp_config_precedes_shared_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

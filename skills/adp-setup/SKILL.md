@@ -19,6 +19,7 @@ Installs and configures a BMad module into a project. Module identity, prompts, 
 - `{project-root}/_bmad/config.yaml` - shared project config: root core settings plus an `adp` section. User-only keys (`user_name`, `communication_language`) are never written here.
 - `{project-root}/_bmad/config.user.yaml` - personal settings intended to be gitignored: `user_name`, `communication_language`, and module variables marked `user_setting: true`.
 - `{project-root}/_bmad/module-help.csv` - module capabilities for the help system.
+- `{project-root}/.gitignore` - idempotent runtime ignores for Panel Refresh staging and regenerable inspect/policy-candidate files.
 
 It never writes or deletes ADP project memory, approved baselines, or status snapshots. Existing memory upgrade needs are reported and routed to `adp-project-kickoff`.
 
@@ -52,6 +53,8 @@ In headless mode, stdout is one JSON object and no prose:
   "user_config_path": "<resolved project root>/_bmad/config.user.yaml",
   "help_path": "<resolved project root>/_bmad/module-help.csv",
   "help_rows_added": 0,
+  "gitignore_path": "<resolved project root>/.gitignore",
+  "gitignore_rules_added": [],
   "legacy_configs_deleted": [],
   "legacy_csvs_deleted": [],
   "directories_to_create": [],
@@ -91,9 +94,10 @@ In the commands below, replace `{project-root}` in every path argument with the 
 ```bash
 uv run "{skill-root}/scripts/merge-config.py" --config-path "{project-root}/_bmad/config.yaml" --user-config-path "{project-root}/_bmad/config.user.yaml" --module-yaml "{skill-root}/assets/module.yaml" --answers {validated-answers-file} --legacy-dir "{project-root}/_bmad" --create-output-dirs
 uv run "{skill-root}/scripts/merge-help-csv.py" --target "{project-root}/_bmad/module-help.csv" --source "{skill-root}/assets/module-help.csv" --legacy-dir "{project-root}/_bmad" --module-code adp
+uv run "{skill-root}/scripts/ensure-gitignore.py" "{project-root}" --apply
 ```
 
-Both merge scripts output JSON to stdout. If either exits non-zero, surface the error and stop. Check `legacy_configs_deleted`, `legacy_csvs_deleted`, `directories_to_create`, and `directories_created` in the output. Execute skill-owned scripts with `uv run "{skill-root}/scripts/..."`; do not rely on dot-prefixed script paths, because shell commands usually run from `{project-root}`.
+All three scripts output JSON to stdout. If any exits non-zero, surface the error and stop. Check `legacy_configs_deleted`, `legacy_csvs_deleted`, `directories_to_create`, `directories_created`, and the installed gitignore rules. Execute skill-owned scripts with `uv run "{skill-root}/scripts/..."`; do not rely on dot-prefixed script paths, because shell commands usually run from `{project-root}`.
 
 ## Cleanup Legacy Directories
 

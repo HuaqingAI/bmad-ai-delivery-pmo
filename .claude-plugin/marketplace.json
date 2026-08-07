@@ -2,13 +2,13 @@
   "name": "ai-delivery-pmo",
   "source": "./",
   "description": "AI Delivery PMO module for coordinating complex FDE delivery programs with shared workstream state, readiness, risks, dependencies, L0 references, and stakeholder readouts.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "plugins": [
     {
       "name": "ai-delivery-pmo",
       "source": "./",
       "description": "AI Delivery PMO module for coordinating complex FDE delivery programs with shared workstream state, readiness, risks, dependencies, L0 references, and stakeholder readouts.",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "skills": [
         "./skills/adp-setup",
         "./skills/adp-project-kickoff",

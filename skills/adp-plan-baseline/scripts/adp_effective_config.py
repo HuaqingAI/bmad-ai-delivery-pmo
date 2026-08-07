@@ -34,6 +34,9 @@ DEFAULTS: dict[str, Any] = {
     "status_stale_after_days": 7,
     "schedule_variance_tolerance_days": 0,
     "meeting_pack_item_limit": 10,
+    "panel_refresh.staging.max_total_gb": 2,
+    "panel_refresh.staging.keep_superseded_days": 7,
+    "panel_refresh.staging.keep_published_runs": 1,
 }
 
 MODULE_KEYS = {
@@ -41,6 +44,9 @@ MODULE_KEYS = {
     "status_stale_after_days",
     "schedule_variance_tolerance_days",
     "meeting_pack_item_limit",
+    "panel_refresh.staging.max_total_gb",
+    "panel_refresh.staging.keep_superseded_days",
+    "panel_refresh.staging.keep_published_runs",
 }
 
 LANGUAGE_ALIASES = {
@@ -137,6 +143,9 @@ def _validate_value(key: str, value: Any) -> str | None:
         "status_stale_after_days": (1, 90),
         "schedule_variance_tolerance_days": (0, 90),
         "meeting_pack_item_limit": (3, 30),
+        "panel_refresh.staging.max_total_gb": (1, 100),
+        "panel_refresh.staging.keep_superseded_days": (0, 365),
+        "panel_refresh.staging.keep_published_runs": (0, 20),
     }
     if key in ranges:
         low, high = ranges[key]

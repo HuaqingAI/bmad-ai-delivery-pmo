@@ -20,6 +20,7 @@ INSPECT_STATE = SCRIPT_ROOT / "inspect-install-state.py"
 MERGE_CONFIG = SCRIPT_ROOT / "merge-config.py"
 MERGE_HELP = SCRIPT_ROOT / "merge-help-csv.py"
 CLEANUP_LEGACY = SCRIPT_ROOT / "cleanup-legacy.py"
+ENSURE_GITIGNORE = SCRIPT_ROOT / "ensure-gitignore.py"
 
 
 def script_command(script: Path, *args: str) -> list[str]:
@@ -80,6 +81,30 @@ def write_module_yaml(path: Path, include_required: bool = False) -> None:
 
 
 class AdpSetupScriptTests(unittest.TestCase):
+    def test_ensure_gitignore_previews_then_applies_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+
+            preview = json.loads(run_script(ENSURE_GITIGNORE, str(root)).stdout)
+            self.assertEqual(preview["status"], "preview")
+            self.assertFalse(preview["changed"])
+            self.assertEqual(len(preview["missing_before"]), 3)
+            self.assertEqual((root / ".gitignore").read_text(encoding="utf-8"), "dist/\n")
+
+            applied = json.loads(
+                run_script(ENSURE_GITIGNORE, str(root), "--apply").stdout
+            )
+            repeated = json.loads(
+                run_script(ENSURE_GITIGNORE, str(root), "--apply").stdout
+            )
+            text = (root / ".gitignore").read_text(encoding="utf-8")
+
+            self.assertTrue(applied["changed"])
+            self.assertFalse(repeated["changed"])
+            for rule in applied["rules"]:
+                self.assertEqual(text.count(rule), 1)
+
     def test_marketplace_registers_all_adp_skills(self) -> None:
         repo_root = SKILL_ROOT.parents[1]
         marketplace = json.loads(
@@ -115,8 +140,8 @@ class AdpSetupScriptTests(unittest.TestCase):
         self.assertEqual(sorted(marketplace["skills"]), expected)
         self.assertEqual(sorted(marketplace["plugins"][0]["skills"]), expected)
         self.assertEqual([Path(path).name for path in marketplace["skills"]], expected_order)
-        self.assertEqual(marketplace["version"], "1.4.0")
-        self.assertEqual(marketplace["plugins"][0]["version"], "1.4.0")
+        self.assertEqual(marketplace["version"], "1.5.0")
+        self.assertEqual(marketplace["plugins"][0]["version"], "1.5.0")
 
     def test_module_help_registers_all_skills_in_lifecycle_order(self) -> None:
         header, rows = self.read_csv(SKILL_ROOT / "assets" / "module-help.csv")
@@ -162,6 +187,8 @@ class AdpSetupScriptTests(unittest.TestCase):
             ("adp-panel-refresh", "detect"),
             ("adp-panel-refresh", "plan"),
             ("adp-panel-refresh", "apply"),
+            ("adp-panel-refresh", "abandon"),
+            ("adp-panel-refresh", "prune"),
             ("adp-panel-refresh", "inspect"),
             ("adp-management-panel", "refresh"),
             ("adp-management-panel", "inspect"),
@@ -202,6 +229,13 @@ class AdpSetupScriptTests(unittest.TestCase):
             row_by_capability[("adp-management-panel", "archive")][output_index],
             "{project-root}/_bmad-output/adp/memory/snapshots/management-panel",
         )
+        setup_args = row_by_capability[("adp-setup", "configure")][args_index]
+        for key in (
+            "panel_refresh.staging.max_total_gb",
+            "panel_refresh.staging.keep_superseded_days",
+            "panel_refresh.staging.keep_published_runs",
+        ):
+            self.assertIn(key, setup_args)
         self.assertIn("--scopes <json>", row_by_capability[("adp-flow-graph", "generate")][args_index])
         self.assertIn(
             "internal-full|shareable-summary",
@@ -217,7 +251,7 @@ class AdpSetupScriptTests(unittest.TestCase):
         )
         self.assertEqual(
             [row[action_index] for row in rows_by_skill["adp-panel-refresh"]],
-            ["policy", "detect", "plan", "apply", "inspect"],
+            ["policy", "detect", "plan", "apply", "abandon", "prune", "inspect"],
         )
         self.assertEqual(
             [row[action_index] for row in rows_by_skill["adp-management-panel"]],
@@ -281,8 +315,8 @@ class AdpSetupScriptTests(unittest.TestCase):
                 self.assertIn(follower, nodes)
                 edges.add((node, follower))
 
-        self.assertEqual(len(nodes), 40)
-        self.assertEqual(len(edges), 58)
+        self.assertEqual(len(nodes), 42)
+        self.assertEqual(len(edges), 62)
         adjacency = {node: set() for node in nodes}
         indegree = {node: 0 for node in nodes}
         for source, target in edges:
@@ -317,7 +351,7 @@ class AdpSetupScriptTests(unittest.TestCase):
                 ).stdout
             )
 
-            self.assertEqual(result["module"]["version"], "1.4.0")
+            self.assertEqual(result["module"]["version"], "1.5.0")
             self.assertEqual(
                 result["effective_defaults"]["module"],
                 {
@@ -325,6 +359,9 @@ class AdpSetupScriptTests(unittest.TestCase):
                     "status_stale_after_days": 7,
                     "schedule_variance_tolerance_days": 0,
                     "meeting_pack_item_limit": 10,
+                    "panel_refresh.staging.max_total_gb": 2,
+                    "panel_refresh.staging.keep_superseded_days": 7,
+                    "panel_refresh.staging.keep_published_runs": 1,
                     "management_panel_history_periods": 12,
                     "management_panel_default_view": "project-lead",
                     "management_panel_archive_mode": "meeting-only",
@@ -415,6 +452,9 @@ class AdpSetupScriptTests(unittest.TestCase):
                     "management_panel_default_view",
                     "management_panel_history_periods",
                     "meeting_pack_item_limit",
+                    "panel_refresh.staging.keep_published_runs",
+                    "panel_refresh.staging.keep_superseded_days",
+                    "panel_refresh.staging.max_total_gb",
                     "schedule_variance_tolerance_days",
                 ],
             )
@@ -938,7 +978,7 @@ class AdpSetupScriptTests(unittest.TestCase):
                 )
             )
             self.assertEqual(merged["status"], "success")
-            self.assertIn("version: 1.4.0", config_text)
+            self.assertIn("version: 1.5.0", config_text)
             self.assertIn("default_reporting_cadence: custom", config_text)
             self.assertIn("status_stale_after_days: 21", config_text)
             self.assertIn("meeting_pack_item_limit: 12", config_text)

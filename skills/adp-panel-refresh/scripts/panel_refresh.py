@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # ///
-"""Plan, apply, resume, and inspect end-to-end ADP management-panel refreshes."""
+"""Detect, plan, apply, abandon, prune, and inspect ADP panel refreshes."""
 
 from __future__ import annotations
 
@@ -13,11 +13,13 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -35,6 +37,10 @@ DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 STATUS_REL = Path("state/panel-refresh-status.json")
 RUNS_REL = Path("state/panel-refresh/runs")
 RECEIPTS_REL = Path("receipts/panel-refresh")
+EVIDENCE_REL = Path("state/panel-refresh/evidence")
+PRUNE_RECEIPTS_REL = Path("receipts/panel-refresh/prune")
+ORPHAN_CLEANUP_RECEIPTS_REL = Path("receipts/panel-refresh/orphan-cleanup")
+ABANDON_RECEIPTS_REL = Path("receipts/panel-refresh/abandon")
 POLICY_CANDIDATES_REL = Path("state/panel-refresh/selection-policy-candidates.json")
 POLICIES_REL = Path("state/panel-refresh/policies")
 FACT_LOCK_REL = Path("state/fact-write.lock")
@@ -47,6 +53,11 @@ WINDOWS_LOCK_CONTENTION_ERRORS = {
     if error is not None
 }
 WINDOWS_LOCK_CONTENTION_WINERRORS = {33, 36}
+ACTIVE_RUN_STATUSES = {"planned", "refreshing", "dirty", "awaiting-policy"}
+PRUNABLE_RUN_STATUSES = {"published", "superseded", "abandoned"}
+DEFAULT_STAGING_MAX_TOTAL_GB = 2
+DEFAULT_KEEP_SUPERSEDED_DAYS = 7
+DEFAULT_KEEP_PUBLISHED_RUNS = 1
 SOURCE_PREFIXES = (
     "actions/",
     "cadence.md",
@@ -101,7 +112,10 @@ class RefreshError(RuntimeError):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("policy", "detect", "plan", "apply", "inspect"))
+    parser.add_argument(
+        "operation",
+        choices=("policy", "detect", "plan", "apply", "inspect", "prune", "abandon"),
+    )
     parser.add_argument("project_root")
     parser.add_argument("--memory-root", default=DEFAULT_MEMORY_ROOT)
     parser.add_argument("--as-of", help="Source date in YYYY-MM-DD. Default: today.")
@@ -114,6 +128,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fixture", action="store_true", help="Run the frozen panel fixture path for tests.")
     parser.add_argument("--force-full", action="store_true")
     parser.add_argument("--fail-after-node", help=argparse.SUPPRESS)
+    parser.add_argument("--reason", help="Required operator reason for abandon.")
+    parser.add_argument("--dry-run", action="store_true", help="Preview prune without mutation (default).")
+    parser.add_argument("--apply-prune", action="store_true", help="Apply a prune after all safety checks.")
+    parser.add_argument("--keep-last", type=int, help="Keep the newest N selected terminal workspaces.")
+    parser.add_argument("--older-than-days", type=int, help="Select workspaces older than N days.")
+    parser.add_argument("--max-total-bytes", type=int, help="Prune until staging is at or below this size.")
+    parser.add_argument("--refresh-id", action="append", help="Limit prune to one or more refresh IDs.")
+    parser.add_argument("--include-superseded", action="store_true")
+    parser.add_argument("--include-abandoned", action="store_true")
+    parser.add_argument("--include-orphans", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("-o", "--output")
     return parser.parse_args(argv)
@@ -161,10 +185,6 @@ def optional_file_fingerprint(path: Path) -> str | None:
 
 def is_runtime_lock_path(path: Path) -> bool:
     return path.name.lower().endswith(".lock")
-
-
-def ignore_runtime_lock_files(_directory: str, names: list[str]) -> set[str]:
-    return {name for name in names if is_runtime_lock_path(Path(name))}
 
 
 def resolve_external_path(project_root: Path, value: str) -> Path:
@@ -897,11 +917,13 @@ def detect(
         ),
         "blocked_reasons": blocked_reasons,
         "recommended_workflows": ["adp-status-sync"] if blocked_reasons else [],
+        **staging_observability(project_root, memory_root),
         **resume,
     }
 
 
 def supersede_stale_nonterminal_plan(
+    memory_root: Path,
     detection: dict[str, Any],
     plan: dict[str, Any],
     plan_path: Path,
@@ -960,6 +982,14 @@ def supersede_stale_nonterminal_plan(
             "superseded_by_plan_path": str(plan_path),
             "supersede_reason": reason,
         }
+    )
+    previous.update(
+        archive_and_prune_workspace_memory(
+            memory_root,
+            previous_path,
+            previous,
+            reason,
+        )
     )
     atomic_json(previous_path, previous)
     return {
@@ -1060,7 +1090,7 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
             "plan_id": plan_id,
         }
         atomic_json(path, plan)
-    superseded = supersede_stale_nonterminal_plan(detection, plan, path)
+    superseded = supersede_stale_nonterminal_plan(memory_root, detection, plan, path)
     status = load_optional_json(memory_root / STATUS_REL)
     status.update(
         {
@@ -1169,6 +1199,136 @@ def workspace_for(memory_root: Path, refresh_id: str) -> Path:
     return workspace
 
 
+def add_staging_input(
+    selected: dict[Path, str],
+    memory_root: Path,
+    path: Path,
+    source_type: str,
+) -> None:
+    if not path.is_file() or path.is_symlink() or is_runtime_lock_path(path):
+        return
+    try:
+        relative = path.resolve().relative_to(memory_root.resolve())
+    except ValueError:
+        return
+    if any(part.startswith(".") for part in relative.parts):
+        return
+    selected[relative] = source_type
+
+
+def collect_audit_ids(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, str) and (key.endswith("audit_id") or key in {"input_audit_id", "artifact_audit_id"}):
+                found.add(item)
+            found.update(collect_audit_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(collect_audit_ids(item))
+    return found
+
+
+def latest_meeting_pack_inputs(memory_root: Path) -> list[Path]:
+    root = memory_root / "views/meeting-packs"
+    selected: list[Path] = []
+    for scenario in ("fde-morning", "business-biweekly"):
+        candidates: list[tuple[str, int, Path]] = []
+        for path in sorted((root / scenario).rglob("*.json")) if (root / scenario).is_dir() else []:
+            payload = load_optional_json(path)
+            metadata = payload.get("panel_metadata") if isinstance(payload.get("panel_metadata"), dict) else {}
+            if (payload.get("scenario") or metadata.get("scenario")) != scenario:
+                continue
+            generated_at = str(payload.get("generated_at") or metadata.get("generated_at") or "")
+            candidates.append((generated_at, path.stat().st_mtime_ns, path))
+        if not candidates:
+            continue
+        path = max(candidates)[2]
+        selected.append(path)
+        markdown = path.with_suffix(".md")
+        if markdown.is_file():
+            selected.append(markdown)
+    return selected
+
+
+def staging_input_inventory(memory_root: Path, plan: dict[str, Any]) -> dict[Path, str]:
+    selected: dict[Path, str] = {}
+    del plan
+    for relative in source_inventory(memory_root):
+        add_staging_input(selected, memory_root, memory_root / str(relative), "canonical-fact")
+
+    views_root = memory_root / "views"
+    for path in sorted(views_root.rglob("*")) if views_root.is_dir() else []:
+        if not path.is_file():
+            continue
+        relative = path.relative_to(views_root)
+        if relative.parts and relative.parts[0] in {"management-panel", "meeting-packs"}:
+            continue
+        add_staging_input(selected, memory_root, path, "current-projection")
+    for path in latest_meeting_pack_inputs(memory_root):
+        add_staging_input(selected, memory_root, path, "current-meeting-pack")
+
+    history_root = memory_root / "snapshots/program-status"
+    for path in sorted(history_root.glob("*.json")) if history_root.is_dir() else []:
+        add_staging_input(selected, memory_root, path, "program-status-history")
+
+    status_path = memory_root / STATUS_REL
+    add_staging_input(selected, memory_root, status_path, "refresh-binding")
+    status = load_optional_json(status_path)
+    raw_receipt = status.get("last_successful_receipt")
+    receipt: dict[str, Any] = {}
+    if isinstance(raw_receipt, str) and raw_receipt:
+        receipt_path = memory_root / raw_receipt
+        add_staging_input(selected, memory_root, receipt_path, "refresh-binding")
+        receipt = load_optional_json(receipt_path)
+        for field in ("state_audit", "panel_input_audit", "panel_artifact_audit"):
+            raw_audit = receipt.get(field)
+            if isinstance(raw_audit, str) and raw_audit:
+                add_staging_input(selected, memory_root, memory_root / raw_audit, "audit-evidence")
+
+    audit_ids: set[str] = set()
+    for relative in list(selected):
+        path = memory_root / relative
+        if path.suffix.lower() == ".json":
+            audit_ids.update(collect_audit_ids(load_optional_json(path)))
+    audits_root = memory_root / "audits"
+    if audit_ids and audits_root.is_dir():
+        for path in sorted(audits_root.rglob("*.json")):
+            payload = load_optional_json(path)
+            if audit_ids.intersection(collect_audit_ids(payload) | {str(value) for value in payload.values() if isinstance(value, str)}):
+                add_staging_input(selected, memory_root, path, "audit-evidence")
+    return dict(sorted(selected.items(), key=lambda item: item[0].as_posix()))
+
+
+def write_staging_input_manifest(
+    workspace: Path,
+    memory_root: Path,
+    plan: dict[str, Any],
+    selected: dict[Path, str],
+) -> dict[str, Any]:
+    copied = [
+        {
+            "path": relative.as_posix(),
+            "sha256": file_fingerprint(memory_root / relative),
+            "size": (memory_root / relative).stat().st_size,
+            "source_type": source_type,
+        }
+        for relative, source_type in selected.items()
+    ]
+    body = {
+        "schema_version": "1.0.0",
+        "refresh_id": plan.get("refresh_id"),
+        "plan_id": plan.get("plan_id"),
+        "declared_source_fingerprints": plan.get("source_fingerprints", {}),
+        "files": copied,
+        "file_count": len(copied),
+        "total_bytes": sum(item["size"] for item in copied),
+    }
+    manifest = {**body, "input_manifest_id": content_id(body)}
+    atomic_json(workspace / "input-manifest.json", manifest)
+    return manifest
+
+
 def prepare_staging(memory_root: Path, workspace: Path, plan: dict[str, Any]) -> Path:
     expected_workspace = workspace_for(memory_root, str(plan.get("refresh_id") or ""))
     if workspace.resolve(strict=False) != expected_workspace.resolve(strict=False):
@@ -1180,9 +1340,773 @@ def prepare_staging(memory_root: Path, workspace: Path, plan: dict[str, Any]) ->
             raise RefreshError("REFRESH_STAGING_CONFLICT", f"staging belongs to another plan: {workspace}")
         return staged
     workspace.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(memory_root, staged, ignore=ignore_runtime_lock_files)
+    selected = staging_input_inventory(memory_root, plan)
+    staged.mkdir(parents=True)
+    for relative in selected:
+        source = memory_root / relative
+        target = staged / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    write_staging_input_manifest(workspace, memory_root, plan, selected)
     metadata.write_text(plan["plan_id"] + "\n", encoding="utf-8", newline="\n")
     return staged
+
+
+def tree_stats(path: Path) -> tuple[int, int]:
+    if not path.exists():
+        return 0, 0
+    if path.is_file() and not path.is_symlink():
+        return 1, path.stat().st_size
+    file_count = 0
+    total_bytes = 0
+    for root, directories, files in os.walk(path, followlinks=False):
+        directories[:] = [name for name in directories if not (Path(root) / name).is_symlink()]
+        for name in files:
+            item = Path(root) / name
+            if item.is_symlink():
+                continue
+            try:
+                total_bytes += item.stat().st_size
+                file_count += 1
+            except OSError:
+                continue
+    return file_count, total_bytes
+
+
+def strings_in(value: Any) -> Iterator[str]:
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from strings_in(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings_in(item)
+    elif isinstance(value, str):
+        yield value
+
+
+def output_artifact_manifest(workspace: Path) -> list[dict[str, Any]]:
+    staged_root = workspace / "memory"
+    artifacts: dict[str, dict[str, Any]] = {}
+    for result_path in sorted((workspace / "results").rglob("*.json")) if (workspace / "results").is_dir() else []:
+        payload = load_optional_json(result_path)
+        for raw_path in strings_in(payload):
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                continue
+            try:
+                relative = candidate.resolve().relative_to(staged_root.resolve())
+            except (OSError, ValueError):
+                continue
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            artifacts[relative.as_posix()] = {
+                "path": relative.as_posix(),
+                "sha256": file_fingerprint(candidate),
+                "size": candidate.stat().st_size,
+            }
+    return [artifacts[key] for key in sorted(artifacts)]
+
+
+def evidence_source_files(workspace: Path) -> list[tuple[str, Path]]:
+    items: list[tuple[str, Path]] = []
+    for name in ("plan-id", "input-manifest.json", "selection-policy-candidates.json", "selection-policy.json"):
+        path = workspace / name
+        if path.is_file() and not path.is_symlink():
+            items.append((f"workspace/{name}", path))
+    for path in sorted((workspace / "results").rglob("*")) if (workspace / "results").is_dir() else []:
+        if path.is_file() and not path.is_symlink():
+            items.append((f"workspace/results/{path.relative_to(workspace / 'results').as_posix()}", path))
+    for path in sorted(workspace.glob("*.memlog.md")):
+        if path.is_file() and not path.is_symlink():
+            items.append((f"workspace/{path.name}", path))
+    return items
+
+
+def write_evidence_archive(
+    memory_root: Path,
+    plan_path: Path,
+    plan: dict[str, Any],
+    reason: str,
+) -> tuple[str, str]:
+    refresh_id = str(plan.get("refresh_id") or plan_path.stem)
+    workspace = workspace_for(memory_root, refresh_id)
+    archive_path = memory_root / EVIDENCE_REL / f"{refresh_id}.zip"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_bytes = json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    payloads: list[tuple[str, bytes, str]] = [("plan.json", plan_bytes, str(plan_path))]
+    for archive_name, source in evidence_source_files(workspace):
+        payloads.append((archive_name, source.read_bytes(), str(source)))
+    entries = []
+    for archive_name, payload, source_path in payloads:
+        entries.append(
+            {
+                "archive_path": archive_name,
+                "source_path": source_path,
+                "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        )
+    manifest_body = {
+        "schema_version": "1.0.0",
+        "refresh_id": refresh_id,
+        "plan_id": plan.get("plan_id"),
+        "terminal_status": plan.get("status"),
+        "reason": reason,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "files": entries,
+        "output_artifacts": output_artifact_manifest(workspace),
+    }
+    manifest = {**manifest_body, "manifest_id": content_id(manifest_body)}
+    descriptor, raw_temp = tempfile.mkstemp(
+        prefix=f".{refresh_id}.", suffix=".zip.tmp", dir=archive_path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(raw_temp)
+    try:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            info = zipfile.ZipInfo("evidence-manifest.json", date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr = 0o600 << 16
+            archive.writestr(info, json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            for item, (_, payload, _) in zip(entries, payloads, strict=True):
+                info = zipfile.ZipInfo(item["archive_path"], date_time=(1980, 1, 1, 0, 0, 0))
+                info.external_attr = 0o600 << 16
+                archive.writestr(info, payload)
+        os.replace(temporary, archive_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return archive_path.relative_to(memory_root).as_posix(), file_fingerprint(archive_path)
+
+
+def verify_evidence_archive(memory_root: Path, plan: dict[str, Any]) -> tuple[bool, str | None]:
+    raw_path = plan.get("evidence_archive")
+    claimed_id = plan.get("evidence_archive_id")
+    if not isinstance(raw_path, str) or not raw_path or not isinstance(claimed_id, str):
+        return False, "evidence archive binding is missing"
+    resolved = receipt_file_in_memory(memory_root, raw_path)
+    if resolved is None:
+        return False, "evidence archive file is missing or unsafe"
+    path, _ = resolved
+    if file_fingerprint(path) != claimed_id:
+        return False, "evidence archive hash does not match the run plan"
+    try:
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read("evidence-manifest.json").decode("utf-8"))
+            body = dict(manifest)
+            manifest_id = body.pop("manifest_id", None)
+            if manifest_id != content_id(body):
+                return False, "evidence manifest identity is invalid"
+            for item in manifest.get("files", []):
+                if not isinstance(item, dict):
+                    return False, "evidence manifest contains an invalid file row"
+                payload = archive.read(str(item.get("archive_path") or ""))
+                digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+                if digest != item.get("sha256") or len(payload) != item.get("size"):
+                    return False, f"evidence file verification failed: {item.get('archive_path')}"
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+        return False, f"evidence archive is unreadable: {exc}"
+    return True, None
+
+
+def ensure_evidence_archive(
+    memory_root: Path,
+    plan_path: Path,
+    plan: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    if plan.get("evidence_archive") or plan.get("evidence_archive_id"):
+        verified, error = verify_evidence_archive(memory_root, plan)
+        if not verified:
+            raise RefreshError("REFRESH_EVIDENCE_INVALID", str(error))
+        return {}
+    archive_path, archive_id = write_evidence_archive(memory_root, plan_path, plan, reason)
+    fields = {"evidence_archive": archive_path, "evidence_archive_id": archive_id}
+    verified, error = verify_evidence_archive(memory_root, {**plan, **fields})
+    if not verified:
+        raise RefreshError("REFRESH_EVIDENCE_INVALID", str(error))
+    return fields
+
+
+def archive_and_prune_workspace_memory(
+    memory_root: Path,
+    plan_path: Path,
+    plan: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    workspace = workspace_for(memory_root, str(plan.get("refresh_id") or plan_path.stem))
+    staged = workspace / "memory"
+    evidence = ensure_evidence_archive(memory_root, plan_path, plan, reason)
+    archive_path = evidence.get("evidence_archive") or plan.get("evidence_archive")
+    archive_id = evidence.get("evidence_archive_id") or plan.get("evidence_archive_id")
+    plan.update(
+        {
+            **evidence,
+            "evidence_archive": archive_path,
+            "evidence_archive_id": archive_id,
+        }
+    )
+    # Persist the terminal status and verified evidence binding before deleting replay state.
+    atomic_json(plan_path, plan)
+    file_count, bytes_before = tree_stats(staged)
+    if staged.exists():
+        try:
+            shutil.rmtree(staged)
+        except OSError as exc:
+            raise RefreshError(
+                "REFRESH_WORKSPACE_PRUNE_FAILED",
+                f"could not remove staged memory: {staged}: {exc}",
+            ) from exc
+    if staged.exists():
+        raise RefreshError("REFRESH_WORKSPACE_PRUNE_FAILED", f"could not remove staged memory: {staged}")
+    receipt_body = {
+        "ok": True,
+        "schema_version": "1.0.0",
+        "operation": "workspace-prune",
+        "refresh_id": plan.get("refresh_id"),
+        "plan_id": plan.get("plan_id"),
+        "workspace": str(workspace),
+        "deleted_path": str(staged),
+        "deleted_file_count": file_count,
+        "freed_bytes": bytes_before,
+        "evidence_archive": archive_path,
+        "evidence_archive_id": archive_id,
+        "reason": reason,
+        "pruned_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    receipt = {**receipt_body, "receipt_id": content_id(receipt_body)}
+    receipt_path = memory_root / PRUNE_RECEIPTS_REL / f"{plan.get('refresh_id')}-workspace.json"
+    atomic_json(receipt_path, receipt)
+    result = {
+        **evidence,
+        "evidence_archive": archive_path,
+        "evidence_archive_id": archive_id,
+        "workspace_pruned_at": receipt["pruned_at"],
+        "workspace_prune_receipt": receipt_path.relative_to(memory_root).as_posix(),
+        "workspace_pruned_file_count": file_count,
+        "workspace_pruned_bytes": bytes_before,
+    }
+    plan.update(result)
+    atomic_json(plan_path, plan)
+    return result
+
+
+def staging_policy(project_root: Path) -> dict[str, int]:
+    values: dict[str, Any] = {}
+    try:
+        module = load_effective_config_module()
+        code, resolved = module.resolve_effective_config(project_root.resolve())
+        if code == 0 and resolved.get("ok") and isinstance(resolved.get("values"), dict):
+            values = resolved["values"]
+    except (OSError, ImportError, AttributeError, RefreshError):
+        values = {}
+    max_total_gb = values.get("panel_refresh.staging.max_total_gb", DEFAULT_STAGING_MAX_TOTAL_GB)
+    keep_days = values.get(
+        "panel_refresh.staging.keep_superseded_days",
+        DEFAULT_KEEP_SUPERSEDED_DAYS,
+    )
+    keep_published = values.get(
+        "panel_refresh.staging.keep_published_runs",
+        DEFAULT_KEEP_PUBLISHED_RUNS,
+    )
+    return {
+        "max_total_bytes": int(max_total_gb) * 1024 * 1024 * 1024,
+        "keep_superseded_days": int(keep_days),
+        "keep_published_runs": int(keep_published),
+    }
+
+
+def durable_workspace_reference_exists(memory_root: Path, workspace_name: str) -> bool:
+    match = re.search(r"refresh-[0-9a-f]{24}", workspace_name)
+    refresh_id = match.group(0) if match else None
+    if refresh_id and (memory_root / RUNS_REL / f"{refresh_id}.json").is_file():
+        return True
+    status = load_optional_json(memory_root / STATUS_REL)
+    if status.get("current_run_id") in {refresh_id, workspace_name}:
+        return True
+    for root in (memory_root / RECEIPTS_REL, memory_root / "audits"):
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.json"):
+            try:
+                text = path.read_text(encoding="utf-8-sig")
+            except OSError:
+                return True
+            if workspace_name in text or (refresh_id and refresh_id in text):
+                return True
+    return False
+
+
+def workspace_terminal_timestamp(plan: dict[str, Any], workspace: Path) -> float:
+    for field in ("abandoned_at", "superseded_at", "published_at", "created_at"):
+        value = plan.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    try:
+        return workspace.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def staging_workspace_records(memory_root: Path) -> list[dict[str, Any]]:
+    root = memory_root.parent / ".adp-panel-refresh-staging"
+    if not root.is_dir() or root.is_symlink():
+        return []
+    status = load_optional_json(memory_root / STATUS_REL)
+    pointer = status.get("current_run_id")
+    records: list[dict[str, Any]] = []
+    for workspace in sorted(path for path in root.iterdir() if path.is_dir() and not path.is_symlink()):
+        file_count, total_bytes = tree_stats(workspace)
+        if workspace.name.endswith(".failed-winlock"):
+            orphan = not durable_workspace_reference_exists(memory_root, workspace.name)
+            records.append(
+                {
+                    "kind": "failed-winlock",
+                    "refresh_id": None,
+                    "workspace": str(workspace),
+                    "workspace_name": workspace.name,
+                    "status": "orphan" if orphan else "referenced",
+                    "file_count": file_count,
+                    "bytes": total_bytes,
+                    "current_pointer": False,
+                    "orphan": orphan,
+                    "terminal_timestamp": workspace_terminal_timestamp({}, workspace),
+                }
+            )
+            continue
+        if REFRESH_ID_PATTERN.fullmatch(workspace.name) is None:
+            records.append(
+                {
+                    "kind": "unknown",
+                    "refresh_id": None,
+                    "workspace": str(workspace),
+                    "workspace_name": workspace.name,
+                    "status": "unknown",
+                    "file_count": file_count,
+                    "bytes": total_bytes,
+                    "current_pointer": False,
+                    "orphan": False,
+                    "terminal_timestamp": workspace_terminal_timestamp({}, workspace),
+                }
+            )
+            continue
+        plan_path = memory_root / RUNS_REL / f"{workspace.name}.json"
+        plan = load_optional_json(plan_path)
+        verified, _ = verify_evidence_archive(memory_root, plan)
+        records.append(
+            {
+                "kind": "refresh",
+                "refresh_id": workspace.name,
+                "workspace": str(workspace),
+                "workspace_name": workspace.name,
+                "plan_path": str(plan_path),
+                "status": str(plan.get("status") or "missing-plan"),
+                "file_count": file_count,
+                "bytes": total_bytes,
+                "current_pointer": pointer == workspace.name,
+                "orphan": not plan_path.is_file(),
+                "evidence_archive": plan.get("evidence_archive"),
+                "evidence_archive_id": plan.get("evidence_archive_id"),
+                "evidence_archive_verified": verified,
+                "terminal_timestamp": workspace_terminal_timestamp(plan, workspace),
+            }
+        )
+    return records
+
+
+def staging_observability(project_root: Path, memory_root: Path) -> dict[str, Any]:
+    policy = staging_policy(project_root)
+    records = staging_workspace_records(memory_root)
+    prunable = [
+        row
+        for row in records
+        if not row["current_pointer"]
+        and (
+            row["status"] in PRUNABLE_RUN_STATUSES
+            or (row["kind"] == "failed-winlock" and row["orphan"])
+        )
+    ]
+    return {
+        "staging_run_count": sum(row["kind"] == "refresh" for row in records),
+        "staging_total_bytes": sum(int(row["bytes"]) for row in records),
+        "prunable_run_count": len(prunable),
+        "prunable_bytes": sum(int(row["bytes"]) for row in prunable),
+        "orphan_count": sum(bool(row["orphan"]) for row in records),
+        "staging_budget_bytes": policy["max_total_bytes"],
+        "staging_budget_exceeded": sum(int(row["bytes"]) for row in records)
+        > policy["max_total_bytes"],
+        "recommended_prune_command": shlex.join(
+            [
+                "uv",
+                "run",
+                str(SKILL_ROOT / "scripts/panel_refresh.py"),
+                "prune",
+                str(project_root),
+                "--memory-root",
+                str(memory_root),
+                "--dry-run",
+                "--include-superseded",
+                "--include-abandoned",
+                "--include-orphans",
+            ]
+        ),
+    }
+
+
+def managed_plan_path(memory_root: Path, raw_path: Any) -> Path:
+    if not isinstance(raw_path, str) or not raw_path:
+        raise RefreshError("REFRESH_PLAN_PATH_INVALID", "operation requires --plan")
+    path = Path(raw_path).expanduser().resolve()
+    if path.parent.resolve() != (memory_root / RUNS_REL).resolve():
+        raise RefreshError(
+            "REFRESH_PLAN_PATH_INVALID",
+            "refresh plan must be under the memory-root run registry",
+        )
+    return path
+
+
+def prune_refresh(
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+) -> dict[str, Any]:
+    if args.apply_prune and args.dry_run:
+        raise RefreshError("REFRESH_PRUNE_ARGS_INVALID", "use either --dry-run or --apply-prune")
+    for label, value in (
+        ("keep-last", args.keep_last),
+        ("older-than-days", args.older_than_days),
+        ("max-total-bytes", args.max_total_bytes),
+    ):
+        if value is not None and value < 0:
+            raise RefreshError("REFRESH_PRUNE_ARGS_INVALID", f"--{label} must be non-negative")
+    dry_run = not args.apply_prune
+    policy = staging_policy(project_root)
+    records = staging_workspace_records(memory_root)
+    pointer = load_optional_json(memory_root / STATUS_REL).get("current_run_id")
+    selected_statuses = {"published"}
+    if args.include_superseded:
+        selected_statuses.add("superseded")
+    if args.include_abandoned:
+        selected_statuses.add("abandoned")
+    requested_ids = set(args.refresh_id or [])
+    now = datetime.now(timezone.utc).timestamp()
+    candidates: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    for record in records:
+        if requested_ids and record.get("refresh_id") not in requested_ids and record.get("workspace_name") not in requested_ids:
+            continue
+        if record["current_pointer"] or (
+            isinstance(pointer, str) and pointer and record.get("refresh_id") == pointer
+        ):
+            blocked.append({**record, "blocked_reason": "status pointer references workspace"})
+            continue
+        if record["kind"] == "failed-winlock":
+            if args.include_orphans and record["orphan"]:
+                candidates.append(record)
+            elif requested_ids:
+                blocked.append({**record, "blocked_reason": "orphan cleanup requires --include-orphans"})
+            continue
+        if record["kind"] != "refresh":
+            continue
+        if record["status"] in ACTIVE_RUN_STATUSES:
+            blocked.append({**record, "blocked_reason": "active refresh runs cannot be pruned"})
+            continue
+        if record["status"] not in selected_statuses:
+            if requested_ids:
+                blocked.append({**record, "blocked_reason": f"status {record['status']} is not selected"})
+            continue
+        age_days = max(0.0, (now - float(record["terminal_timestamp"])) / 86400)
+        threshold = args.older_than_days
+        if threshold is None and record["status"] in {"superseded", "abandoned"} and not requested_ids:
+            threshold = policy["keep_superseded_days"]
+        if threshold is not None and age_days < threshold:
+            continue
+        candidates.append({**record, "age_days": round(age_days, 3)})
+
+    refresh_candidates = sorted(
+        (row for row in candidates if row["kind"] == "refresh"),
+        key=lambda row: float(row["terminal_timestamp"]),
+        reverse=True,
+    )
+    keep_last = args.keep_last
+    protected_ids: set[str] = set()
+    if keep_last is not None and keep_last:
+        protected_ids = {row["refresh_id"] for row in refresh_candidates[:keep_last]}
+    elif not requested_ids and policy["keep_published_runs"]:
+        published_candidates = [row for row in refresh_candidates if row["status"] == "published"]
+        protected_ids = {
+            row["refresh_id"]
+            for row in published_candidates[: policy["keep_published_runs"]]
+        }
+    if protected_ids:
+        candidates = [
+            row
+            for row in candidates
+            if row.get("refresh_id") not in protected_ids
+        ]
+
+    total_bytes = sum(int(row["bytes"]) for row in records)
+    target_bytes = args.max_total_bytes
+    if target_bytes is None:
+        target_bytes = policy["max_total_bytes"]
+    if not requested_ids and args.older_than_days is None and args.keep_last is None:
+        needed = max(0, total_bytes - target_bytes)
+        selected_for_budget: list[dict[str, Any]] = []
+        recovered = 0
+        for row in sorted(candidates, key=lambda item: float(item["terminal_timestamp"])):
+            if recovered >= needed:
+                break
+            selected_for_budget.append(row)
+            recovered += int(row["bytes"])
+        candidates = selected_for_budget
+
+    preview = [
+        {
+            "refresh_id": row.get("refresh_id"),
+            "workspace": row["workspace"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "file_count": row["file_count"],
+            "bytes": row["bytes"],
+            "evidence_archive_id": row.get("evidence_archive_id"),
+        }
+        for row in candidates
+    ]
+    result: dict[str, Any] = {
+        "ok": True,
+        "operation": "prune",
+        "status": "dry-run" if dry_run else "complete",
+        "dry_run": dry_run,
+        "selected": preview,
+        "selected_count": len(preview),
+        "selected_file_count": sum(int(row["file_count"]) for row in candidates),
+        "selected_bytes": sum(int(row["bytes"]) for row in candidates),
+        "blocked": blocked,
+        "staging_total_bytes_before": total_bytes,
+        "max_total_bytes": target_bytes,
+    }
+    if dry_run or not candidates:
+        return {**result, **staging_observability(project_root, memory_root)}
+
+    deleted: list[dict[str, Any]] = []
+    plan_updates: list[tuple[Path, dict[str, Any]]] = []
+    with refresh_lock(memory_root):
+        current_pointer = load_optional_json(memory_root / STATUS_REL).get("current_run_id")
+        prepared: list[tuple[dict[str, Any], Path, Path | None, dict[str, Any] | None]] = []
+        for row in candidates:
+            workspace = Path(row["workspace"])
+            if (
+                isinstance(current_pointer, str)
+                and current_pointer
+                and row.get("refresh_id") == current_pointer
+            ):
+                raise RefreshError(
+                    "REFRESH_PRUNE_BLOCKED",
+                    f"status pointer changed to selected workspace: {workspace}",
+                )
+            if row["kind"] == "failed-winlock":
+                if durable_workspace_reference_exists(memory_root, workspace.name):
+                    raise RefreshError(
+                        "REFRESH_PRUNE_BLOCKED",
+                        f"orphan candidate became referenced: {workspace}",
+                    )
+                prepared.append((row, workspace, None, None))
+                continue
+            plan_path = Path(row["plan_path"])
+            plan = load_json(plan_path)
+            if plan.get("status") not in PRUNABLE_RUN_STATUSES:
+                raise RefreshError(
+                    "REFRESH_PRUNE_BLOCKED",
+                    f"run is no longer terminal-prunable: {plan.get('refresh_id')}",
+                )
+            evidence = ensure_evidence_archive(
+                memory_root,
+                plan_path,
+                plan,
+                "explicit prune",
+            )
+            if evidence:
+                plan.update(evidence)
+                atomic_json(plan_path, plan)
+            verified, error = verify_evidence_archive(memory_root, plan)
+            if not verified:
+                raise RefreshError("REFRESH_EVIDENCE_INVALID", str(error))
+            prepared.append((row, workspace, plan_path, plan))
+
+        for row, workspace, plan_path, plan in prepared:
+            shutil.rmtree(workspace)
+            deleted.append(
+                {
+                    **row,
+                    "evidence_archive_id": plan.get("evidence_archive_id") if plan else None,
+                }
+            )
+            if plan_path is not None and plan is not None:
+                plan_updates.append((plan_path, plan))
+
+        completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+        orphan_deleted = [row for row in deleted if row["kind"] == "failed-winlock"]
+        orphan_receipt_path: Path | None = None
+        if orphan_deleted:
+            orphan_body = {
+                "ok": True,
+                "schema_version": "1.0.0",
+                "operation": "orphan-cleanup",
+                "deleted_paths": [row["workspace"] for row in orphan_deleted],
+                "deleted_file_count": sum(int(row["file_count"]) for row in orphan_deleted),
+                "freed_bytes": sum(int(row["bytes"]) for row in orphan_deleted),
+                "completed_at": completed_at,
+            }
+            orphan_receipt = {
+                **orphan_body,
+                "receipt_id": content_id(orphan_body),
+            }
+            orphan_receipt_path = (
+                memory_root
+                / ORPHAN_CLEANUP_RECEIPTS_REL
+                / f"orphan-cleanup-{orphan_receipt['receipt_id'].split(':', 1)[1][:20]}.json"
+            )
+            atomic_json(orphan_receipt_path, orphan_receipt)
+        receipt_body = {
+            "ok": True,
+            "schema_version": "1.0.0",
+            "operation": "prune",
+            "deleted_refresh_ids": [row.get("refresh_id") for row in deleted if row.get("refresh_id")],
+            "deleted_paths": [row["workspace"] for row in deleted],
+            "deleted_file_count": sum(int(row["file_count"]) for row in deleted),
+            "freed_bytes": sum(int(row["bytes"]) for row in deleted),
+            "evidence_archive_ids": [
+                row["evidence_archive_id"]
+                for row in deleted
+                if row.get("evidence_archive_id")
+            ],
+            "orphan_cleanup_receipt": (
+                orphan_receipt_path.relative_to(memory_root).as_posix()
+                if orphan_receipt_path is not None
+                else None
+            ),
+            "completed_at": completed_at,
+        }
+        receipt = {**receipt_body, "receipt_id": content_id(receipt_body)}
+        receipt_path = memory_root / PRUNE_RECEIPTS_REL / f"prune-{receipt['receipt_id'].split(':', 1)[1][:20]}.json"
+        atomic_json(receipt_path, receipt)
+        for plan_path, plan in plan_updates:
+            plan["workspace_fully_pruned_at"] = receipt["completed_at"]
+            plan["workspace_delete_receipt"] = receipt_path.relative_to(memory_root).as_posix()
+            atomic_json(plan_path, plan)
+    return {
+        **result,
+        "deleted": deleted,
+        "prune_receipt": receipt_path.relative_to(memory_root).as_posix(),
+        "orphan_cleanup_receipt": (
+            orphan_receipt_path.relative_to(memory_root).as_posix()
+            if orphan_receipt_path is not None
+            else None
+        ),
+        **staging_observability(project_root, memory_root),
+    }
+
+
+def abandon_refresh(
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+) -> dict[str, Any]:
+    del project_root
+    if not isinstance(args.reason, str) or not args.reason.strip():
+        raise RefreshError("REFRESH_ABANDON_REASON_REQUIRED", "abandon requires --reason")
+    plan_path = managed_plan_path(memory_root, args.plan)
+    with refresh_lock(memory_root):
+        plan = load_json(plan_path)
+        if plan.get("status") not in {"planned", "dirty", "awaiting-policy"}:
+            raise RefreshError(
+                "REFRESH_ABANDON_BLOCKED",
+                f"only planned, dirty, or awaiting-policy runs may be abandoned: {plan.get('status')}",
+            )
+        replacement = last_successful_receipt(memory_root)
+        if (
+            replacement.get("status") != "published"
+            or not replacement.get("refresh_id")
+            or replacement.get("refresh_id") == plan.get("refresh_id")
+        ):
+            raise RefreshError(
+                "REFRESH_ABANDON_BLOCKED",
+                "abandon requires a different successful published replacement",
+            )
+        created_at = parse_required_utc_timestamp(plan.get("created_at"), "refresh plan created_at")
+        published_at = parse_required_utc_timestamp(
+            replacement.get("published_at"),
+            "replacement published_at",
+        )
+        if published_at <= created_at:
+            raise RefreshError(
+                "REFRESH_ABANDON_BLOCKED",
+                "published replacement must be newer than the abandoned run",
+            )
+        abandoned_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        plan.update(
+            {
+                "status": "abandoned",
+                "retry_from_instance_key": None,
+                "abandoned_at": abandoned_at,
+                "abandon_reason": args.reason.strip(),
+                "abandoned_by_refresh_id": replacement["refresh_id"],
+                "abandoned_by_plan_id": replacement.get("plan_id"),
+            }
+        )
+        plan.update(
+            archive_and_prune_workspace_memory(
+                memory_root,
+                plan_path,
+                plan,
+                args.reason.strip(),
+            )
+        )
+        atomic_json(plan_path, plan)
+        receipt_body = {
+            "ok": True,
+            "schema_version": "1.0.0",
+            "operation": "abandon",
+            "refresh_id": plan.get("refresh_id"),
+            "plan_id": plan.get("plan_id"),
+            "reason": args.reason.strip(),
+            "replacement_refresh_id": replacement.get("refresh_id"),
+            "replacement_plan_id": replacement.get("plan_id"),
+            "evidence_archive": plan.get("evidence_archive"),
+            "evidence_archive_id": plan.get("evidence_archive_id"),
+            "abandoned_at": abandoned_at,
+        }
+        receipt = {**receipt_body, "receipt_id": content_id(receipt_body)}
+        receipt_path = memory_root / ABANDON_RECEIPTS_REL / f"{plan.get('refresh_id')}.json"
+        atomic_json(receipt_path, receipt)
+        status = load_optional_json(memory_root / STATUS_REL)
+        if status.get("current_run_id") == plan.get("refresh_id"):
+            status.update(
+                {
+                    "current_run_id": replacement.get("refresh_id"),
+                    "current_status": "published",
+                    "retry_from_instance_key": None,
+                    "last_error": None,
+                    "pending_invalidations": [],
+                }
+            )
+            status["state_id"] = content_id(
+                {key: value for key, value in status.items() if key != "state_id"}
+            )
+            atomic_json(memory_root / STATUS_REL, status)
+    return {
+        **receipt,
+        "status": "abandoned",
+        "plan_path": str(plan_path),
+        "abandon_receipt": receipt_path.relative_to(memory_root).as_posix(),
+    }
 
 
 def run_json_command(
@@ -2707,6 +3631,7 @@ def _inspect_refresh_unlocked(args: argparse.Namespace, project_root: Path, memo
             if eligible
             else (["adp-status-sync"] if pending or drift_count else ["adp-panel-refresh"])
         ),
+        **staging_observability(project_root, memory_root),
         **interrupted_plan(memory_root),
     }
     status = load_optional_json(memory_root / STATUS_REL)
@@ -2780,6 +3705,10 @@ def latest_audit_path(memory_root: Path) -> Path | None:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     project_root = resolve_project_root(args.project_root)
     memory_root = resolve_memory_root(project_root, args.memory_root)
+    if args.operation == "prune":
+        return prune_refresh(args, project_root, memory_root)
+    if args.operation == "abandon":
+        return abandon_refresh(args, project_root, memory_root)
     if args.operation == "policy":
         return prepare_policy(args, project_root, memory_root)
     if args.operation == "detect":

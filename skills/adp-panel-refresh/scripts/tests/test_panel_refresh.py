@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -323,6 +324,56 @@ class PanelRefreshTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, result)
         return result
 
+    def create_superseded_evidence_fixture(
+        self, root: Path
+    ) -> tuple[object, Path, dict, dict, Path]:
+        module = load_module()
+        root = root.resolve()
+        memory = self.scaffold(root).resolve()
+        first = module.plan_refresh(
+            module.parse_args(
+                ["plan", str(root), "--fixture", "--force-full", "--as-of", "2026-08-07"]
+            ),
+            root,
+            memory,
+        )
+        first_path = Path(first["plan_path"])
+        plan = module.load_json(first_path)
+        plan["status"] = "dirty"
+        plan["retry_from_instance_key"] = "management-panel"
+        plan["nodes"][0].update({"status": "blocked", "error": "superseded failure"})
+        module.atomic_json(first_path, plan)
+        status = module.load_optional_json(memory / module.STATUS_REL)
+        status.update(
+            {
+                "current_run_id": first["refresh_id"],
+                "current_status": "dirty",
+                "retry_from_instance_key": "management-panel",
+                "last_error": "superseded failure",
+            }
+        )
+        module.atomic_json(memory / module.STATUS_REL, status)
+        workspace = module.workspace_for(memory, first["refresh_id"])
+        staged = module.prepare_staging(memory, workspace, plan)
+        output = staged / "views/generated-large.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"x" * 65536)
+        module.atomic_json(
+            workspace / "results/management-panel.json",
+            {"ok": False, "output": str(output), "findings": ["superseded failure"]},
+        )
+        fact = memory / "actions/action-ledger.md"
+        fact.parent.mkdir(parents=True, exist_ok=True)
+        fact.write_text("# replacement source\n", encoding="utf-8")
+        replacement = module.plan_refresh(
+            module.parse_args(
+                ["plan", str(root), "--fixture", "--force-full", "--as-of", "2026-08-07"]
+            ),
+            root,
+            memory,
+        )
+        return module, memory, module.load_json(first_path), replacement, workspace
+
     def scaffold_policy_sources(self, memory: Path) -> dict:
         graph = {
             "flow_graph_id": "flow-001",
@@ -356,6 +407,9 @@ class PanelRefreshTests(unittest.TestCase):
             applied = self.apply_ready_fixture(root, plan)
 
             self.assertEqual(applied["status"], "published")
+            self.assertFalse(
+                load_module().workspace_for(memory.resolve(), plan["refresh_id"]).exists()
+            )
             self.assertTrue((memory / "views/management-panel/index.html").is_file())
             self.assertEqual(applied["inspect"]["artifact_integrity"], "pass")
             self.assertEqual(applied["inspect"]["business_freshness"], "fresh")
@@ -2748,6 +2802,349 @@ class PanelRefreshTests(unittest.TestCase):
                 "state-audit", args, plan, root, staged, workspace, {}
             )
             self.assertEqual(command[command.index("--scenario") + 1], "global")
+
+    def test_minimal_staging_excludes_historical_runtime_bulk_and_writes_manifest(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            fact = memory / "actions/action-ledger.md"
+            fact.parent.mkdir(parents=True)
+            fact.write_text("# facts\n", encoding="utf-8")
+            current = memory / "views/program-status.json"
+            current.parent.mkdir(parents=True)
+            module.atomic_json(current, {"snapshot_id": "current"})
+            history = memory / "snapshots/program-status/ps-history.json"
+            module.atomic_json(history, {"snapshot_id": "history"})
+            packs = memory / "views/meeting-packs/fde-morning"
+            module.atomic_json(
+                packs / "old.json",
+                {"scenario": "fde-morning", "meeting_pack_id": "old", "generated_at": "2026-08-01T00:00:00Z"},
+            )
+            module.atomic_json(
+                packs / "current.json",
+                {"scenario": "fde-morning", "meeting_pack_id": "current", "generated_at": "2026-08-07T00:00:00Z"},
+            )
+            excluded = (
+                memory / "audits/old/unreferenced.json",
+                memory / "receipts/old.json",
+                memory / "state/transactions/old/manifest.json",
+                memory / "snapshots/management-panel/large.json",
+                memory / "views/management-panel/index.html",
+            )
+            for path in excluded:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"z" * 4096)
+            refresh_id = "refresh-" + "a" * 24
+            plan = {
+                "refresh_id": refresh_id,
+                "plan_id": "sha256:" + "b" * 64,
+                "source_fingerprints": module.source_inventory(memory),
+            }
+            workspace = module.workspace_for(memory, refresh_id)
+
+            staged = module.prepare_staging(memory, workspace, plan)
+            manifest = module.load_json(workspace / "input-manifest.json")
+
+            self.assertTrue((staged / "actions/action-ledger.md").is_file())
+            self.assertTrue((staged / "views/program-status.json").is_file())
+            self.assertTrue((staged / "snapshots/program-status/ps-history.json").is_file())
+            self.assertTrue((staged / "views/meeting-packs/fde-morning/current.json").is_file())
+            self.assertFalse((staged / "views/meeting-packs/fde-morning/old.json").exists())
+            for path in excluded:
+                self.assertFalse((staged / path.relative_to(memory)).exists())
+            self.assertEqual(
+                manifest["input_manifest_id"],
+                module.content_id(
+                    {key: value for key, value in manifest.items() if key != "input_manifest_id"}
+                ),
+            )
+            self.assertEqual(
+                manifest["total_bytes"],
+                sum(item["size"] for item in manifest["files"]),
+            )
+            self.assertEqual(
+                {item["source_type"] for item in manifest["files"]},
+                {"canonical-fact", "current-projection", "current-meeting-pack", "program-status-history"},
+            )
+
+    def test_superseded_run_archives_evidence_and_removes_full_memory_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, memory, superseded, replacement, workspace = self.create_superseded_evidence_fixture(
+                Path(temp_dir)
+            )
+
+            verified, error = module.verify_evidence_archive(memory, superseded)
+
+            self.assertEqual(superseded["status"], "superseded")
+            self.assertEqual(replacement["superseded_refresh_id"], superseded["refresh_id"])
+            self.assertTrue(verified, error)
+            self.assertTrue((memory / superseded["evidence_archive"]).is_file())
+            self.assertGreater(superseded["workspace_pruned_bytes"], 65536)
+            self.assertFalse((workspace / "memory").exists())
+            self.assertTrue((workspace / "results/management-panel.json").is_file())
+            self.assertTrue((memory / superseded["workspace_prune_receipt"]).is_file())
+
+    def test_workspace_memory_delete_failure_keeps_durable_evidence_binding(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            refresh_id = "refresh-" + "7" * 24
+            plan_path = memory / module.RUNS_REL / f"{refresh_id}.json"
+            plan = {
+                "refresh_id": refresh_id,
+                "plan_id": "sha256:" + "6" * 64,
+                "created_at": "2026-08-01T00:00:00Z",
+                "status": "superseded",
+                "source_fingerprints": {},
+                "nodes": [],
+            }
+            module.atomic_json(plan_path, plan)
+            workspace = module.workspace_for(memory, refresh_id)
+            staged = module.prepare_staging(memory, workspace, plan)
+            (staged / "large.bin").write_bytes(b"x" * 4096)
+
+            with (
+                patch.object(module.shutil, "rmtree", side_effect=OSError("simulated delete failure")),
+                self.assertRaises(module.RefreshError) as raised,
+            ):
+                module.archive_and_prune_workspace_memory(
+                    memory, plan_path, plan, "superseded regression"
+                )
+
+            self.assertEqual(raised.exception.code, "REFRESH_WORKSPACE_PRUNE_FAILED")
+            durable = module.load_json(plan_path)
+            verified, error = module.verify_evidence_archive(memory, durable)
+            self.assertEqual(durable["status"], "superseded")
+            self.assertTrue(verified, error)
+            self.assertTrue((workspace / "memory/large.bin").is_file())
+            self.assertNotIn("workspace_pruned_at", durable)
+
+    def test_prune_dry_run_is_read_only_and_tampered_evidence_blocks_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            module, memory, superseded, _, workspace = self.create_superseded_evidence_fixture(root)
+            dry_args = module.parse_args(
+                [
+                    "prune",
+                    str(root),
+                    "--dry-run",
+                    "--include-superseded",
+                    "--refresh-id",
+                    superseded["refresh_id"],
+                ]
+            )
+            before = sorted(path.relative_to(workspace).as_posix() for path in workspace.rglob("*"))
+
+            preview = module.prune_refresh(dry_args, root, memory)
+            after = sorted(path.relative_to(workspace).as_posix() for path in workspace.rglob("*"))
+
+            self.assertTrue(preview["dry_run"])
+            self.assertEqual(preview["selected_count"], 1)
+            self.assertEqual(before, after)
+            archive = memory / superseded["evidence_archive"]
+            archive.write_bytes(archive.read_bytes() + b"tampered")
+            apply_args = module.parse_args(
+                [
+                    "prune",
+                    str(root),
+                    "--apply-prune",
+                    "--include-superseded",
+                    "--refresh-id",
+                    superseded["refresh_id"],
+                ]
+            )
+            with self.assertRaises(module.RefreshError) as raised:
+                module.prune_refresh(apply_args, root, memory)
+            self.assertEqual(raised.exception.code, "REFRESH_EVIDENCE_INVALID")
+            self.assertTrue(workspace.is_dir())
+
+    def test_active_runs_require_abandon_before_prune_and_receipt_counts_are_exact(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            dirty_id = "refresh-" + "c" * 24
+            plan_path = memory / module.RUNS_REL / f"{dirty_id}.json"
+            plan = {
+                "refresh_id": dirty_id,
+                "plan_id": "sha256:" + "d" * 64,
+                "created_at": "2026-08-01T00:00:00Z",
+                "status": "dirty",
+                "retry_from_instance_key": "meeting-pack:fde-morning",
+                "source_fingerprints": {},
+                "nodes": [],
+            }
+            module.atomic_json(plan_path, plan)
+            workspace = module.workspace_for(memory, dirty_id)
+            staged = module.prepare_staging(memory, workspace, plan)
+            (staged / "large.bin").write_bytes(b"a" * 32768)
+            awaiting_id = "refresh-" + "9" * 24
+            awaiting_path = memory / module.RUNS_REL / f"{awaiting_id}.json"
+            awaiting_plan = {
+                "refresh_id": awaiting_id,
+                "plan_id": "sha256:" + "8" * 64,
+                "created_at": "2026-08-02T00:00:00Z",
+                "status": "awaiting-policy",
+                "source_fingerprints": {},
+                "nodes": [],
+            }
+            module.atomic_json(awaiting_path, awaiting_plan)
+            awaiting_workspace = module.workspace_for(memory, awaiting_id)
+            module.prepare_staging(memory, awaiting_workspace, awaiting_plan)
+            replacement_receipt = memory / module.RECEIPTS_REL / "replacement.json"
+            module.atomic_json(
+                replacement_receipt,
+                {
+                    "status": "published",
+                    "refresh_id": "refresh-" + "e" * 24,
+                    "plan_id": "sha256:" + "f" * 64,
+                    "published_at": "2026-08-07T00:00:00Z",
+                },
+            )
+            module.atomic_json(
+                memory / module.STATUS_REL,
+                {
+                    "current_run_id": "refresh-" + "e" * 24,
+                    "current_status": "published",
+                    "last_successful_receipt": replacement_receipt.relative_to(memory).as_posix(),
+                },
+            )
+            blocked = module.prune_refresh(
+                module.parse_args(
+                    [
+                        "prune",
+                        str(root),
+                        "--dry-run",
+                        "--refresh-id",
+                        dirty_id,
+                        "--refresh-id",
+                        awaiting_id,
+                    ]
+                ),
+                root,
+                memory,
+            )
+            self.assertEqual(blocked["selected_count"], 0)
+            self.assertEqual(
+                {row["refresh_id"] for row in blocked["blocked"]},
+                {dirty_id, awaiting_id},
+            )
+            self.assertTrue(workspace.is_dir())
+            self.assertTrue(awaiting_workspace.is_dir())
+
+            abandoned = module.abandon_refresh(
+                module.parse_args(
+                    ["abandon", str(root), "--plan", str(plan_path), "--reason", "replaced by published run"]
+                ),
+                root,
+                memory,
+            )
+            self.assertEqual(abandoned["status"], "abandoned")
+            self.assertFalse((workspace / "memory").exists())
+            before_count, before_bytes = module.tree_stats(workspace)
+            pruned = module.prune_refresh(
+                module.parse_args(
+                    [
+                        "prune",
+                        str(root),
+                        "--apply-prune",
+                        "--include-abandoned",
+                        "--refresh-id",
+                        dirty_id,
+                    ]
+                ),
+                root,
+                memory,
+            )
+            receipt = module.load_json(memory / pruned["prune_receipt"])
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(receipt["deleted_file_count"], before_count)
+            self.assertEqual(receipt["freed_bytes"], before_bytes)
+            self.assertEqual(receipt["deleted_refresh_ids"], [dirty_id])
+            self.assertEqual(receipt["evidence_archive_ids"], [module.load_json(plan_path)["evidence_archive_id"]])
+
+    def test_orphan_failed_winlock_cleanup_requires_no_durable_reference(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            staging = memory.parent / ".adp-panel-refresh-staging"
+            orphan = staging / (("refresh-" + "1" * 24) + ".failed-winlock")
+            orphan.mkdir(parents=True)
+            (orphan / "payload.bin").write_bytes(b"x" * 1024)
+            referenced_id = "refresh-" + "2" * 24
+            referenced = staging / (referenced_id + ".failed-winlock")
+            referenced.mkdir(parents=True)
+            (referenced / "payload.bin").write_bytes(b"y" * 1024)
+            module.atomic_json(
+                memory / module.RUNS_REL / f"{referenced_id}.json",
+                {"refresh_id": referenced_id, "status": "superseded"},
+            )
+
+            observed = module.staging_observability(root, memory)
+            pruned = module.prune_refresh(
+                module.parse_args(
+                    ["prune", str(root), "--apply-prune", "--include-orphans", "--max-total-bytes", "0"]
+                ),
+                root,
+                memory,
+            )
+
+            self.assertEqual(observed["orphan_count"], 1)
+            self.assertIn(str(root), observed["recommended_prune_command"])
+            self.assertIn(str(memory), observed["recommended_prune_command"])
+            self.assertFalse(orphan.exists())
+            self.assertTrue(referenced.exists())
+            self.assertEqual(pruned["deleted"][0]["kind"], "failed-winlock")
+            orphan_receipt = module.load_json(memory / pruned["orphan_cleanup_receipt"])
+            self.assertEqual(orphan_receipt["operation"], "orphan-cleanup")
+            self.assertEqual(orphan_receipt["deleted_paths"], [str(orphan)])
+            self.assertEqual(orphan_receipt["deleted_file_count"], 1)
+            self.assertEqual(orphan_receipt["freed_bytes"], 1024)
+
+    def test_twenty_superseded_runs_retain_only_bounded_compact_staging(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            full_clone_bytes = 0
+            for index in range(20):
+                refresh_id = "refresh-" + hashlib.sha256(str(index).encode()).hexdigest()[:24]
+                plan_path = memory / module.RUNS_REL / f"{refresh_id}.json"
+                plan = {
+                    "refresh_id": refresh_id,
+                    "plan_id": module.content_id({"index": index}),
+                    "created_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                    "status": "superseded",
+                    "source_fingerprints": {},
+                    "nodes": [],
+                }
+                module.atomic_json(plan_path, plan)
+                workspace = module.workspace_for(memory, refresh_id)
+                staged = module.prepare_staging(memory, workspace, plan)
+                payload = staged / "views/full-clone.bin"
+                payload.parent.mkdir(parents=True, exist_ok=True)
+                payload.write_bytes(b"x" * 65536)
+                full_clone_bytes += payload.stat().st_size
+                plan.update(
+                    module.archive_and_prune_workspace_memory(
+                        memory,
+                        plan_path,
+                        plan,
+                        "superseded stress regression",
+                    )
+                )
+                module.atomic_json(plan_path, plan)
+                self.assertFalse((workspace / "memory").exists())
+
+            observed = module.staging_observability(root, memory)
+
+            self.assertEqual(observed["staging_run_count"], 20)
+            self.assertLess(observed["staging_total_bytes"], full_clone_bytes // 2)
+            self.assertFalse(observed["staging_budget_exceeded"])
 
     @unittest.skipUnless(sys.platform == "win32", "Windows exclusive-handle regression")
     def test_fixture_apply_ignores_exclusively_held_runtime_lock(self) -> None:

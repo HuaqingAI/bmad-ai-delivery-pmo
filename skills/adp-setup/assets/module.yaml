@@ -1,7 +1,7 @@
 code: adp
 name: "AI Delivery PMO"
 description: "帮助多条 FDE 工作线用统一状态模型、交付节奏和 AI 协作方式推进复杂交付项目。"
-module_version: 1.4.0
+module_version: 1.5.0
 default_selected: false
 module_greeting: >
   AI Delivery PMO 已安装。新项目先运行 adp-project-kickoff 初始化共享项目记忆，
@@ -33,6 +33,24 @@ meeting_pack_item_limit:
   type: integer
   minimum: 3
   maximum: 30
+panel_refresh.staging.max_total_gb:
+  prompt: "Panel Refresh staging 最多占用多少 GiB？"
+  default: 2
+  type: integer
+  minimum: 1
+  maximum: 100
+panel_refresh.staging.keep_superseded_days:
+  prompt: "superseded/abandoned staging 最少保留多少天？"
+  default: 7
+  type: integer
+  minimum: 0
+  maximum: 365
+panel_refresh.staging.keep_published_runs:
+  prompt: "prune 时保留多少个最新 published staging？"
+  default: 1
+  type: integer
+  minimum: 0
+  maximum: 20
 management_panel_history_periods:
   prompt: "面板默认嵌入多少个历史状态周期？"
   default: 12
@@ -66,11 +84,11 @@ shared_resources:
   - owner_skill: adp-status-sync
     path: assets/panel-sync-contracts.schema.json
     purpose: installed action-ledger state and WDR action-projection runtime schema
-    sha256: 513d7232e59d50173fc8ef294ddb596d5f17306191ba171be8eaafd67d961a27
+    sha256: 2a128b57a936b62f692cf188863e906312e68391b9afc4bc5aada0879fea6301
   - owner_skill: adp-status-sync
     path: assets/CONTRACT-REGISTRY.json
     purpose: installed status-sync runtime contract registry used for sidecar integrity pins
-    sha256: ac72ae177a858390d1e7489735f1a817fac0657093b971ca65625c27a552fa10
+    sha256: 35de4328a7ef936a7ac525a83de71bdcaa2334954bbe6aba1b41187f62cfa1b5
   - owner_skill: adp-risk-dependency-change-review
     path: assets/risk-flow-relation-v1.schema.json
     purpose: stable risk identity, lifecycle, and explicit flow relations
