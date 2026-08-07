@@ -24,7 +24,7 @@ DEFAULT_MEMORY_ROOT = "_bmad-output/adp/memory"
 LOCALE_CATALOG_PATH = Path(__file__).resolve().parents[2] / "adp-plan-baseline/assets/locale-catalog.json"
 BASELINE_MARKER = "<!-- adp:program-baseline:v1 -->"
 ROADMAP_SCHEMA_VERSION = 2
-GENERATOR_VERSION = "2.0.1"
+GENERATOR_VERSION = "2.0.2"
 PLACEHOLDERS = {"", "-", "tbd", "todo", "none", "n/a", "na", "unknown"}
 ACTIVE_ACTION_STATUSES = {"open", "in-progress", "blocked"}
 VALID_TYPES = {
@@ -1539,28 +1539,34 @@ def normalize_sha256(value: Any) -> str:
 
 
 def discover_wdrs(memory_root: Path, selected: set[str]) -> list[Path]:
-    root = memory_root / "workstreams"
-    if not root.exists():
-        return []
-    records = sorted(root.glob("*/delivery-record.md"))
-    if not selected:
-        return records
-    return [path for path in records if discover_record_workstream_id(path) in selected]
+    scope_module = load_scope_contract_module()
+    records: list[Path] = []
+    for entry in scope_module.discover_wdr_registry(memory_root):
+        scope_id = entry.get("scope_id")
+        raw_path = entry.get("path")
+        if (
+            not isinstance(scope_id, str)
+            or scope_module.is_reserved_virtual_scope_id(scope_id)
+            or not isinstance(raw_path, str)
+            or not raw_path
+        ):
+            continue
+        normalized_scope_id = normalize_id(scope_id)
+        if selected and normalized_scope_id not in selected:
+            continue
+        records.append(Path(raw_path))
+    return sorted(records)
 
 
 def discover_workstream_ids(memory_root: Path) -> set[str]:
-    root = memory_root / "workstreams"
-    if not root.exists():
-        return set()
-    workstream_ids = {discover_record_workstream_id(path) for path in root.glob("*/delivery-record.md")}
-    return {workstream_id for workstream_id in workstream_ids if workstream_id}
-
-
-def discover_record_workstream_id(record: Path) -> str:
-    try:
-        return workstream_id_from_record(record, read_text(record))
-    except OSError:
-        return normalize_id(record.parent.name)
+    scope_module = load_scope_contract_module()
+    return {
+        normalize_id(scope_id)
+        for entry in scope_module.discover_wdr_registry(memory_root)
+        if isinstance((scope_id := entry.get("scope_id")), str)
+        and not scope_module.is_reserved_virtual_scope_id(scope_id)
+        and normalize_id(scope_id)
+    }
 
 
 def roadmap_items_from_wdr(memory_root: Path, record: Path) -> tuple[list[RoadmapItem], list[ExcludedItem]]:

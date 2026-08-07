@@ -401,12 +401,32 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(inspected["changed_sources"], ["actions/action-ledger.md"])
             self.assertEqual(inspected["recommended_workflows"], ["adp-panel-refresh"])
 
-    def test_full_refresh_runs_program_status_against_staging_memory_root(self) -> None:
+    def test_full_refresh_runs_program_status_and_roadmap_with_retired_alias_wdr(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             memory = self.scaffold(root)
             self.scaffold_program_status_sources(root, memory)
+            alias_id = "ws-one-legacy"
+            alias_root = memory / "workstreams" / alias_id
+            alias_root.mkdir(parents=True)
+            canonical_wdr = memory / "workstreams/ws-one/delivery-record.md"
+            (alias_root / "delivery-record.md").write_text(
+                canonical_wdr.read_text(encoding="utf-8").replace("ws-one", alias_id),
+                encoding="utf-8",
+            )
+            (alias_root / "workstream-alias.json").write_text(
+                json.dumps(
+                    {
+                        "status": "retired-alias",
+                        "alias_workstream_id": alias_id,
+                        "canonical_workstream_id": "ws-one",
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             planned = self.plan(root)
             plan_path = Path(planned["plan_path"])
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -488,7 +508,7 @@ class PanelRefreshTests(unittest.TestCase):
                         node,
                         False,
                     )
-                if node == "program-status":
+                if node in {"program-status", "roadmap"}:
                     return original_execute_node(
                         node,
                         node_args,
@@ -537,6 +557,20 @@ class PanelRefreshTests(unittest.TestCase):
                 ".adp-panel-refresh-staging",
                 json.dumps(staged_model, ensure_ascii=False),
             )
+            roadmap_result = json.loads(
+                (workspace / "results/roadmap.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(roadmap_result["ok"])
+            staged_roadmap = json.loads(
+                (workspace / "memory/views/roadmap.json").read_text(encoding="utf-8")
+            )
+            alias_path = f"workstreams/{alias_id}/delivery-record.md"
+            self.assertNotIn(
+                alias_path,
+                {item["path"] for item in staged_roadmap["source_inventory"]["sources_read"]},
+            )
+            self.assertNotIn(alias_path, staged_roadmap["source_fingerprints"])
+            self.assertNotIn(alias_id, json.dumps(staged_roadmap, sort_keys=True))
 
     def test_program_status_resume_handles_cumulative_scope_rounding(self) -> None:
         module = load_module()

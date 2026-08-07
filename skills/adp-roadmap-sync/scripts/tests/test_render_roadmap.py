@@ -18,6 +18,8 @@ NORMALIZE_ROADMAP_STATUS = SCRIPT_GLOBALS["normalize_roadmap_status"]
 ROADMAP_ITEM = SCRIPT_GLOBALS["RoadmapItem"]
 DEDUPE_ITEMS = SCRIPT_GLOBALS["dedupe_items"]
 CANONICAL_RENDER_SOURCE_INVENTORY = SCRIPT_GLOBALS["canonical_render_source_inventory"]
+DISCOVER_WDRS = SCRIPT_GLOBALS["discover_wdrs"]
+DISCOVER_WORKSTREAM_IDS = SCRIPT_GLOBALS["discover_workstream_ids"]
 PARSE_FIRST_TABLE = SCRIPT_GLOBALS["parse_first_table"]
 
 
@@ -1532,6 +1534,87 @@ class RenderRoadmapTests(unittest.TestCase):
             self.assertTrue(Path(result["audit_path"]).exists())
             self.assertEqual(roadmap["audit_status"], result["audit_status"])
             self.assertEqual(roadmap["audit_path"], result["audit_path"])
+
+    def test_retired_alias_preserved_wdr_is_excluded_from_audit_and_roadmap_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            alias_id = "l1-checkout-legacy"
+            alias_root = memory_root / "workstreams" / alias_id
+            alias_root.mkdir(parents=True)
+            alias_record = alias_root / "delivery-record.md"
+            alias_record.write_text(
+                RECORD.replace("l1-checkout", alias_id),
+                encoding="utf-8",
+            )
+            (alias_root / "workstream-alias.json").write_text(
+                json.dumps(
+                    {
+                        "status": "retired-alias",
+                        "alias_workstream_id": alias_id,
+                        "canonical_workstream_id": "l1-checkout",
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                [memory_root / "workstreams/l1-checkout/delivery-record.md"],
+                DISCOVER_WDRS(memory_root, set()),
+            )
+            self.assertEqual({"l1-checkout"}, DISCOVER_WORKSTREAM_IDS(memory_root))
+
+            completed = self.run_script(project_root, "--date", "2026-07-10")
+            result = json.loads(completed.stdout)
+            audit = json.loads(Path(result["audit_path"]).read_text(encoding="utf-8"))
+            roadmap = json.loads((memory_root / "views" / "roadmap.json").read_text(encoding="utf-8"))
+            alias_path = f"workstreams/{alias_id}/delivery-record.md"
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(["l1-checkout"], audit["registered_workstreams"])
+            self.assertEqual(["l1-checkout"], audit["source_inventory"]["workstreams"])
+            self.assertNotIn(
+                alias_path,
+                {item["path"] for item in audit["source_inventory"]["sources_read"]},
+            )
+            self.assertNotIn(
+                alias_path,
+                {item["path"] for item in roadmap["source_inventory"]["sources_read"]},
+            )
+            self.assertNotIn(alias_path, roadmap["source_fingerprints"])
+            self.assertNotIn(alias_id, json.dumps(roadmap, sort_keys=True))
+
+    def test_malformed_alias_sidecar_does_not_hide_a_physical_wdr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = self.scaffold(project_root)
+            alias_id = "l1-checkout-legacy"
+            alias_root = memory_root / "workstreams" / alias_id
+            alias_root.mkdir(parents=True)
+            alias_record = alias_root / "delivery-record.md"
+            alias_record.write_text(
+                RECORD.replace("l1-checkout", alias_id),
+                encoding="utf-8",
+            )
+            (alias_root / "workstream-alias.json").write_text(
+                json.dumps(
+                    {
+                        "status": "retired-alias",
+                        "alias_workstream_id": "wrong-directory-id",
+                        "canonical_workstream_id": "l1-checkout",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIn(alias_record, DISCOVER_WDRS(memory_root, set()))
+            self.assertEqual(
+                {"l1-checkout", alias_id},
+                DISCOVER_WORKSTREAM_IDS(memory_root),
+            )
 
     def test_program_status_accepts_memory_relative_audit_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
