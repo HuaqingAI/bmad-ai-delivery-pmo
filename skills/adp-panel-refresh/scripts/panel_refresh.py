@@ -1750,6 +1750,8 @@ def staging_observability(project_root: Path, memory_root: Path) -> dict[str, An
                 "--memory-root",
                 str(memory_root),
                 "--dry-run",
+                "--max-total-bytes",
+                str(policy["max_total_bytes"]),
                 "--include-superseded",
                 "--include-abandoned",
                 "--include-orphans",
@@ -1770,6 +1772,180 @@ def managed_plan_path(memory_root: Path, raw_path: Any) -> Path:
     return path
 
 
+def select_prune_candidates(
+    args: argparse.Namespace,
+    records: list[dict[str, Any]],
+    pointer: Any,
+    policy: dict[str, int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    selected_statuses = {"published"}
+    if args.include_superseded:
+        selected_statuses.add("superseded")
+    if args.include_abandoned:
+        selected_statuses.add("abandoned")
+    requested_ids = set(args.refresh_id or [])
+    explicit_budget = args.max_total_bytes is not None
+    target_bytes = (
+        int(args.max_total_bytes)
+        if explicit_budget
+        else int(policy["max_total_bytes"])
+    )
+    total_bytes = sum(int(row["bytes"]) for row in records)
+    now = datetime.now(timezone.utc).timestamp()
+    ordinary: list[dict[str, Any]] = []
+    soft_retained: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    retention_blocked_bytes = 0
+
+    for record in records:
+        if (
+            requested_ids
+            and record.get("refresh_id") not in requested_ids
+            and record.get("workspace_name") not in requested_ids
+        ):
+            continue
+        if record["current_pointer"] or (
+            isinstance(pointer, str)
+            and pointer
+            and record.get("refresh_id") == pointer
+        ):
+            blocked.append({**record, "blocked_reason": "status pointer references workspace"})
+            continue
+        if record["kind"] == "failed-winlock":
+            if args.include_orphans and record["orphan"]:
+                ordinary.append(record)
+            elif requested_ids:
+                blocked.append(
+                    {
+                        **record,
+                        "blocked_reason": "orphan cleanup requires --include-orphans",
+                    }
+                )
+            continue
+        if record["kind"] != "refresh":
+            continue
+        if record["status"] in ACTIVE_RUN_STATUSES:
+            blocked.append(
+                {**record, "blocked_reason": "active refresh runs cannot be pruned"}
+            )
+            continue
+        if record["status"] not in selected_statuses:
+            if requested_ids:
+                blocked.append(
+                    {
+                        **record,
+                        "blocked_reason": f"status {record['status']} is not selected",
+                    }
+                )
+            continue
+        age_days = max(
+            0.0,
+            (now - float(record["terminal_timestamp"])) / 86400,
+        )
+        candidate = {**record, "age_days": round(age_days, 3)}
+        if args.older_than_days is not None and age_days < args.older_than_days:
+            retention_blocked_bytes += int(record["bytes"])
+            continue
+        under_default_retention = bool(
+            args.older_than_days is None
+            and not requested_ids
+            and record["status"] in {"superseded", "abandoned"}
+            and age_days < policy["keep_superseded_days"]
+        )
+        candidate["default_retention_protected"] = under_default_retention
+        if under_default_retention and not explicit_budget:
+            soft_retained.append(candidate)
+        else:
+            ordinary.append(candidate)
+
+    all_candidates = ordinary + soft_retained
+    refresh_candidates = sorted(
+        (row for row in all_candidates if row["kind"] == "refresh"),
+        key=lambda row: float(row["terminal_timestamp"]),
+        reverse=True,
+    )
+    protected_ids: set[str] = set()
+    if args.keep_last is not None:
+        protected_ids = {
+            str(row["refresh_id"]) for row in refresh_candidates[: args.keep_last]
+        }
+    elif not requested_ids and policy["keep_published_runs"]:
+        published_candidates = [
+            row for row in refresh_candidates if row["status"] == "published"
+        ]
+        protected_ids = {
+            str(row["refresh_id"])
+            for row in published_candidates[: policy["keep_published_runs"]]
+        }
+    if protected_ids:
+        retention_blocked_bytes += sum(
+            int(row["bytes"])
+            for row in all_candidates
+            if row.get("refresh_id") in protected_ids
+        )
+        ordinary = [
+            row for row in ordinary if row.get("refresh_id") not in protected_ids
+        ]
+        soft_retained = [
+            row
+            for row in soft_retained
+            if row.get("refresh_id") not in protected_ids
+        ]
+
+    available = ordinary + soft_retained
+    needed = max(0, total_bytes - target_bytes)
+    if requested_ids:
+        selected = sorted(
+            available,
+            key=lambda row: float(row["terminal_timestamp"]),
+        )
+    else:
+        selected = []
+        recovered = 0
+        ordered = [
+            *sorted(ordinary, key=lambda row: float(row["terminal_timestamp"])),
+            *sorted(
+                soft_retained,
+                key=lambda row: float(row["terminal_timestamp"]),
+            ),
+        ]
+        for row in ordered:
+            if recovered >= needed:
+                break
+            selected.append(row)
+            recovered += int(row["bytes"])
+
+    selected_bytes = sum(int(row["bytes"]) for row in selected)
+    projected_bytes = max(0, total_bytes - selected_bytes)
+    selected_workspaces = {row["workspace"] for row in selected}
+    preserved_soft_bytes = sum(
+        int(row["bytes"])
+        for row in available
+        if row.get("default_retention_protected")
+        and row["workspace"] not in selected_workspaces
+    )
+    overridden_soft_bytes = sum(
+        int(row["bytes"])
+        for row in selected
+        if row.get("default_retention_protected")
+    )
+    diagnostics = {
+        "staging_total_bytes_before": total_bytes,
+        "max_total_bytes": target_bytes,
+        "budget_required_bytes": needed,
+        "available_prune_bytes": sum(int(row["bytes"]) for row in available),
+        "projected_staging_bytes": projected_bytes,
+        "budget_target_met": projected_bytes <= target_bytes,
+        "budget_shortfall_bytes": max(0, projected_bytes - target_bytes),
+        "retention_blocked_bytes": retention_blocked_bytes,
+        "default_retention_preserved_bytes": preserved_soft_bytes,
+        "default_retention_overridden_bytes": overridden_soft_bytes,
+        "exact_refresh_selection": bool(requested_ids),
+    }
+    return selected, blocked, diagnostics
+
+
+
 def prune_refresh(
     args: argparse.Namespace,
     project_root: Path,
@@ -1788,82 +1964,9 @@ def prune_refresh(
     policy = staging_policy(project_root)
     records = staging_workspace_records(memory_root)
     pointer = load_optional_json(memory_root / STATUS_REL).get("current_run_id")
-    selected_statuses = {"published"}
-    if args.include_superseded:
-        selected_statuses.add("superseded")
-    if args.include_abandoned:
-        selected_statuses.add("abandoned")
-    requested_ids = set(args.refresh_id or [])
-    now = datetime.now(timezone.utc).timestamp()
-    candidates: list[dict[str, Any]] = []
-    blocked: list[dict[str, Any]] = []
-    for record in records:
-        if requested_ids and record.get("refresh_id") not in requested_ids and record.get("workspace_name") not in requested_ids:
-            continue
-        if record["current_pointer"] or (
-            isinstance(pointer, str) and pointer and record.get("refresh_id") == pointer
-        ):
-            blocked.append({**record, "blocked_reason": "status pointer references workspace"})
-            continue
-        if record["kind"] == "failed-winlock":
-            if args.include_orphans and record["orphan"]:
-                candidates.append(record)
-            elif requested_ids:
-                blocked.append({**record, "blocked_reason": "orphan cleanup requires --include-orphans"})
-            continue
-        if record["kind"] != "refresh":
-            continue
-        if record["status"] in ACTIVE_RUN_STATUSES:
-            blocked.append({**record, "blocked_reason": "active refresh runs cannot be pruned"})
-            continue
-        if record["status"] not in selected_statuses:
-            if requested_ids:
-                blocked.append({**record, "blocked_reason": f"status {record['status']} is not selected"})
-            continue
-        age_days = max(0.0, (now - float(record["terminal_timestamp"])) / 86400)
-        threshold = args.older_than_days
-        if threshold is None and record["status"] in {"superseded", "abandoned"} and not requested_ids:
-            threshold = policy["keep_superseded_days"]
-        if threshold is not None and age_days < threshold:
-            continue
-        candidates.append({**record, "age_days": round(age_days, 3)})
-
-    refresh_candidates = sorted(
-        (row for row in candidates if row["kind"] == "refresh"),
-        key=lambda row: float(row["terminal_timestamp"]),
-        reverse=True,
+    candidates, blocked, budget = select_prune_candidates(
+        args, records, pointer, policy
     )
-    keep_last = args.keep_last
-    protected_ids: set[str] = set()
-    if keep_last is not None and keep_last:
-        protected_ids = {row["refresh_id"] for row in refresh_candidates[:keep_last]}
-    elif not requested_ids and policy["keep_published_runs"]:
-        published_candidates = [row for row in refresh_candidates if row["status"] == "published"]
-        protected_ids = {
-            row["refresh_id"]
-            for row in published_candidates[: policy["keep_published_runs"]]
-        }
-    if protected_ids:
-        candidates = [
-            row
-            for row in candidates
-            if row.get("refresh_id") not in protected_ids
-        ]
-
-    total_bytes = sum(int(row["bytes"]) for row in records)
-    target_bytes = args.max_total_bytes
-    if target_bytes is None:
-        target_bytes = policy["max_total_bytes"]
-    if not requested_ids and args.older_than_days is None and args.keep_last is None:
-        needed = max(0, total_bytes - target_bytes)
-        selected_for_budget: list[dict[str, Any]] = []
-        recovered = 0
-        for row in sorted(candidates, key=lambda item: float(item["terminal_timestamp"])):
-            if recovered >= needed:
-                break
-            selected_for_budget.append(row)
-            recovered += int(row["bytes"])
-        candidates = selected_for_budget
 
     preview = [
         {
@@ -1874,6 +1977,9 @@ def prune_refresh(
             "file_count": row["file_count"],
             "bytes": row["bytes"],
             "evidence_archive_id": row.get("evidence_archive_id"),
+            "default_retention_overridden": bool(
+                row.get("default_retention_protected")
+            ),
         }
         for row in candidates
     ]
@@ -1887,8 +1993,7 @@ def prune_refresh(
         "selected_file_count": sum(int(row["file_count"]) for row in candidates),
         "selected_bytes": sum(int(row["bytes"]) for row in candidates),
         "blocked": blocked,
-        "staging_total_bytes_before": total_bytes,
-        "max_total_bytes": target_bytes,
+        **budget,
     }
     if dry_run or not candidates:
         return {**result, **staging_observability(project_root, memory_root)}
@@ -1992,6 +2097,12 @@ def prune_refresh(
                 if orphan_receipt_path is not None
                 else None
             ),
+            "staging_total_bytes_before": result["staging_total_bytes_before"],
+            "max_total_bytes": result["max_total_bytes"],
+            "projected_staging_bytes": result["projected_staging_bytes"],
+            "budget_target_met": result["budget_target_met"],
+            "budget_shortfall_bytes": result["budget_shortfall_bytes"],
+            "retention_blocked_bytes": result["retention_blocked_bytes"],
             "completed_at": completed_at,
         }
         receipt = {**receipt_body, "receipt_id": content_id(receipt_body)}

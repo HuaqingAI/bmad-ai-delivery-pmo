@@ -374,6 +374,46 @@ class PanelRefreshTests(unittest.TestCase):
         )
         return module, memory, module.load_json(first_path), replacement, workspace
 
+    def create_staging_run_fixture(
+        self,
+        module: object,
+        memory: Path,
+        *,
+        index: int,
+        status: str,
+        size: int,
+        age_hours: int,
+    ) -> tuple[str, Path]:
+        refresh_id = "refresh-" + f"{index:024x}"
+        timestamp = (
+            module.datetime.now(module.timezone.utc)
+            - module.timedelta(hours=age_hours)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        plan = {
+            "refresh_id": refresh_id,
+            "plan_id": module.content_id({"refresh_id": refresh_id}),
+            "created_at": timestamp,
+            "status": status,
+            "source_fingerprints": {},
+            "nodes": [],
+        }
+        terminal_field = {
+            "published": "published_at",
+            "superseded": "superseded_at",
+            "abandoned": "abandoned_at",
+        }.get(status)
+        if terminal_field:
+            plan[terminal_field] = timestamp
+        module.atomic_json(
+            memory / module.RUNS_REL / f"{refresh_id}.json",
+            plan,
+        )
+        workspace = module.workspace_for(memory, refresh_id)
+        workspace.mkdir(parents=True)
+        with (workspace / "payload.bin").open("wb") as handle:
+            handle.truncate(size)
+        return refresh_id, workspace
+
     def scaffold_policy_sources(self, memory: Path) -> dict:
         graph = {
             "flow_graph_id": "flow-001",
@@ -3065,6 +3105,197 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(receipt["freed_bytes"], before_bytes)
             self.assertEqual(receipt["deleted_refresh_ids"], [dirty_id])
             self.assertEqual(receipt["evidence_archive_ids"], [module.load_json(plan_path)["evidence_archive_id"]])
+            self.assertEqual(
+                receipt["staging_total_bytes_before"],
+                pruned["staging_total_bytes_before"],
+            )
+            self.assertEqual(
+                receipt["projected_staging_bytes"],
+                pruned["projected_staging_bytes"],
+            )
+            self.assertEqual(receipt["budget_target_met"], pruned["budget_target_met"])
+            self.assertEqual(
+                receipt["budget_shortfall_bytes"],
+                pruned["budget_shortfall_bytes"],
+            )
+
+    def test_budget_prune_overrides_soft_retention_and_recommended_command_selects_minimum(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            superseded_ids = []
+            for index, age_hours in enumerate((5, 4, 3, 2, 1), start=1):
+                refresh_id, _ = self.create_staging_run_fixture(
+                    module,
+                    memory,
+                    index=index,
+                    status="superseded",
+                    size=500_000_000,
+                    age_hours=age_hours,
+                )
+                superseded_ids.append(refresh_id)
+            dirty_id, _ = self.create_staging_run_fixture(
+                module,
+                memory,
+                index=20,
+                status="dirty",
+                size=100_000_000,
+                age_hours=6,
+            )
+            current_id, _ = self.create_staging_run_fixture(
+                module,
+                memory,
+                index=21,
+                status="published",
+                size=100_000_000,
+                age_hours=0,
+            )
+            module.atomic_json(
+                memory / module.STATUS_REL,
+                {"current_run_id": current_id, "current_status": "published"},
+            )
+
+            observed = module.staging_observability(root, memory)
+            default_preview = module.prune_refresh(
+                module.parse_args(
+                    ["prune", str(root), "--dry-run", "--include-superseded"]
+                ),
+                root,
+                memory,
+            )
+            command = module.shlex.split(observed["recommended_prune_command"])
+            prune_index = command.index("prune")
+            recommended_preview = module.prune_refresh(
+                module.parse_args(command[prune_index:]),
+                root,
+                memory,
+            )
+
+            self.assertTrue(observed["staging_budget_exceeded"])
+            self.assertEqual(
+                command[command.index("--max-total-bytes") + 1],
+                str(observed["staging_budget_bytes"]),
+            )
+            for preview in (default_preview, recommended_preview):
+                self.assertEqual(preview["selected_count"], 2)
+                self.assertEqual(
+                    [row["refresh_id"] for row in preview["selected"]],
+                    superseded_ids[:2],
+                )
+                self.assertTrue(preview["budget_target_met"])
+                self.assertEqual(preview["budget_shortfall_bytes"], 0)
+                self.assertEqual(
+                    preview["projected_staging_bytes"],
+                    preview["staging_total_bytes_before"] - preview["selected_bytes"],
+                )
+                selected_ids = {row["refresh_id"] for row in preview["selected"]}
+                self.assertNotIn(dirty_id, selected_ids)
+                self.assertNotIn(current_id, selected_ids)
+            for preview in (default_preview, recommended_preview):
+                self.assertGreater(preview["default_retention_overridden_bytes"], 0)
+                self.assertTrue(
+                    all(
+                        row["default_retention_overridden"]
+                        for row in preview["selected"]
+                    )
+                )
+
+    def test_budget_limit_runs_after_age_and_keep_last_filters(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            refresh_ids = []
+            for index, age_hours in enumerate((5, 4, 3, 2, 1), start=31):
+                refresh_id, _ = self.create_staging_run_fixture(
+                    module,
+                    memory,
+                    index=index,
+                    status="superseded",
+                    size=10_000,
+                    age_hours=age_hours,
+                )
+                refresh_ids.append(refresh_id)
+            records = module.staging_workspace_records(memory)
+            sizes = {row["refresh_id"]: row["bytes"] for row in records}
+            total = sum(sizes.values())
+            target = total - sizes[refresh_ids[0]] - sizes[refresh_ids[1]] + 1
+
+            age_preview = module.prune_refresh(
+                module.parse_args(
+                    [
+                        "prune",
+                        str(root),
+                        "--dry-run",
+                        "--include-superseded",
+                        "--older-than-days",
+                        "0",
+                        "--max-total-bytes",
+                        str(target),
+                    ]
+                ),
+                root,
+                memory,
+            )
+            protected_preview = module.prune_refresh(
+                module.parse_args(
+                    [
+                        "prune",
+                        str(root),
+                        "--dry-run",
+                        "--include-superseded",
+                        "--keep-last",
+                        "1",
+                        "--max-total-bytes",
+                        "0",
+                    ]
+                ),
+                root,
+                memory,
+            )
+            age_blocked_preview = module.prune_refresh(
+                module.parse_args(
+                    [
+                        "prune",
+                        str(root),
+                        "--dry-run",
+                        "--include-superseded",
+                        "--older-than-days",
+                        "7",
+                        "--max-total-bytes",
+                        "0",
+                    ]
+                ),
+                root,
+                memory,
+            )
+
+            self.assertEqual(age_preview["selected_count"], 2)
+            self.assertEqual(
+                [row["refresh_id"] for row in age_preview["selected"]],
+                refresh_ids[:2],
+            )
+            self.assertTrue(age_preview["budget_target_met"])
+            self.assertLess(age_preview["selected_count"], len(refresh_ids))
+            self.assertEqual(protected_preview["selected_count"], 4)
+            self.assertNotIn(
+                refresh_ids[-1],
+                {row["refresh_id"] for row in protected_preview["selected"]},
+            )
+            self.assertFalse(protected_preview["budget_target_met"])
+            self.assertEqual(
+                protected_preview["budget_shortfall_bytes"],
+                sizes[refresh_ids[-1]],
+            )
+            self.assertEqual(
+                protected_preview["retention_blocked_bytes"],
+                sizes[refresh_ids[-1]],
+            )
+            self.assertEqual(age_blocked_preview["selected_count"], 0)
+            self.assertFalse(age_blocked_preview["budget_target_met"])
+            self.assertEqual(age_blocked_preview["budget_shortfall_bytes"], total)
+            self.assertEqual(age_blocked_preview["retention_blocked_bytes"], total)
 
     def test_orphan_failed_winlock_cleanup_requires_no_durable_reference(self) -> None:
         module = load_module()

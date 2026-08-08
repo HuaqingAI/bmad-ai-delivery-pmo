@@ -26,7 +26,9 @@ A failed archive hash or member digest is a hard `REFRESH_EVIDENCE_INVALID`; nev
 
 Before deleting a run workspace, prune requires a durable plan and a verified evidence archive; if no archive exists for a terminal run, apply-prune creates and verifies one first. A durable prune receipt records refresh IDs, paths, file counts, freed bytes, and evidence archive IDs. Orphan deletion also emits a dedicated `orphan-cleanup` receipt with the removed `.failed-winlock` paths and exact reclaimed size. `--dry-run` writes nothing.
 
-Retention selectors are `--keep-last`, `--older-than-days`, `--max-total-bytes`, repeatable `--refresh-id`, `--include-superseded`, `--include-abandoned`, and `--include-orphans`.
+Retention selectors are `--keep-last`, `--older-than-days`, `--max-total-bytes`, repeatable `--refresh-id`, `--include-superseded`, `--include-abandoned`, and `--include-orphans`. Exact `--refresh-id` selection is never truncated by the budget. Otherwise, explicit age filtering runs first, `--keep-last` protects the newest matching runs, and the budget selector chooses the oldest remaining minimal byte set needed to reach the target. Explicit `--max-total-bytes` overrides the configured default age. Without an explicit age or byte target, `keep_superseded_days` is soft: preserve young runs when older candidates are sufficient, but admit the oldest young terminal runs when the staging budget cannot otherwise converge.
+
+Every preview reports `projected_staging_bytes`, `budget_target_met`, `budget_shortfall_bytes`, `retention_blocked_bytes`, and the default-retention bytes preserved or overridden. Active/current-pointer runs never enter the available budget pool, even when the target therefore cannot be met.
 
 ## Budget and observability
 
