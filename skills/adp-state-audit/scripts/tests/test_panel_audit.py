@@ -20,6 +20,15 @@ import management_panel
 import panel_model
 
 
+def as_lf(content: bytes) -> bytes:
+    text = content.decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def as_crlf(content: bytes) -> bytes:
+    return as_lf(content).replace(b"\n", b"\r\n")
+
+
 class PanelAuditTests(unittest.TestCase):
     def inputs(self, *, profile: str = "internal-full") -> dict:
         inputs = panel_model.load_source_fixture()
@@ -83,22 +92,30 @@ class PanelAuditTests(unittest.TestCase):
             bundle.parent.mkdir(parents=True)
             license_path.parent.mkdir(parents=True, exist_ok=True)
             resource_path.write_text(json.dumps(source_resource), encoding="utf-8")
-            bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
+            bundle_bytes = source_bundle.read_bytes()
             license_bytes = source_license.read_bytes()
-            license_path.write_bytes(license_bytes.replace(b"\n", b"\r\n"))
-
-            _, errors, evidence = panel_audit._resource_validation(
-                inputs["request"], resource_path, panel_root
-            )
-
-            self.assertEqual([], errors)
-            self.assertEqual(source_resource["engine_sha256"], evidence["elk_bundle_sha256"])
-            self.assertEqual(source_resource["license_sha256"], evidence["elk_license_sha256"])
+            for initial_line_endings, initial_bundle, initial_license in (
+                ("lf", as_lf(bundle_bytes), as_lf(license_bytes)),
+                ("crlf", as_crlf(bundle_bytes), as_crlf(license_bytes)),
+            ):
+                with self.subTest(initial_line_endings=initial_line_endings):
+                    bundle.write_bytes(as_crlf(initial_bundle))
+                    license_path.write_bytes(as_crlf(initial_license))
+                    _, errors, evidence = panel_audit._resource_validation(
+                        inputs["request"], resource_path, panel_root
+                    )
+                    self.assertEqual([], errors)
+                    self.assertEqual(
+                        source_resource["engine_sha256"], evidence["elk_bundle_sha256"]
+                    )
+                    self.assertEqual(
+                        source_resource["license_sha256"], evidence["elk_license_sha256"]
+                    )
             bundle.write_bytes(bundle.read_bytes() + b"tampered")
             _, errors, _ = panel_audit._resource_validation(inputs["request"], resource_path, panel_root)
             self.assertIn("ELK bundle checksum does not match resource metadata", errors)
 
-            bundle.write_bytes(source_bundle.read_bytes().replace(b"\n", b"\r\n"))
+            bundle.write_bytes(as_crlf(bundle_bytes))
             for index in [0, len(license_bytes) // 2, len(license_bytes) - 1]:
                 with self.subTest(license_byte=index):
                     tampered = bytearray(license_bytes)

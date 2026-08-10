@@ -23,6 +23,15 @@ CLEANUP_LEGACY = SCRIPT_ROOT / "cleanup-legacy.py"
 ENSURE_GITIGNORE = SCRIPT_ROOT / "ensure-gitignore.py"
 
 
+def as_lf(content: bytes) -> bytes:
+    text = content.decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def as_crlf(content: bytes) -> bytes:
+    return as_lf(content).replace(b"\n", b"\r\n")
+
+
 def script_command(script: Path, *args: str) -> list[str]:
     uv = shutil.which("uv")
     if uv:
@@ -519,22 +528,28 @@ class AdpSetupScriptTests(unittest.TestCase):
                 shutil.copy2(source, target)
             bundle = skills_dir / "adp-management-panel" / "assets/vendor/elk.bundled-0.9.3.js"
             license_path = skills_dir / "adp-management-panel" / "assets/vendor/ELK-LICENSE-EPL-2.0.md"
-            bundle.write_bytes(bundle.read_bytes().replace(b"\n", b"\r\n"))
-            license_path.write_bytes(license_path.read_bytes().replace(b"\n", b"\r\n"))
-
-            windows_checkout = json.loads(
-                run_script(
-                    INSPECT_STATE,
-                    str(root),
-                    "--module-yaml",
-                    str(SKILL_ROOT / "assets" / "module.yaml"),
-                    "--module-help",
-                    str(SKILL_ROOT / "assets" / "module-help.csv"),
-                    "--installed-skills-dir",
-                    str(skills_dir),
-                ).stdout
-            )
-            self.assertTrue(windows_checkout["installation_ready"])
+            bundle_bytes = bundle.read_bytes()
+            license_bytes = license_path.read_bytes()
+            for initial_line_endings, initial_bundle, initial_license in (
+                ("lf", as_lf(bundle_bytes), as_lf(license_bytes)),
+                ("crlf", as_crlf(bundle_bytes), as_crlf(license_bytes)),
+            ):
+                with self.subTest(initial_line_endings=initial_line_endings):
+                    bundle.write_bytes(as_crlf(initial_bundle))
+                    license_path.write_bytes(as_crlf(initial_license))
+                    windows_checkout = json.loads(
+                        run_script(
+                            INSPECT_STATE,
+                            str(root),
+                            "--module-yaml",
+                            str(SKILL_ROOT / "assets" / "module.yaml"),
+                            "--module-help",
+                            str(SKILL_ROOT / "assets" / "module-help.csv"),
+                            "--installed-skills-dir",
+                            str(skills_dir),
+                        ).stdout
+                    )
+                    self.assertTrue(windows_checkout["installation_ready"])
 
             bundle.write_text("tampered\n", encoding="utf-8")
 
