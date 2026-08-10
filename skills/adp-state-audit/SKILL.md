@@ -65,6 +65,8 @@ uv run "{skill-root}/scripts/audit_state.py" "{project-root}" --phase artifact -
 
 Repeat `--artifact` for every file in the same generation transaction. When `{workflow.run_folder_pattern}` is non-empty, append `--run-folder-pattern "{workflow.run_folder_pattern}"`. Treat the immutable validation result as authoritative and never modify snapshots or views.
 
+Artifact `as_of` is the frozen data cutoff and must match both the sealed input audit and the validation `--as-of`. It is not a generation clock: `generated_at` may legitimately be later than a historical `as_of`, including a cross-day resume. Report `artifact.generated_at_future` only when `generated_at` is later than the actual artifact-validation start time; a mismatched artifact cutoff is the separate blocking `artifact.as_of_mismatch` lineage finding.
+
 ## Scenario Contracts
 
 Load `references/scenario-contracts.md` only when the audit encounters `intake/status-sync`, validates `views/flow-graph.json`, or gates `adp-management-panel`. It owns those branch contracts and the panel command forms.

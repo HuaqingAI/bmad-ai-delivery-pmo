@@ -810,7 +810,7 @@ class AdpStateAuditTests(unittest.TestCase):
                     {
                         "title": LOCALE_CATALOG["en"]["status.title"],
                         "generated_at": "2026-06-01T00:00:00Z",
-                        "as_of": "2026-06-01",
+                        "as_of": "2026-07-10",
                         "reporting_period": {"start": "2026-05-25", "end": "2026-06-01"},
                         "report_confidence": "high",
                         "scenario": "global",
@@ -1130,6 +1130,53 @@ class AdpStateAuditTests(unittest.TestCase):
 
             metadata["generated_at"] = "2026-07-11T00:00:00Z"
             artifact.write_text(json.dumps(metadata), encoding="utf-8")
+            cross_day_result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            cross_day_validation = json.loads(Path(cross_day_result["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "artifact.generated_at_future",
+                {item.get("code") for item in cross_day_validation["blocking_gaps"]},
+            )
+
+            metadata["as_of"] = "2026-07-09"
+            artifact.write_text(json.dumps(metadata), encoding="utf-8")
+            mismatch_result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-07-10",
+                ).stdout
+            )
+            mismatch_validation = json.loads(Path(mismatch_result["outputs"]["json"]).read_text(encoding="utf-8"))
+            self.assertIn(
+                "artifact.as_of_mismatch",
+                {item.get("code") for item in mismatch_validation["blocking_gaps"]},
+            )
+
+            metadata["as_of"] = "2026-07-10"
+            metadata["generated_at"] = "2099-01-01T00:00:00Z"
+            artifact.write_text(json.dumps(metadata), encoding="utf-8")
             future_result = json.loads(
                 self.run_script(
                     project_root,
@@ -1147,6 +1194,66 @@ class AdpStateAuditTests(unittest.TestCase):
             )
             future_validation = json.loads(Path(future_result["outputs"]["json"]).read_text(encoding="utf-8"))
             self.assertIn("artifact.generated_at_future", {item.get("code") for item in future_validation["blocking_gaps"]})
+
+    def test_cross_day_resume_allows_generation_after_historical_as_of(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            memory_root = project_root / "memory"
+            memory_root.mkdir()
+            source = memory_root / "source.md"
+            source.write_text("frozen source\n", encoding="utf-8")
+            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            sealed_audit = self.seal_input_audit(
+                {
+                    "as_of": "2026-08-08",
+                    "source_fingerprints": {"source.md": source_hash},
+                }
+            )
+            input_audit = project_root / "input.json"
+            input_audit.write_text(json.dumps(sealed_audit), encoding="utf-8")
+            artifact = project_root / "artifact.json"
+            artifact.write_text(
+                json.dumps(
+                    {
+                        "title": LOCALE_CATALOG["en"]["status.title"],
+                        "generated_at": "2026-08-10T03:08:44Z",
+                        "as_of": "2026-08-08",
+                        "reporting_period": "2026-08-02/2026-08-08",
+                        "report_confidence": "high",
+                        "scenario": "global",
+                        "input_audit_id": sealed_audit["input_audit_id"],
+                        "baseline_revision": 1,
+                        "source_fingerprints": {"source.md": source_hash},
+                        "locale": "en",
+                        "locale_fallback": False,
+                        "render_contract": self.render_contract("en"),
+                        "generator_version": "1.0.0",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = json.loads(
+                self.run_script(
+                    project_root,
+                    "--phase",
+                    "artifact",
+                    "--memory-root",
+                    str(memory_root),
+                    "--input-audit-json",
+                    str(input_audit),
+                    "--artifact",
+                    str(artifact),
+                    "--as-of",
+                    "2026-08-08",
+                ).stdout
+            )
+            validation = json.loads(Path(result["outputs"]["json"]).read_text(encoding="utf-8"))
+            codes = {item.get("code") for item in validation["blocking_gaps"]}
+
+            self.assertNotIn("artifact.generated_at_future", codes)
+            self.assertNotIn("artifact.as_of_mismatch", codes)
+            self.assertNotIn("artifact.input_audit_as_of_mismatch", codes)
 
     def test_tampered_immutable_audit_is_rejected_on_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

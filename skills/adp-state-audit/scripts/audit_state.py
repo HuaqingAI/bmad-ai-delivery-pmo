@@ -608,6 +608,7 @@ def run_artifact_validation(
     memory_root: Path,
     as_of: date,
 ) -> dict[str, Any]:
+    validation_started_at = datetime.now(timezone.utc)
     if not args.input_audit_json:
         return artifact_failure_envelope(
             args.scenario,
@@ -657,6 +658,7 @@ def run_artifact_validation(
         args.max_age_days,
         scenario_mismatch=scenario_mismatch,
         locale_catalog_path=Path(args.config_script).resolve().parent.parent / "assets" / "locale-catalog.json",
+        validation_time=validation_started_at,
     )
     output_dir = resolve_output_dir(args.output_dir, memory_root, args.run_folder_pattern, as_of, effective_scenario)
     execution = execution_record(
@@ -735,12 +737,37 @@ def build_artifact_validation(
     *,
     scenario_mismatch: bool = False,
     locale_catalog_path: Path,
+    validation_time: datetime,
 ) -> dict[str, Any]:
     raw_findings: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
     expected_audit_id = str(input_audit.get("input_audit_id"))
     expected_revision = input_audit.get("baseline_revision")
     expected_locale = str(input_audit.get("locale") or "en")
+    validation_time = validation_time.astimezone(timezone.utc)
+    input_audit_as_of = parse_date(input_audit.get("as_of"))
+    if input_audit_as_of is None:
+        raw_findings.append(
+            artifact_finding(
+                "artifact.input_audit_as_of_invalid",
+                "blocking",
+                "blocked",
+                "input audit as_of is not a valid date",
+                str(input_audit_path),
+                "adp-state-audit",
+            )
+        )
+    elif input_audit_as_of != as_of:
+        raw_findings.append(
+            artifact_finding(
+                "artifact.input_audit_as_of_mismatch",
+                "blocking",
+                "blocked",
+                "input audit as_of does not match the artifact validation as_of",
+                str(input_audit_path),
+                "adp-state-audit",
+            )
+        )
     input_effective_config = input_audit.get("effective_config")
     if not isinstance(input_effective_config, dict):
         input_effective_config = {}
@@ -998,13 +1025,13 @@ def build_artifact_validation(
                         "owning artifact workflow",
                     )
                 )
-        elif generated.date() > as_of:
+        elif generated.astimezone(timezone.utc) > validation_time:
             raw_findings.append(
                 artifact_finding(
                     "artifact.generated_at_future",
                     "blocking",
                     "blocked",
-                    "artifact generated_at is later than the validation as_of date",
+                    "artifact generated_at is later than the artifact validation time",
                     str(path),
                     "owning artifact workflow",
                 )
@@ -1028,6 +1055,19 @@ def build_artifact_validation(
                     "blocking",
                     "blocked",
                     "artifact as_of is not a valid date",
+                    str(path),
+                    "owning artifact workflow",
+                )
+            )
+        elif artifact_as_of is not None and (
+            artifact_as_of != as_of or artifact_as_of != input_audit_as_of
+        ):
+            raw_findings.append(
+                artifact_finding(
+                    "artifact.as_of_mismatch",
+                    "blocking",
+                    "blocked",
+                    "artifact as_of does not match the validation and input audit as_of",
                     str(path),
                     "owning artifact workflow",
                 )
@@ -1099,7 +1139,7 @@ def build_artifact_validation(
         "audit_schema_version": 1,
         "schema_version": 1,
         "generator_version": GENERATOR_VERSION,
-        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "generated_at": validation_time.astimezone().isoformat(timespec="seconds"),
         "as_of": as_of.isoformat(),
         "scenario": scenario,
         "project_root": str(project_root),

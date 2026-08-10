@@ -15,6 +15,9 @@ SCRIPT = Path(__file__).resolve().parents[1] / "panel_refresh.py"
 STATE_AUDIT_SCRIPT = (
     SCRIPT.parents[2] / "adp-state-audit" / "scripts" / "audit_state.py"
 )
+STATUS_SYNC_SCRIPT = (
+    SCRIPT.parents[2] / "adp-status-sync" / "scripts" / "sync_status.py"
+)
 MEMORY_REL = Path("_bmad-output/adp/memory")
 
 
@@ -516,6 +519,140 @@ class PanelRefreshTests(unittest.TestCase):
         module.atomic_json(retirement_receipt_path, retirement_receipt)
         receipt_paths.append(retirement_receipt_path)
         return audit, receipt_paths
+
+    def scaffold_historical_migration_closure(
+        self,
+        module: object,
+        memory: Path,
+        *,
+        with_retirement_successor: bool = True,
+    ) -> tuple[object, dict[str, Path]]:
+        audit = load_state_audit_module()
+        project_root = memory.parents[2]
+        intake = memory / "intake/status-sync/historical-change.json"
+        original = project_root / "recovered/historical-change-original.json"
+        evidence = memory / "receipts/status-sync-input-migration/evidence/historical-change-execution.json"
+        intake.parent.mkdir(parents=True, exist_ok=True)
+        original.parent.mkdir(parents=True, exist_ok=True)
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        executable = [{"id": "ws-migration", "progress": "closed"}]
+        original_payload = {
+            "generated_by": "adp-meeting-sync",
+            "meeting": {"title": "Original title"},
+            "updates": executable,
+        }
+        current_payload = {
+            "generated_by": "adp-meeting-sync",
+            "meeting": {"title": "Corrected title", "classification": "fact-reviewed"},
+            "updates": executable,
+        }
+        original.write_text(json.dumps(original_payload) + "\n", encoding="utf-8")
+        intake.write_text(json.dumps(current_payload) + "\n", encoding="utf-8")
+        evidence.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "mode": "update",
+                    "dry_run": False,
+                    "updates": [{"ok": True}],
+                    "input_path": str(intake.resolve()),
+                    "input_hash": module.file_fingerprint(original),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        command = [
+            sys.executable,
+            str(STATUS_SYNC_SCRIPT),
+            "migrate-receipt",
+            str(project_root),
+            "--updates-file",
+            str(intake),
+            "--original-updates-file",
+            str(original),
+            "--evidence-file",
+            str(evidence),
+            "--applied-at",
+            "2026-08-10T03:08:44Z",
+            "--attested-by",
+            "PMO-A",
+        ]
+        preview = json.loads(subprocess.run(
+            [*command, "--dry-run"], check=True, capture_output=True, text=True, encoding="utf-8"
+        ).stdout)
+        applied = json.loads(subprocess.run(
+            [*command, "--verified-plan-token", preview["verified_plan_token"]],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout)
+        migration_receipt = Path(applied["receipt_path"])
+        migration = applied["receipt"]["migration"]
+        snapshot = memory / migration["original_input_snapshot_path"]
+        paths = {
+            "intake": intake,
+            "migration_receipt": migration_receipt,
+            "snapshot": snapshot,
+            "evidence": evidence,
+        }
+        if not with_retirement_successor:
+            return audit, paths
+
+        retirement_intake = memory / "intake/status-sync/retired-by-migration.json"
+        retirement_payload = {"updates": [{"id": "ws-retired-migration", "progress": "retired"}]}
+        retirement_intake.write_text(json.dumps(retirement_payload) + "\n", encoding="utf-8")
+        retirement_hash = module.file_fingerprint(retirement_intake)
+        successor = {
+            "binding_type": "durable-receipt",
+            "path": migration_receipt.relative_to(memory).as_posix(),
+            "fingerprint": module.file_fingerprint(migration_receipt),
+        }
+        read_set = [
+            {"path": retirement_intake.relative_to(memory).as_posix(), "fingerprint": retirement_hash},
+            {"path": successor["path"], "fingerprint": successor["fingerprint"]},
+        ]
+        evidence_scan = {"verification_status": "verified", "satisfied_commands": []}
+        snapshot_body = {
+            "input_path": retirement_intake.relative_to(memory).as_posix(),
+            "input_hash": retirement_hash,
+            "update_count": 1,
+            "reason": "superseded-by",
+            "justification": "A verified migration receipt supersedes this intake",
+            "superseded_by": successor,
+            "evidence_scan": evidence_scan,
+            "read_set": read_set,
+        }
+        retirement_receipt = {
+            "receipt_schema_version": 1,
+            "receipt_type": "intake-retirement",
+            "ok": True,
+            "status": "retired",
+            "durable": True,
+            "dry_run": False,
+            "mode": "retire-intake",
+            "reason": "superseded-by",
+            "retired_at": "2026-08-10T03:09:00Z",
+            "input_path": retirement_intake.relative_to(memory).as_posix(),
+            "input_hash": retirement_hash,
+            "update_count": 1,
+            "payload_id": audit.receipt_content_id(retirement_payload),
+            "principal": "PMO-A",
+            "governance": {
+                "authority_principal": "PMO-A",
+                "justification": snapshot_body["justification"],
+            },
+            "superseded_by": successor,
+            "evidence_scan": evidence_scan,
+            "read_set": read_set,
+            "snapshot_id": audit.receipt_content_id(snapshot_body),
+        }
+        retirement_receipt["retirement_id"] = audit.receipt_content_id(retirement_receipt)
+        retirement_receipt_path = memory / "receipts/status-sync-retirement/retired-by-migration.json"
+        module.atomic_json(retirement_receipt_path, retirement_receipt)
+        paths.update({"retirement_intake": retirement_intake, "retirement_receipt": retirement_receipt_path})
+        return audit, paths
 
     def create_superseded_evidence_fixture(
         self, root: Path
@@ -3174,6 +3311,224 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertEqual(
                 resumed_manifest["declared_source_fingerprints"],
                 plan["source_fingerprints"],
+            )
+
+    def test_minimal_staging_binds_transitive_historical_migration_evidence(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            audit, paths = self.scaffold_historical_migration_closure(module, memory)
+            self.assertEqual(audit.pending_status_sync_intakes(memory), [])
+            refresh_id = "refresh-" + "6" * 24
+            plan = {
+                "refresh_id": refresh_id,
+                "plan_id": "sha256:" + "7" * 64,
+                "staging_contract_version": module.STAGING_CONTRACT_VERSION,
+                "source_fingerprints": module.source_inventory(memory),
+                "nodes": [],
+            }
+            workspace = module.workspace_for(memory, refresh_id)
+
+            staged = module.prepare_staging(memory, workspace, plan)
+            manifest = module.load_json(workspace / "input-manifest.json")
+            rows = {row["path"]: row for row in manifest["files"]}
+
+            self.assertEqual(audit.pending_status_sync_intakes(staged), [])
+            expected_types = {
+                "migration_receipt": "status-sync-terminal-receipt",
+                "snapshot": "status-sync-migration-original",
+                "evidence": "status-sync-migration-evidence",
+                "retirement_receipt": "status-sync-terminal-receipt",
+            }
+            for name, source_type in expected_types.items():
+                relative = paths[name].relative_to(memory).as_posix()
+                self.assertIn(relative, plan["source_fingerprints"])
+                self.assertEqual(rows[relative]["source_type"], source_type)
+                self.assertEqual(rows[relative]["sha256"], module.file_fingerprint(paths[name]))
+                self.assertEqual(rows[relative]["size"], paths[name].stat().st_size)
+                self.assertTrue((staged / relative).is_file())
+
+            paths["snapshot"].write_text(
+                paths["snapshot"].read_text(encoding="utf-8") + " ",
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                module.status_sync_closure_inventory_addition_only(
+                    plan["source_fingerprints"],
+                    module.source_inventory(memory),
+                    memory,
+                )
+            )
+
+    def test_retirement_successor_recursively_discovers_nested_migration_dependencies(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = self.scaffold(Path(temp_dir).resolve()).resolve()
+            snapshot = memory / "receipts/status-sync-input-migration/originals/original.json"
+            evidence = memory / "receipts/status-sync-input-migration/evidence/execution.json"
+            migration_receipt = memory / "receipts/status-sync/archive/migration.json"
+            retirement_receipt = memory / "receipts/status-sync-retirement/retirement.json"
+            for path in (snapshot, evidence, migration_receipt, retirement_receipt):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot.write_text("{}\n", encoding="utf-8")
+            evidence.write_text("{}\n", encoding="utf-8")
+            module.atomic_json(
+                migration_receipt,
+                {
+                    "receipt_type": "migration",
+                    "migration": {
+                        "migration_kind": "historical-input-change",
+                        "original_input_snapshot_path": snapshot.relative_to(memory).as_posix(),
+                        "evidence_path": evidence.relative_to(memory).as_posix(),
+                    },
+                },
+            )
+            module.atomic_json(
+                retirement_receipt,
+                {
+                    "receipt_type": "intake-retirement",
+                    "superseded_by": {
+                        "binding_type": "durable-receipt",
+                        "path": migration_receipt.relative_to(memory).as_posix(),
+                    },
+                },
+            )
+
+            inventory = module.status_sync_closure_evidence_inventory(memory)
+
+            self.assertEqual(
+                inventory[migration_receipt.relative_to(memory)],
+                "status-sync-retirement-successor",
+            )
+            self.assertEqual(
+                inventory[snapshot.relative_to(memory)],
+                "status-sync-migration-original",
+            )
+            self.assertEqual(
+                inventory[evidence.relative_to(memory)],
+                "status-sync-migration-evidence",
+            )
+
+    def test_existing_bound_workspace_atomically_rehydrates_closure_and_restarts_nodes(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            audit, paths = self.scaffold_historical_migration_closure(module, memory)
+            refresh_id = "refresh-" + "8" * 24
+            plan = {
+                "refresh_id": refresh_id,
+                "plan_id": "sha256:" + "9" * 64,
+                "staging_contract_version": module.STAGING_CONTRACT_VERSION,
+                "source_fingerprints": module.source_inventory(memory),
+                "status": "dirty",
+                "retry_from_instance_key": "roadmap",
+                "nodes": [
+                    {"instance_key": "state-audit", "status": "completed", "output": "old.json", "error": None},
+                    {"instance_key": "roadmap", "status": "blocked", "output": None, "error": "false blockers"},
+                ],
+            }
+            workspace = module.workspace_for(memory, refresh_id)
+            staged = module.prepare_staging(memory, workspace, plan)
+            results = workspace / "results"
+            results.mkdir()
+            (results / "state-audit.json").write_text("{}\n", encoding="utf-8")
+
+            missing_relatives = {
+                paths["snapshot"].relative_to(memory).as_posix(),
+                paths["evidence"].relative_to(memory).as_posix(),
+            }
+            manifest = module.load_json(workspace / "input-manifest.json")
+            kept_rows = [row for row in manifest["files"] if row["path"] not in missing_relatives]
+            legacy_body = {
+                "schema_version": manifest["schema_version"],
+                "refresh_id": manifest["refresh_id"],
+                "plan_id": manifest["plan_id"],
+                "declared_source_fingerprints": manifest["declared_source_fingerprints"],
+                "files": kept_rows,
+                "file_count": len(kept_rows),
+                "total_bytes": sum(row["size"] for row in kept_rows),
+            }
+            module.atomic_json(
+                workspace / "input-manifest.json",
+                {**legacy_body, "input_manifest_id": module.content_id(legacy_body)},
+            )
+            for relative in missing_relatives:
+                (staged / relative).unlink()
+            self.assertTrue(audit.pending_status_sync_intakes(staged))
+
+            resumed = module.prepare_staging(memory, workspace, plan)
+
+            self.assertEqual(audit.pending_status_sync_intakes(resumed), [])
+            self.assertEqual(plan["status"], "planned")
+            self.assertEqual(plan["retry_from_instance_key"], "state-audit")
+            self.assertEqual([node["status"] for node in plan["nodes"]], ["pending", "pending"])
+            self.assertEqual(set(plan["staging_rehydration"]["paths"]), missing_relatives)
+            archived_results = plan["staging_rehydration"]["archived_results"]
+            self.assertTrue((workspace / archived_results / "state-audit.json").is_file())
+            self.assertFalse(results.exists())
+
+    def test_apply_replans_current_v2_workspace_when_transitive_evidence_becomes_bound(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            _, paths = self.scaffold_historical_migration_closure(
+                module, memory, with_retirement_successor=False
+            )
+            deferred = {
+                name: path.read_bytes()
+                for name, path in paths.items()
+                if name in {"snapshot", "evidence"}
+            }
+            for name in deferred:
+                paths[name].unlink()
+            planned = module.plan_refresh(
+                module.parse_args(
+                    ["plan", str(root), "--fixture", "--force-full", "--as-of", "2026-08-10"]
+                ),
+                root,
+                memory,
+            )
+            old_path = Path(planned["plan_path"])
+            old_plan = module.load_json(old_path)
+            old_plan["status"] = "dirty"
+            old_plan["retry_from_instance_key"] = "roadmap"
+            old_plan["nodes"][0].update({"status": "blocked", "error": "pre-fix evidence gap"})
+            module.atomic_json(old_path, old_plan)
+            old_workspace = module.workspace_for(memory, old_plan["refresh_id"])
+            module.prepare_staging(memory, old_workspace, old_plan)
+            module.atomic_json(
+                memory / module.STATUS_REL,
+                {
+                    "current_run_id": old_plan["refresh_id"],
+                    "current_status": "dirty",
+                    "retry_from_instance_key": "roadmap",
+                    "last_error": "pre-fix evidence gap",
+                },
+            )
+            for name, content in deferred.items():
+                paths[name].parent.mkdir(parents=True, exist_ok=True)
+                paths[name].write_bytes(content)
+
+            applied = module.apply_refresh(
+                module.parse_args(["apply", str(root), "--plan", str(old_path)]),
+                root,
+                memory,
+            )
+
+            self.assertEqual(applied["status"], "published")
+            self.assertNotEqual(applied["refresh_id"], old_plan["refresh_id"])
+            superseded = module.load_json(old_path)
+            self.assertEqual(superseded["status"], "superseded")
+            replacement = module.load_json(memory / module.RUNS_REL / f"{applied['refresh_id']}.json")
+            for name in deferred:
+                relative = paths[name].relative_to(memory).as_posix()
+                self.assertIn(relative, replacement["source_fingerprints"])
+            self.assertEqual(
+                replacement["inventory_replanned_from_refresh_id"],
+                old_plan["refresh_id"],
             )
 
     def test_apply_replans_and_supersedes_precontract_dirty_workspace(self) -> None:

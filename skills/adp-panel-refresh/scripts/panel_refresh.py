@@ -83,6 +83,12 @@ STATUS_SYNC_TERMINAL_RECEIPT_DIRS = {
     "receipts/status-sync-partial-closure",
     "receipts/status-sync-retirement",
 }
+STATUS_SYNC_CLOSURE_SOURCE_TYPES = {
+    "status-sync-terminal-receipt",
+    "status-sync-migration-original",
+    "status-sync-migration-evidence",
+    "status-sync-retirement-successor",
+}
 DERIVED_PREFIXES = ("audits/", "snapshots/", "views/")
 PUBLISHABLE_STATE_PREFIXES = (
     "state/management-panel",
@@ -287,6 +293,116 @@ def is_status_sync_terminal_receipt(relative: str | Path) -> bool:
     )
 
 
+def portable_memory_relative_path(value: str) -> Path | None:
+    parts = [part for part in value.replace("\\", "/").split("/") if part not in {"", "."}]
+    anchor = ["_bmad-output", "adp", "memory"]
+    folded = [part.casefold() for part in parts]
+    for index in range(len(parts) - len(anchor) + 1):
+        if folded[index : index + len(anchor)] != anchor:
+            continue
+        relative_parts = parts[index + len(anchor) :]
+        if not relative_parts or any(part == ".." for part in relative_parts):
+            return None
+        return Path(*relative_parts)
+    return None
+
+
+def resolve_portable_staging_input(memory_root: Path, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    root = memory_root.resolve()
+    relative = portable_memory_relative_path(value)
+    if relative is not None:
+        raw_candidate = root / relative
+    else:
+        normalized = Path(value.replace("\\", "/")).expanduser()
+        raw_candidate = normalized if normalized.is_absolute() else root / normalized
+    if raw_candidate.is_symlink():
+        return None
+    candidate = raw_candidate.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.is_file() or candidate.is_symlink() or is_runtime_lock_path(candidate):
+        return None
+    return candidate
+
+
+def status_sync_closure_evidence_inventory(memory_root: Path) -> dict[Path, str]:
+    selected: dict[Path, str] = {}
+    queued: list[tuple[Path, str]] = []
+    parsed: set[Path] = set()
+    source_priority = {
+        "status-sync-migration-original": 10,
+        "status-sync-migration-evidence": 20,
+        "status-sync-retirement-successor": 30,
+        "status-sync-terminal-receipt": 40,
+    }
+
+    def enqueue(path: Path | None, source_type: str) -> None:
+        if path is None:
+            return
+        try:
+            relative = path.resolve().relative_to(memory_root.resolve())
+        except ValueError:
+            return
+        current = selected.get(relative)
+        if current is None or source_priority[source_type] > source_priority[current]:
+            selected[relative] = source_type
+        queued.append((path, source_type))
+
+    for directory in sorted(STATUS_SYNC_TERMINAL_RECEIPT_DIRS):
+        root = memory_root / directory
+        for path in sorted(root.glob("*.json")) if root.is_dir() else []:
+            enqueue(resolve_portable_staging_input(memory_root, str(path)), "status-sync-terminal-receipt")
+
+    while queued:
+        path, source_type = queued.pop(0)
+        resolved = path.resolve()
+        relative_text = resolved.relative_to(memory_root.resolve()).as_posix()
+        if (
+            resolved in parsed
+            or path.suffix.lower() != ".json"
+            or (
+                source_type
+                not in {
+                    "status-sync-terminal-receipt",
+                    "status-sync-retirement-successor",
+                }
+                and not is_status_sync_terminal_receipt(relative_text)
+            )
+        ):
+            continue
+        parsed.add(resolved)
+        payload = load_optional_json(path)
+        migration = payload.get("migration") if isinstance(payload.get("migration"), dict) else {}
+        if migration.get("migration_kind") == "historical-input-change":
+            enqueue(
+                resolve_portable_staging_input(memory_root, migration.get("original_input_snapshot_path")),
+                "status-sync-migration-original",
+            )
+        if migration:
+            enqueue(
+                resolve_portable_staging_input(memory_root, migration.get("evidence_path")),
+                "status-sync-migration-evidence",
+            )
+        successor = payload.get("superseded_by")
+        if isinstance(successor, dict):
+            enqueue(
+                resolve_portable_staging_input(memory_root, successor.get("path")),
+                "status-sync-retirement-successor",
+            )
+            durable = successor.get("durable_receipt")
+            if isinstance(durable, dict):
+                enqueue(
+                    resolve_portable_staging_input(memory_root, durable.get("path")),
+                    "status-sync-retirement-successor",
+                )
+
+    return dict(sorted(selected.items(), key=lambda item: item[0].as_posix()))
+
+
 def source_inventory(
     memory_root: Path,
     project_root: Path | None = None,
@@ -312,6 +428,8 @@ def source_inventory(
             )
         ):
             inventory[relative] = file_fingerprint(path)
+    for relative in status_sync_closure_evidence_inventory(memory_root):
+        inventory[relative.as_posix()] = file_fingerprint(memory_root / relative)
     if project_root is not None:
         inventory.update(effective_config_inventory(project_root.resolve()))
     return dict(sorted(inventory.items()))
@@ -1275,12 +1393,9 @@ def latest_meeting_pack_inputs(memory_root: Path) -> list[Path]:
 def staging_input_inventory(memory_root: Path, plan: dict[str, Any]) -> dict[Path, str]:
     selected: dict[Path, str] = {}
     del plan
+    closure_evidence = status_sync_closure_evidence_inventory(memory_root)
     for relative in source_inventory(memory_root):
-        source_type = (
-            "status-sync-terminal-receipt"
-            if is_status_sync_terminal_receipt(relative)
-            else "canonical-fact"
-        )
+        source_type = closure_evidence.get(Path(relative), "canonical-fact")
         add_staging_input(
             selected,
             memory_root,
@@ -1392,20 +1507,75 @@ def atomic_copy_file(source: Path, target: Path, staging_root: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def rehydrate_status_sync_terminal_receipts(
+def reset_plan_after_staging_rehydrate(
+    plan: dict[str, Any],
+    workspace: Path,
+    changed_paths: list[str],
+) -> None:
+    if not changed_paths:
+        return
+    rehydrated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    results_path = workspace / "results"
+    archived_results: str | None = None
+    if results_path.is_dir():
+        archive_id = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "plan_id": plan.get("plan_id"),
+                    "rehydrated_at": rehydrated_at,
+                    "paths": changed_paths,
+                    "nonce": time.time_ns(),
+                }
+            )
+        ).hexdigest()[:16]
+        archive_root = workspace / "rehydration-history" / archive_id
+        archive_root.mkdir(parents=True, exist_ok=False)
+        archived = archive_root / "results"
+        os.replace(results_path, archived)
+        archived_results = archived.relative_to(workspace).as_posix()
+    nodes = plan.get("nodes") if isinstance(plan.get("nodes"), list) else []
+    for node in nodes:
+        if isinstance(node, dict):
+            node.update({"status": "pending", "output": None, "error": None})
+    retry = next(
+        (
+            str(node.get("instance_key"))
+            for node in nodes
+            if isinstance(node, dict) and node.get("instance_key")
+        ),
+        None,
+    )
+    rehydration = {
+        "rehydrated_at": rehydrated_at,
+        "paths": changed_paths,
+        "archived_results": archived_results,
+    }
+    plan.update(
+        {
+            "status": "planned" if nodes else plan.get("status"),
+            "retry_from_instance_key": retry,
+            "staging_rehydration": {
+                **rehydration,
+                "rehydration_id": content_id(rehydration),
+            },
+        }
+    )
+
+
+def rehydrate_status_sync_closure_evidence(
     memory_root: Path,
     staged: Path,
     workspace: Path,
     plan: dict[str, Any],
     selected: dict[Path, str],
-) -> None:
+) -> list[str]:
     expected = {
         relative: staging_manifest_row(memory_root, relative, source_type)
         for relative, source_type in selected.items()
-        if source_type == "status-sync-terminal-receipt"
+        if source_type in STATUS_SYNC_CLOSURE_SOURCE_TYPES
     }
     if not expected:
-        return
+        return []
     manifest_path = workspace / "input-manifest.json"
     manifest = load_optional_json(manifest_path)
     body = dict(manifest)
@@ -1430,6 +1600,7 @@ def rehydrate_status_sync_terminal_receipts(
         rows[row["path"]] = row
 
     changed = False
+    changed_paths: list[str] = []
     plan_sources = (
         plan.get("source_fingerprints")
         if isinstance(plan.get("source_fingerprints"), dict)
@@ -1440,7 +1611,7 @@ def rehydrate_status_sync_terminal_receipts(
         if plan_sources.get(relative_text) != expected_row["sha256"]:
             raise RefreshError(
                 "REFRESH_STAGING_SOURCE_UNBOUND",
-                f"status-sync terminal receipt is not bound by the refresh plan: {relative_text}",
+                f"status-sync closure evidence is not bound by the refresh plan: {relative_text}",
             )
         source = memory_root / relative
         target = staged / relative
@@ -1451,12 +1622,14 @@ def rehydrate_status_sync_terminal_receipts(
         ):
             atomic_copy_file(source, target, staged)
             changed = True
+            changed_paths.append(relative_text)
         if rows.get(relative_text) != expected_row:
             rows[relative_text] = expected_row
             changed = True
+            changed_paths.append(relative_text)
 
     if not changed and manifest.get("declared_source_fingerprints") == plan_sources:
-        return
+        return []
     files = [rows[key] for key in sorted(rows)]
     updated_body = {
         "schema_version": "1.0.0",
@@ -1467,10 +1640,13 @@ def rehydrate_status_sync_terminal_receipts(
         "file_count": len(files),
         "total_bytes": sum(int(item.get("size") or 0) for item in files),
     }
+    changed_paths = sorted(set(changed_paths))
+    reset_plan_after_staging_rehydrate(plan, workspace, changed_paths)
     atomic_json(
         manifest_path,
         {**updated_body, "input_manifest_id": content_id(updated_body)},
     )
+    return changed_paths
 
 
 def prepare_staging(memory_root: Path, workspace: Path, plan: dict[str, Any]) -> Path:
@@ -1483,7 +1659,7 @@ def prepare_staging(memory_root: Path, workspace: Path, plan: dict[str, Any]) ->
     if staged.is_dir():
         if not metadata.is_file() or metadata.read_text(encoding="utf-8").strip() != plan["plan_id"]:
             raise RefreshError("REFRESH_STAGING_CONFLICT", f"staging belongs to another plan: {workspace}")
-        rehydrate_status_sync_terminal_receipts(
+        rehydrate_status_sync_closure_evidence(
             memory_root,
             staged,
             workspace,
@@ -3256,13 +3432,20 @@ def source_binding_mismatch_paths(
     )
 
 
-def status_sync_receipt_only_source_change(
+def status_sync_closure_inventory_addition_only(
     expected: Any,
     live: dict[str, str],
+    memory_root: Path,
 ) -> bool:
+    prior = expected if isinstance(expected, dict) else {}
     mismatches = source_binding_mismatch_paths(expected, live)
+    closure_paths = {
+        relative.as_posix()
+        for relative in status_sync_closure_evidence_inventory(memory_root)
+    }
     return bool(mismatches) and all(
-        is_status_sync_terminal_receipt(path) for path in mismatches
+        path not in prior and path in live and path in closure_paths
+        for path in mismatches
     )
 
 
@@ -3490,15 +3673,16 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
     live = source_inventory(memory_root, project_root)
     if plan.get("status") in ACTIVE_RUN_STATUSES and (
         plan.get("staging_contract_version") != STAGING_CONTRACT_VERSION
-        or status_sync_receipt_only_source_change(
+        or status_sync_closure_inventory_addition_only(
             plan.get("source_fingerprints"),
             live,
+            memory_root,
         )
     ):
         reason = (
-            "panel-refresh staging contract upgraded to include status-sync terminal receipts"
+            "panel-refresh staging contract upgraded to include status-sync closure evidence"
             if plan.get("staging_contract_version") != STAGING_CONTRACT_VERSION
-            else "status-sync terminal receipt binding changed after refresh planning"
+            else "status-sync closure evidence was added after refresh planning"
         )
         plan, plan_path = controlled_inventory_replan(
             args,
@@ -3558,7 +3742,33 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
     with refresh_lock(memory_root):
         recover_publication_transactions(memory_root)
         workspace = workspace_for(memory_root, plan["refresh_id"])
+        prior_rehydration_id = (
+            plan.get("staging_rehydration", {}).get("rehydration_id")
+            if isinstance(plan.get("staging_rehydration"), dict)
+            else None
+        )
         staged_root = prepare_staging(memory_root, workspace, plan)
+        current_rehydration_id = (
+            plan.get("staging_rehydration", {}).get("rehydration_id")
+            if isinstance(plan.get("staging_rehydration"), dict)
+            else None
+        )
+        if current_rehydration_id != prior_rehydration_id:
+            atomic_json(plan_path, plan)
+            status = load_optional_json(memory_root / STATUS_REL)
+            if status.get("current_run_id") == plan.get("refresh_id"):
+                status.update(
+                    {
+                        "current_status": plan.get("status"),
+                        "pending_invalidations": plan.get("nodes", []),
+                        "retry_from_instance_key": plan.get("retry_from_instance_key"),
+                        "last_error": None,
+                    }
+                )
+                status["state_id"] = content_id(
+                    {key: value for key, value in status.items() if key != "state_id"}
+                )
+                atomic_json(memory_root / STATUS_REL, status)
         results: dict[str, dict[str, Any]] = {}
         for node_state in plan.get("nodes", []):
             node = node_state["instance_key"]
