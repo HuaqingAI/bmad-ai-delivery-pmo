@@ -2744,8 +2744,8 @@ def publishable_changes(
     after = relative_file_map(staged_root)
     changed = sorted(
         path
-        for path in set(before) | set(after)
-        if before.get(path) != after.get(path)
+        for path in after
+        if before.get(path) != after[path]
         and not path.startswith("state/panel-refresh/")
         and path not in {"state/panel-refresh-status.json", "state/panel-refresh.lock", "state/fact-write.lock"}
         and not path.startswith("receipts/panel-refresh/")
@@ -2772,6 +2772,55 @@ def publishable_changes(
             "projection refresh attempted to modify fact/runtime-owned paths: " + ", ".join(illegal[:10]),
         )
     return changed
+
+
+def validated_deletion_allowlist(
+    memory_root: Path,
+    staged_root: Path,
+    changed: list[str],
+    deletion_allowlist: set[str] | None,
+) -> set[str]:
+    allowed: set[str] = set()
+    changed_set = set(changed)
+    for raw_path in deletion_allowlist or set():
+        relative = Path(raw_path)
+        relative_text = relative.as_posix()
+        if (
+            relative.is_absolute()
+            or relative == Path(".")
+            or ".." in relative.parts
+            or relative_text not in changed_set
+            or not (
+                relative_text.startswith(DERIVED_PREFIXES)
+                or relative_text.startswith(PUBLISHABLE_STATE_PREFIXES)
+            )
+        ):
+            raise RefreshError(
+                "REFRESH_DELETION_MANIFEST_INVALID",
+                f"publication deletion allowlist contains an invalid target: {raw_path}",
+            )
+        target = staged_root / relative
+        live_target = memory_root / relative
+        try:
+            target.resolve(strict=False).relative_to(staged_root.resolve())
+            live_target.resolve(strict=False).relative_to(memory_root.resolve())
+        except ValueError as exc:
+            raise RefreshError(
+                "REFRESH_DELETION_MANIFEST_INVALID",
+                f"publication deletion target escapes staging: {raw_path}",
+            ) from exc
+        if target.exists() or target.is_symlink():
+            raise RefreshError(
+                "REFRESH_DELETION_MANIFEST_INVALID",
+                f"publication deletion target still exists in staging: {raw_path}",
+            )
+        if not live_target.is_file() or live_target.is_symlink():
+            raise RefreshError(
+                "REFRESH_DELETION_MANIFEST_INVALID",
+                f"publication deletion target is not a live regular file: {raw_path}",
+            )
+        allowed.add(relative_text)
+    return allowed
 
 
 def normalize_sha256_fingerprint(value: Any) -> str | None:
@@ -3185,8 +3234,27 @@ def atomic_publish(
     changed: list[str],
     workspace: Path,
     plan_id: str,
+    deletion_allowlist: set[str] | None = None,
 ) -> dict[str, Any]:
     del workspace
+    allowed_deletions = validated_deletion_allowlist(
+        memory_root,
+        staged_root,
+        changed,
+        deletion_allowlist,
+    )
+    unauthorized_deletions = sorted(
+        relative
+        for relative in changed
+        if not (staged_root / relative).is_file()
+        and relative not in allowed_deletions
+    )
+    if unauthorized_deletions:
+        raise RefreshError(
+            "REFRESH_DELETION_UNAUTHORIZED",
+            "publication attempted deletion without a validated allowlist: "
+            + ", ".join(unauthorized_deletions[:10]),
+        )
     base_transaction_id = "publish-" + hashlib.sha256(plan_id.encode("utf-8")).hexdigest()[:24]
     transaction_id = next_publication_transaction_id(memory_root, base_transaction_id)
     journal = memory_root / "state/transactions" / transaction_id
@@ -3199,6 +3267,7 @@ def atomic_publish(
         "plan_id": plan_id,
         "status": "prepared",
         "applied_count": 0,
+        "deletion_allowlist": sorted(allowed_deletions),
         "targets": [],
     }
     for relative in changed:
@@ -3208,6 +3277,7 @@ def atomic_publish(
         after = source.read_bytes() if source.is_file() else None
         entry = {
             "path": relative,
+            "operation": "delete" if relative in allowed_deletions else "replace",
             "before_sha256": "sha256:" + hashlib.sha256(before).hexdigest() if before is not None else None,
             "after_sha256": "sha256:" + hashlib.sha256(after).hexdigest() if after is not None else None,
         }

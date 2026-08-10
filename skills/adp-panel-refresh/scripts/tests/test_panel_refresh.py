@@ -1145,6 +1145,17 @@ class PanelRefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             memory = self.scaffold(root)
+            omitted_live = {
+                "actions/resume-source.md": b"# Resume source\n",
+                "state/runtime-owned.json": b'{"runtime":"keep"}\n',
+                "audits/legacy-unreferenced.json": b'{"audit":"keep"}\n',
+                "snapshots/panel-history/legacy.json": b'{"snapshot":"keep"}\n',
+                "views/management-panel/history/legacy.html": b"<p>keep</p>\n",
+            }
+            for relative, content in omitted_live.items():
+                path = memory / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
             plan = self.plan(root)
 
             crashed_completed, crashed = self.run_cli(
@@ -1161,11 +1172,28 @@ class PanelRefreshTests(unittest.TestCase):
             self.assertFalse((memory / "views/management-panel/index.html").exists())
             durable_plan = json.loads(Path(plan["plan_path"]).read_text(encoding="utf-8"))
             self.assertEqual(durable_plan["nodes"][0]["status"], "completed")
+            workspace = memory.parent / ".adp-panel-refresh-staging" / plan["refresh_id"]
+            management_result = workspace / "results/management-panel.json"
+            self.assertTrue(management_result.is_file())
+            for relative in omitted_live:
+                staged_path = workspace / "memory" / relative
+                if staged_path.is_file():
+                    staged_path.unlink()
 
-            _, resumed = self.run_cli("apply", str(root), "--plan", plan["plan_path"])
+            _, resumed = self.run_cli(
+                "apply",
+                str(root),
+                "--plan",
+                plan["plan_path"],
+                "--fail-after-node",
+                "management-panel",
+            )
             self.assertEqual(resumed["status"], "published")
+            self.assertEqual(resumed["refresh_id"], plan["refresh_id"])
             self.assertEqual(resumed["inspect"]["publication_eligibility"], "eligible")
             self.assertTrue((memory / "views/management-panel/index.html").is_file())
+            for relative, content in omitted_live.items():
+                self.assertEqual((memory / relative).read_bytes(), content)
 
     def test_pending_intents_block_plan_before_any_panel_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4201,6 +4229,84 @@ class PanelRefreshTests(unittest.TestCase):
 
             self.assertNotEqual(first["transaction_id"], second["transaction_id"])
             self.assertEqual(target.read_text(encoding="utf-8"), "after-two\n")
+
+    def test_publication_diff_is_after_only_and_preserves_omitted_live_files(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            memory = root / "memory"
+            staged = root / "staged"
+            workspace = root / "workspace"
+            omitted_live = {
+                "actions/source.md": b"fact bytes\n",
+                "state/runtime-owned.json": b'{"runtime":true}\n',
+                "audits/old.json": b'{"audit":"old"}\n',
+                "snapshots/panel-history/old.json": b'{"snapshot":"old"}\n',
+                "views/management-panel/history/old.html": b"<p>old panel</p>\n",
+            }
+            for relative, content in omitted_live.items():
+                path = memory / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            live_projection = memory / "views/program-status.json"
+            staged_projection = staged / "views/program-status.json"
+            live_projection.parent.mkdir(parents=True, exist_ok=True)
+            staged_projection.parent.mkdir(parents=True, exist_ok=True)
+            live_projection.write_text('{"version":"before"}\n', encoding="utf-8")
+            staged_projection.write_text('{"version":"after"}\n', encoding="utf-8")
+
+            changed = module.publishable_changes(memory, staged)
+
+            self.assertEqual(changed, ["views/program-status.json"])
+            publication = module.atomic_publish(
+                memory,
+                staged,
+                changed,
+                workspace,
+                "sha256:" + "3" * 64,
+            )
+            self.assertEqual(
+                [entry["path"] for entry in publication["targets"]],
+                ["views/program-status.json"],
+            )
+            self.assertEqual(live_projection.read_bytes(), staged_projection.read_bytes())
+            for relative, content in omitted_live.items():
+                self.assertEqual((memory / relative).read_bytes(), content)
+
+            staged_fact = staged / "actions/source.md"
+            staged_runtime = staged / "state/runtime-owned.json"
+            staged_fact.parent.mkdir(parents=True, exist_ok=True)
+            staged_runtime.parent.mkdir(parents=True, exist_ok=True)
+            staged_fact.write_text("changed fact\n", encoding="utf-8")
+            staged_runtime.write_text('{"runtime":false}\n', encoding="utf-8")
+            with self.assertRaises(module.RefreshError) as forbidden:
+                module.publishable_changes(memory, staged)
+            self.assertEqual(forbidden.exception.code, "REFRESH_FACT_WRITE_FORBIDDEN")
+
+            with self.assertRaises(module.RefreshError) as implicit_delete:
+                module.atomic_publish(
+                    memory,
+                    staged,
+                    ["audits/old.json"],
+                    workspace,
+                    "sha256:" + "4" * 64,
+                )
+            self.assertEqual(implicit_delete.exception.code, "REFRESH_DELETION_UNAUTHORIZED")
+            self.assertEqual((memory / "audits/old.json").read_bytes(), omitted_live["audits/old.json"])
+
+            explicitly_deleted = memory / "views/obsolete.json"
+            explicitly_deleted.parent.mkdir(parents=True, exist_ok=True)
+            explicitly_deleted.write_text("obsolete\n", encoding="utf-8")
+            deletion = module.atomic_publish(
+                memory,
+                staged,
+                ["views/obsolete.json"],
+                workspace,
+                "sha256:" + "5" * 64,
+                deletion_allowlist={"views/obsolete.json"},
+            )
+            self.assertFalse(explicitly_deleted.exists())
+            self.assertEqual(deletion["targets"][0]["operation"], "delete")
 
 
 if __name__ == "__main__":

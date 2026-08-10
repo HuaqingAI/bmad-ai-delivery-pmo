@@ -14,6 +14,12 @@ Panel Refresh staging is disposable execution state, not durable project memory.
 
 A staging contract version binds this coverage. Applying an active pre-contract plan performs a controlled full replan: the old dirty workspace is superseded, archived, and memory-pruned, while the replacement plan binds the complete status-sync closure and starts again from state audit. A current v2 plan created before transitive evidence entered the inventory follows the same controlled replan when the only new live sources are closure-evidence additions. For a current-contract workspace whose valid manifest is missing already-bound closure rows/files, `prepare_staging` atomically rehydrates them, archives stale node results, resets every node from state audit, and updates the manifest; operators never delete the workspace manually.
 
+## Publication diff
+
+Minimal staging is an inclusion manifest, not a mirror of all live memory. Ordinary publication diffing iterates only files present in staged memory and selects staged additions or byte changes. Live-only facts, runtime state, old audits, snapshots, receipts, and Panel history remain untouched. Absence from staging never implies deletion and never becomes a publication target.
+
+Deletion is a separate contract operation. `atomic_publish` rejects a missing staged source unless the path is explicitly present in a validated deletion allowlist; that allowlist accepts only safe relative derived/projection paths and never fact/runtime-owned paths. The ordinary Panel Refresh apply path supplies no deletion allowlist.
+
 ## Terminal evidence
 
 Supersede and abandon create `state/panel-refresh/evidence/<refresh-id>.zip`. The archive contains the terminal plan snapshot, plan ID, input manifest, node results, policy candidate files, memlogs, and an output-artifact digest manifest. The run plan binds the archive path and SHA-256. After verification, `workspace/memory/` is deleted and a durable workspace-prune receipt records files and bytes removed. The compact workspace shell may remain until explicit prune.
