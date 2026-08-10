@@ -12,6 +12,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "panel_refresh.py"
+STATE_AUDIT_SCRIPT = (
+    SCRIPT.parents[2] / "adp-state-audit" / "scripts" / "audit_state.py"
+)
 MEMORY_REL = Path("_bmad-output/adp/memory")
 
 
@@ -19,6 +22,18 @@ def load_module():
     spec = importlib.util.spec_from_file_location("adp_panel_refresh_test", SCRIPT)
     if spec is None or spec.loader is None:
         raise RuntimeError("cannot load panel_refresh.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_state_audit_module():
+    spec = importlib.util.spec_from_file_location(
+        "adp_state_audit_for_panel_refresh_test",
+        STATE_AUDIT_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load audit_state.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -323,6 +338,184 @@ class PanelRefreshTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, result)
         return result
+
+    def scaffold_closed_status_sync_intakes(
+        self,
+        module: object,
+        memory: Path,
+    ) -> tuple[object, list[Path]]:
+        audit = load_state_audit_module()
+        intake_root = memory / "intake/status-sync"
+        intake_root.mkdir(parents=True, exist_ok=True)
+        receipt_paths: list[Path] = []
+
+        execution_intake = intake_root / "execution.json"
+        execution_payload = {
+            "updates": [{"id": "ws-execution", "progress": "closed"}]
+        }
+        execution_intake.write_text(
+            json.dumps(execution_payload) + "\n",
+            encoding="utf-8",
+        )
+        execution_hash = module.file_fingerprint(execution_intake)
+        execution_receipt = {
+            "receipt_schema_version": 1,
+            "receipt_type": "execution",
+            "execution_id": "ssr-" + "1" * 32,
+            "ok": True,
+            "status": "applied",
+            "durable": True,
+            "dry_run": False,
+            "input_path": str(execution_intake.resolve()),
+            "input_hash": execution_hash,
+            "applied_at": "2026-08-09T10:00:00Z",
+            "mode": "update",
+            "update_count": 1,
+        }
+        execution_receipt_path = memory / "receipts/status-sync/execution.json"
+        module.atomic_json(execution_receipt_path, execution_receipt)
+        receipt_paths.append(execution_receipt_path)
+
+        partial_intake = intake_root / "partial.json"
+        partial_payload = {
+            "updates": [{"id": "ws-partial", "progress": "closed"}]
+        }
+        partial_intake.write_text(json.dumps(partial_payload) + "\n", encoding="utf-8")
+        partial_hash = module.file_fingerprint(partial_intake)
+        command_results = [
+            {
+                "command_type": "action",
+                "command_index": 1,
+                "satisfied": True,
+                "matched_action_id": "ACT-1",
+            },
+            {
+                "command_type": "action",
+                "command_index": 2,
+                "satisfied": False,
+                "reason": "not found",
+            },
+        ]
+        read_set = [
+            {
+                "path": "actions/action-ledger.md",
+                "fingerprint": "sha256:" + "2" * 64,
+            }
+        ]
+        snapshot = {
+            "input_path": str(partial_intake.resolve()),
+            "input_hash": partial_hash,
+            "update_count": 1,
+            "command_results": command_results,
+            "read_set": read_set,
+        }
+        partition = {
+            "reconciled_command_indexes": [1],
+            "retired_command_indexes": [2],
+        }
+        partial_receipt = {
+            "receipt_schema_version": 1,
+            "receipt_type": "partial-closure",
+            "ok": True,
+            "status": "closed",
+            "durable": True,
+            "dry_run": False,
+            "mode": "reconcile-intake",
+            "input_path": str(partial_intake.resolve()),
+            "input_hash": partial_hash,
+            "update_count": 1,
+            "closed_at": "2026-08-09T10:01:00Z",
+            "principal": "PMO-A",
+            "payload_id": audit.receipt_content_id(partial_payload),
+            "snapshot_id": audit.receipt_content_id(snapshot),
+            "read_set": read_set,
+            "partial_closure": {
+                "verification_method": "canonical-fact-reconciliation-plus-command-retirement",
+                "verification_status": "verified",
+                "all_commands_disposed": True,
+                "plan": {
+                    "closure_kind": "legacy-non-atomic-partial-execution",
+                    "retirement_reason": "not-executed-and-unsafe-to-replay",
+                    "retirement_justification": "Legacy command cannot be replayed safely",
+                    "payload_parser": "legacy-terminal-action-scan",
+                    **partition,
+                    "command_partition_digest": audit.receipt_content_id(partition),
+                    "replay_policy": "closed-intake-must-not-be-replayed",
+                },
+                "command_results": command_results,
+                "reconciled_commands": [command_results[0]],
+                "retired_commands": [command_results[1]],
+            },
+        }
+        partial_receipt["receipt_id"] = audit.receipt_content_id(partial_receipt)
+        partial_receipt_path = (
+            memory / "receipts/status-sync-partial-closure/partial.json"
+        )
+        module.atomic_json(partial_receipt_path, partial_receipt)
+        receipt_paths.append(partial_receipt_path)
+
+        retirement_intake = intake_root / "retirement.json"
+        retirement_payload = {
+            "updates": [{"id": "ws-retirement", "progress": "retired"}]
+        }
+        retirement_intake.write_text(
+            json.dumps(retirement_payload) + "\n",
+            encoding="utf-8",
+        )
+        retirement_hash = module.file_fingerprint(retirement_intake)
+        retirement_read_set = [
+            {
+                "path": retirement_intake.relative_to(memory).as_posix(),
+                "fingerprint": retirement_hash,
+            }
+        ]
+        evidence_scan = {
+            "verification_status": "verified",
+            "satisfied_commands": [],
+        }
+        retirement_snapshot = {
+            "input_path": retirement_intake.relative_to(memory).as_posix(),
+            "input_hash": retirement_hash,
+            "update_count": 1,
+            "reason": "never-applied",
+            "justification": "Proposal was never applied",
+            "superseded_by": None,
+            "evidence_scan": evidence_scan,
+            "read_set": retirement_read_set,
+        }
+        retirement_receipt = {
+            "receipt_schema_version": 1,
+            "receipt_type": "intake-retirement",
+            "ok": True,
+            "status": "retired",
+            "durable": True,
+            "dry_run": False,
+            "mode": "retire-intake",
+            "reason": "never-applied",
+            "retired_at": "2026-08-09T10:02:00Z",
+            "input_path": retirement_intake.relative_to(memory).as_posix(),
+            "input_hash": retirement_hash,
+            "update_count": 1,
+            "payload_id": audit.receipt_content_id(retirement_payload),
+            "principal": "PMO-A",
+            "governance": {
+                "authority_principal": "PMO-A",
+                "justification": "Proposal was never applied",
+            },
+            "superseded_by": None,
+            "evidence_scan": evidence_scan,
+            "read_set": retirement_read_set,
+            "snapshot_id": audit.receipt_content_id(retirement_snapshot),
+        }
+        retirement_receipt["retirement_id"] = audit.receipt_content_id(
+            retirement_receipt
+        )
+        retirement_receipt_path = (
+            memory / "receipts/status-sync-retirement/retirement.json"
+        )
+        module.atomic_json(retirement_receipt_path, retirement_receipt)
+        receipt_paths.append(retirement_receipt_path)
+        return audit, receipt_paths
 
     def create_superseded_evidence_fixture(
         self, root: Path
@@ -2907,6 +3100,176 @@ class PanelRefreshTests(unittest.TestCase):
                 {item["source_type"] for item in manifest["files"]},
                 {"canonical-fact", "current-projection", "current-meeting-pack", "program-status-history"},
             )
+
+    def test_minimal_staging_binds_and_copies_all_status_sync_terminal_receipts(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            audit, receipt_paths = self.scaffold_closed_status_sync_intakes(
+                module, memory
+            )
+            self.assertEqual(audit.pending_status_sync_intakes(memory), [])
+            refresh_id = "refresh-" + "4" * 24
+            plan = {
+                "refresh_id": refresh_id,
+                "plan_id": "sha256:" + "5" * 64,
+                "staging_contract_version": module.STAGING_CONTRACT_VERSION,
+                "source_fingerprints": module.source_inventory(memory),
+                "nodes": [],
+            }
+            workspace = module.workspace_for(memory, refresh_id)
+
+            staged = module.prepare_staging(memory, workspace, plan)
+            manifest = module.load_json(workspace / "input-manifest.json")
+            rows = {row["path"]: row for row in manifest["files"]}
+
+            self.assertEqual(audit.pending_status_sync_intakes(staged), [])
+            for receipt_path in receipt_paths:
+                relative = receipt_path.relative_to(memory).as_posix()
+                self.assertIn(relative, plan["source_fingerprints"])
+                self.assertEqual(
+                    rows[relative]["source_type"],
+                    "status-sync-terminal-receipt",
+                )
+                self.assertTrue((staged / relative).is_file())
+
+            receipt_relatives = {
+                path.relative_to(memory).as_posix() for path in receipt_paths
+            }
+            legacy_rows = [
+                row for row in manifest["files"] if row["path"] not in receipt_relatives
+            ]
+            legacy_body = {
+                "schema_version": "1.0.0",
+                "refresh_id": plan["refresh_id"],
+                "plan_id": plan["plan_id"],
+                "declared_source_fingerprints": {
+                    path: digest
+                    for path, digest in plan["source_fingerprints"].items()
+                    if path not in receipt_relatives
+                },
+                "files": legacy_rows,
+                "file_count": len(legacy_rows),
+                "total_bytes": sum(row["size"] for row in legacy_rows),
+            }
+            module.atomic_json(
+                workspace / "input-manifest.json",
+                {
+                    **legacy_body,
+                    "input_manifest_id": module.content_id(legacy_body),
+                },
+            )
+            for relative in receipt_relatives:
+                (staged / relative).unlink()
+            self.assertEqual(len(audit.pending_status_sync_intakes(staged)), 3)
+
+            resumed = module.prepare_staging(memory, workspace, plan)
+            resumed_manifest = module.load_json(workspace / "input-manifest.json")
+            resumed_rows = {row["path"]: row for row in resumed_manifest["files"]}
+
+            self.assertEqual(resumed, staged)
+            self.assertEqual(audit.pending_status_sync_intakes(resumed), [])
+            self.assertTrue(receipt_relatives.issubset(resumed_rows))
+            self.assertEqual(
+                resumed_manifest["declared_source_fingerprints"],
+                plan["source_fingerprints"],
+            )
+
+    def test_apply_replans_and_supersedes_precontract_dirty_workspace(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            memory = self.scaffold(root).resolve()
+            intake_root = memory / "intake/status-sync"
+            intake_root.mkdir(parents=True)
+            payloads = {
+                "execution.json": {
+                    "updates": [{"id": "ws-execution", "progress": "closed"}]
+                },
+                "partial.json": {
+                    "updates": [{"id": "ws-partial", "progress": "closed"}]
+                },
+                "retirement.json": {
+                    "updates": [{"id": "ws-retirement", "progress": "retired"}]
+                },
+            }
+            for name, payload in payloads.items():
+                (intake_root / name).write_text(
+                    json.dumps(payload) + "\n",
+                    encoding="utf-8",
+                )
+            planned = module.plan_refresh(
+                module.parse_args(
+                    [
+                        "plan",
+                        str(root),
+                        "--fixture",
+                        "--force-full",
+                        "--as-of",
+                        "2026-08-10",
+                    ]
+                ),
+                root,
+                memory,
+            )
+            old_path = Path(planned["plan_path"])
+            old_plan = module.load_json(old_path)
+            old_plan.pop("staging_contract_version", None)
+            old_plan["status"] = "dirty"
+            old_plan["retry_from_instance_key"] = "management-panel"
+            old_plan["nodes"][0].update(
+                {"status": "blocked", "error": "pre-fix staging blocker"}
+            )
+            module.atomic_json(old_path, old_plan)
+            old_workspace = module.workspace_for(memory, old_plan["refresh_id"])
+            old_staged = module.prepare_staging(memory, old_workspace, old_plan)
+            self.assertFalse((old_staged / "receipts/status-sync/execution.json").exists())
+            module.atomic_json(
+                memory / module.STATUS_REL,
+                {
+                    "current_run_id": old_plan["refresh_id"],
+                    "current_status": "dirty",
+                    "retry_from_instance_key": "management-panel",
+                    "last_error": "pre-fix staging blocker",
+                },
+            )
+            audit, receipt_paths = self.scaffold_closed_status_sync_intakes(
+                module, memory
+            )
+            self.assertEqual(audit.pending_status_sync_intakes(memory), [])
+
+            applied = module.apply_refresh(
+                module.parse_args(
+                    ["apply", str(root), "--plan", str(old_path)]
+                ),
+                root,
+                memory,
+            )
+
+            self.assertEqual(applied["status"], "published")
+            self.assertNotEqual(applied["refresh_id"], old_plan["refresh_id"])
+            superseded = module.load_json(old_path)
+            self.assertEqual(superseded["status"], "superseded")
+            self.assertFalse((old_workspace / "memory").exists())
+            self.assertTrue(module.verify_evidence_archive(memory, superseded)[0])
+            replacement_path = (
+                memory / module.RUNS_REL / f"{applied['refresh_id']}.json"
+            )
+            replacement = module.load_json(replacement_path)
+            self.assertEqual(
+                replacement["inventory_replanned_from_refresh_id"],
+                old_plan["refresh_id"],
+            )
+            self.assertEqual(
+                replacement["staging_contract_version"],
+                module.STAGING_CONTRACT_VERSION,
+            )
+            for receipt_path in receipt_paths:
+                self.assertIn(
+                    receipt_path.relative_to(memory).as_posix(),
+                    replacement["source_fingerprints"],
+                )
 
     def test_superseded_run_archives_evidence_and_removes_full_memory_clone(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

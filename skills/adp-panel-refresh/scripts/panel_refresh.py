@@ -58,6 +58,7 @@ PRUNABLE_RUN_STATUSES = {"published", "superseded", "abandoned"}
 DEFAULT_STAGING_MAX_TOTAL_GB = 2
 DEFAULT_KEEP_SUPERSEDED_DAYS = 7
 DEFAULT_KEEP_PUBLISHED_RUNS = 1
+STAGING_CONTRACT_VERSION = "2.0.0"
 SOURCE_PREFIXES = (
     "actions/",
     "cadence.md",
@@ -77,6 +78,11 @@ SOURCE_FILES = (
     "index.md",
     "project-charter.md",
 )
+STATUS_SYNC_TERMINAL_RECEIPT_DIRS = {
+    "receipts/status-sync",
+    "receipts/status-sync-partial-closure",
+    "receipts/status-sync-retirement",
+}
 DERIVED_PREFIXES = ("audits/", "snapshots/", "views/")
 PUBLISHABLE_STATE_PREFIXES = (
     "state/management-panel",
@@ -273,6 +279,14 @@ def effective_config_inventory(project_root: Path) -> dict[str, str]:
     return inventory
 
 
+def is_status_sync_terminal_receipt(relative: str | Path) -> bool:
+    path = Path(relative)
+    return (
+        path.suffix.lower() == ".json"
+        and path.parent.as_posix() in STATUS_SYNC_TERMINAL_RECEIPT_DIRS
+    )
+
+
 def source_inventory(
     memory_root: Path,
     project_root: Path | None = None,
@@ -288,9 +302,14 @@ def source_inventory(
             part.startswith(".") for part in Path(relative).parts
         ):
             continue
-        if relative in SOURCE_FILES or relative == "state/status-intent-outbox.json" or any(
-            relative == prefix or relative.startswith(prefix)
-            for prefix in SOURCE_PREFIXES
+        if (
+            relative in SOURCE_FILES
+            or relative == "state/status-intent-outbox.json"
+            or is_status_sync_terminal_receipt(relative)
+            or any(
+                relative == prefix or relative.startswith(prefix)
+                for prefix in SOURCE_PREFIXES
+            )
         ):
             inventory[relative] = file_fingerprint(path)
     if project_root is not None:
@@ -958,6 +977,7 @@ def supersede_stale_nonterminal_plan(
             "fde_period_start",
             "fde_period_end",
             "selection_policy_id",
+            "staging_contract_version",
             "fixture",
             "mode",
         )
@@ -1054,6 +1074,7 @@ def plan_refresh(args: argparse.Namespace, project_root: Path, memory_root: Path
             "audit_binding_checkpoint_required"
         ],
         "fixture": bool(args.fixture),
+        "staging_contract_version": STAGING_CONTRACT_VERSION,
         "source_fingerprints": detection["source_fingerprints"],
         "changed_sources": detection["changed_sources"],
         "pending_intent_ids": detection["pending_intent_ids"],
@@ -1255,7 +1276,17 @@ def staging_input_inventory(memory_root: Path, plan: dict[str, Any]) -> dict[Pat
     selected: dict[Path, str] = {}
     del plan
     for relative in source_inventory(memory_root):
-        add_staging_input(selected, memory_root, memory_root / str(relative), "canonical-fact")
+        source_type = (
+            "status-sync-terminal-receipt"
+            if is_status_sync_terminal_receipt(relative)
+            else "canonical-fact"
+        )
+        add_staging_input(
+            selected,
+            memory_root,
+            memory_root / str(relative),
+            source_type,
+        )
 
     views_root = memory_root / "views"
     for path in sorted(views_root.rglob("*")) if views_root.is_dir() else []:
@@ -1307,12 +1338,7 @@ def write_staging_input_manifest(
     selected: dict[Path, str],
 ) -> dict[str, Any]:
     copied = [
-        {
-            "path": relative.as_posix(),
-            "sha256": file_fingerprint(memory_root / relative),
-            "size": (memory_root / relative).stat().st_size,
-            "source_type": source_type,
-        }
+        staging_manifest_row(memory_root, relative, source_type)
         for relative, source_type in selected.items()
     ]
     body = {
@@ -1329,18 +1355,143 @@ def write_staging_input_manifest(
     return manifest
 
 
+def staging_manifest_row(
+    memory_root: Path,
+    relative: Path,
+    source_type: str,
+) -> dict[str, Any]:
+    source = memory_root / relative
+    return {
+        "path": relative.as_posix(),
+        "sha256": file_fingerprint(source),
+        "size": source.stat().st_size,
+        "source_type": source_type,
+    }
+
+
+def atomic_copy_file(source: Path, target: Path, staging_root: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.parent.resolve().relative_to(staging_root.resolve())
+    except ValueError as exc:
+        raise RefreshError(
+            "REFRESH_STAGING_INVALID",
+            f"staging input parent escapes workspace: {target}",
+        ) from exc
+    descriptor, raw_temp = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(raw_temp)
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def rehydrate_status_sync_terminal_receipts(
+    memory_root: Path,
+    staged: Path,
+    workspace: Path,
+    plan: dict[str, Any],
+    selected: dict[Path, str],
+) -> None:
+    expected = {
+        relative: staging_manifest_row(memory_root, relative, source_type)
+        for relative, source_type in selected.items()
+        if source_type == "status-sync-terminal-receipt"
+    }
+    if not expected:
+        return
+    manifest_path = workspace / "input-manifest.json"
+    manifest = load_optional_json(manifest_path)
+    body = dict(manifest)
+    manifest_id = body.pop("input_manifest_id", None)
+    if (
+        manifest_id != content_id(body)
+        or manifest.get("refresh_id") != plan.get("refresh_id")
+        or manifest.get("plan_id") != plan.get("plan_id")
+        or not isinstance(manifest.get("files"), list)
+    ):
+        raise RefreshError(
+            "REFRESH_STAGING_MANIFEST_INVALID",
+            "existing staging input manifest is missing or invalid; create a replacement plan",
+        )
+    rows: dict[str, dict[str, Any]] = {}
+    for row in manifest["files"]:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise RefreshError(
+                "REFRESH_STAGING_MANIFEST_INVALID",
+                "existing staging input manifest contains an invalid file row",
+            )
+        rows[row["path"]] = row
+
+    changed = False
+    plan_sources = (
+        plan.get("source_fingerprints")
+        if isinstance(plan.get("source_fingerprints"), dict)
+        else {}
+    )
+    for relative, expected_row in expected.items():
+        relative_text = relative.as_posix()
+        if plan_sources.get(relative_text) != expected_row["sha256"]:
+            raise RefreshError(
+                "REFRESH_STAGING_SOURCE_UNBOUND",
+                f"status-sync terminal receipt is not bound by the refresh plan: {relative_text}",
+            )
+        source = memory_root / relative
+        target = staged / relative
+        if (
+            target.is_symlink()
+            or not target.is_file()
+            or optional_file_fingerprint(target) != expected_row["sha256"]
+        ):
+            atomic_copy_file(source, target, staged)
+            changed = True
+        if rows.get(relative_text) != expected_row:
+            rows[relative_text] = expected_row
+            changed = True
+
+    if not changed and manifest.get("declared_source_fingerprints") == plan_sources:
+        return
+    files = [rows[key] for key in sorted(rows)]
+    updated_body = {
+        "schema_version": "1.0.0",
+        "refresh_id": plan.get("refresh_id"),
+        "plan_id": plan.get("plan_id"),
+        "declared_source_fingerprints": plan_sources,
+        "files": files,
+        "file_count": len(files),
+        "total_bytes": sum(int(item.get("size") or 0) for item in files),
+    }
+    atomic_json(
+        manifest_path,
+        {**updated_body, "input_manifest_id": content_id(updated_body)},
+    )
+
+
 def prepare_staging(memory_root: Path, workspace: Path, plan: dict[str, Any]) -> Path:
     expected_workspace = workspace_for(memory_root, str(plan.get("refresh_id") or ""))
     if workspace.resolve(strict=False) != expected_workspace.resolve(strict=False):
         raise RefreshError("REFRESH_STAGING_INVALID", "refresh workspace is outside its durable staging slot")
     staged = workspace / "memory"
     metadata = workspace / "plan-id"
+    selected = staging_input_inventory(memory_root, plan)
     if staged.is_dir():
         if not metadata.is_file() or metadata.read_text(encoding="utf-8").strip() != plan["plan_id"]:
             raise RefreshError("REFRESH_STAGING_CONFLICT", f"staging belongs to another plan: {workspace}")
+        rehydrate_status_sync_terminal_receipts(
+            memory_root,
+            staged,
+            workspace,
+            plan,
+            selected,
+        )
         return staged
     workspace.mkdir(parents=True, exist_ok=True)
-    selected = staging_input_inventory(memory_root, plan)
     staged.mkdir(parents=True)
     for relative in selected:
         source = memory_root / relative
@@ -3093,6 +3244,88 @@ def validate_plan_freshness(memory_root: Path, plan: dict[str, Any], plan_path: 
         )
 
 
+def source_binding_mismatch_paths(
+    expected: Any,
+    live: dict[str, str],
+) -> list[str]:
+    prior = expected if isinstance(expected, dict) else {}
+    return sorted(
+        path
+        for path in set(prior) | set(live)
+        if prior.get(path) != live.get(path)
+    )
+
+
+def status_sync_receipt_only_source_change(
+    expected: Any,
+    live: dict[str, str],
+) -> bool:
+    mismatches = source_binding_mismatch_paths(expected, live)
+    return bool(mismatches) and all(
+        is_status_sync_terminal_receipt(path) for path in mismatches
+    )
+
+
+def replacement_plan_args(
+    args: argparse.Namespace,
+    plan: dict[str, Any],
+) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(
+        {
+            "operation": "plan",
+            "plan": None,
+            "as_of": plan.get("source_as_of"),
+            "period_start": plan.get("period_start"),
+            "period_end": plan.get("period_end"),
+            "fde_period_start": plan.get("fde_period_start"),
+            "fde_period_end": plan.get("fde_period_end"),
+            "fixture": bool(plan.get("fixture")),
+            "force_full": True,
+        }
+    )
+    if not values.get("selection_policy"):
+        values["selection_policy"] = (
+            plan.get("selection_policy")
+            if plan.get("selection_policy_source") in {"explicit", "staged"}
+            else None
+        )
+    return argparse.Namespace(**values)
+
+
+def controlled_inventory_replan(
+    args: argparse.Namespace,
+    project_root: Path,
+    memory_root: Path,
+    plan: dict[str, Any],
+    reason: str,
+) -> tuple[dict[str, Any], Path]:
+    previous_refresh_id = str(plan.get("refresh_id") or "")
+    replacement = plan_refresh(
+        replacement_plan_args(args, plan),
+        project_root,
+        memory_root,
+    )
+    replacement_path = Path(str(replacement.get("plan_path") or "")).resolve()
+    replacement_plan = load_json(replacement_path)
+    if replacement_plan.get("refresh_id") == previous_refresh_id:
+        raise RefreshError(
+            "REFRESH_STAGING_REPLAN_FAILED",
+            "staging inventory migration did not create a replacement refresh plan",
+        )
+    replacement_plan.update(
+        {
+            "inventory_replanned_from_refresh_id": previous_refresh_id,
+            "inventory_replan_reason": reason,
+            "inventory_replanned_at": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+        }
+    )
+    atomic_json(replacement_path, replacement_plan)
+    return replacement_plan, replacement_path
+
+
 def flow_graph_node_state(plan: dict[str, Any]) -> dict[str, Any] | None:
     nodes = plan.get("nodes")
     if not isinstance(nodes, list):
@@ -3254,6 +3487,27 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
             "REFRESH_PLAN_SUPERSEDED",
             "refresh plan was replaced by a newer confirmed plan; apply its replacement plan",
         )
+    live = source_inventory(memory_root, project_root)
+    if plan.get("status") in ACTIVE_RUN_STATUSES and (
+        plan.get("staging_contract_version") != STAGING_CONTRACT_VERSION
+        or status_sync_receipt_only_source_change(
+            plan.get("source_fingerprints"),
+            live,
+        )
+    ):
+        reason = (
+            "panel-refresh staging contract upgraded to include status-sync terminal receipts"
+            if plan.get("staging_contract_version") != STAGING_CONTRACT_VERSION
+            else "status-sync terminal receipt binding changed after refresh planning"
+        )
+        plan, plan_path = controlled_inventory_replan(
+            args,
+            project_root,
+            memory_root,
+            plan,
+            reason,
+        )
+        live = source_inventory(memory_root, project_root)
     if plan.get("blocked_reasons"):
         raise RefreshError("REFRESH_PLAN_BLOCKED", "; ".join(plan["blocked_reasons"]))
     if plan.get("status") == "awaiting-policy":
@@ -3268,7 +3522,6 @@ def apply_refresh(args: argparse.Namespace, project_root: Path, memory_root: Pat
             workspace_for(memory_root, plan["refresh_id"]) / "memory",
             next_status="planned",
         )
-    live = source_inventory(memory_root, project_root)
     if live != plan.get("source_fingerprints"):
         raise RefreshError("SOURCE_CHANGED_SINCE_PLAN", "bound sources changed after refresh planning; run plan again")
     if not plan.get("fixture"):

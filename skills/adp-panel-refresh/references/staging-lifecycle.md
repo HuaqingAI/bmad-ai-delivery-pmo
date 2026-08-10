@@ -6,9 +6,12 @@ Panel Refresh staging is disposable execution state, not durable project memory.
 - current non-Panel projections;
 - the latest current meeting pack per scenario;
 - Program Status history needed for policy selection;
-- the last publication binding and only the audit records referenced by copied projections or that receipt.
+- the last publication binding and only the audit records referenced by copied projections or that receipt;
+- all JSON terminal-closure evidence under `receipts/status-sync/`, `receipts/status-sync-partial-closure/`, and `receipts/status-sync-retirement/`.
 
-`input-manifest.json` records every copied relative path, SHA-256, size, source type, the plan's declared source fingerprints, and a content ID. Old receipts, transactions, unrelated audits, Management Panel bundles, and prior inspect output are excluded.
+`input-manifest.json` records every copied relative path, SHA-256, size, source type, the plan's declared source fingerprints, and a content ID. Status-sync terminal receipts are plan-bound sources with source type `status-sync-terminal-receipt`; they are not optional historical receipts because state audit needs them to prove canonical intake closure. Other old receipts, transactions, unrelated audits, Management Panel bundles, and prior inspect output remain excluded.
+
+A staging contract version binds this coverage. Applying an active pre-contract plan performs a controlled full replan: the old dirty workspace is superseded, archived, and memory-pruned, while the replacement plan binds the terminal receipts and starts again from state audit. For a current-contract workspace whose valid manifest is only missing bound terminal receipt rows/files, `prepare_staging` atomically rehydrates those receipts and updates the manifest; operators never delete the workspace manually.
 
 ## Terminal evidence
 
